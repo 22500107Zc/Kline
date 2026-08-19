@@ -1,0 +1,20 @@
+{
+  "name": "kiln",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Kiln \u2014 an open source 3D modeling application. A browser-native alternative to Blender.",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=.test-build --log-level=warning && node --test '.test-build/*.test.js'"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "esbuild": "^0.24.0"
+  }
+}
