@@ -440,3 +440,33 @@ export function rayPlane(o: Vec3, d: Vec3, p: Vec3, n: Vec3): number | null {
   if (Math.abs(denom) < 1e-9) return null;
   return p.sub(o).dot(n) / denom;
 }
+
+/** Split a transform matrix into translation, XYZ euler rotation and scale. */
+export function decomposeMatrix(mat: Mat4): { position: Vec3; rotation: Vec3; scale: Vec3 } {
+  const m = mat.m;
+  const position = new Vec3(m[12], m[13], m[14]);
+  let sx = Math.hypot(m[0], m[1], m[2]);
+  const sy = Math.hypot(m[4], m[5], m[6]);
+  const sz = Math.hypot(m[8], m[9], m[10]);
+  if (mat.determinant() < 0) sx = -sx;
+  const scale = new Vec3(sx || 1e-8, sy || 1e-8, sz || 1e-8);
+
+  const r = [
+    m[0] / scale.x, m[1] / scale.x, m[2] / scale.x,
+    m[4] / scale.y, m[5] / scale.y, m[6] / scale.y,
+    m[8] / scale.z, m[9] / scale.z, m[10] / scale.z,
+  ];
+  // Column-major: r[col * 3 + row]. Matches Mat4.rotationEuler's Rz * Ry * Rx.
+  const r20 = r[2], r21 = r[5], r22 = r[8], r10 = r[1], r00 = r[0], r12 = r[7], r11 = r[4];
+  const b = Math.asin(clamp(-r20, -1, 1));
+  let a: number;
+  let c: number;
+  if (Math.abs(r20) < 0.99999) {
+    a = Math.atan2(r21, r22);
+    c = Math.atan2(r10, r00);
+  } else {
+    a = Math.atan2(-r12, r11);
+    c = 0;
+  }
+  return { position, rotation: new Vec3(a, b, c), scale };
+}
