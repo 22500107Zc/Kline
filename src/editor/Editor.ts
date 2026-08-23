@@ -880,9 +880,12 @@ export class Editor {
     const moved = Math.hypot(p.x - this.pointer.startX, p.y - this.pointer.startY);
     if (moved > 3) this.pointer.dragging = true;
 
-    if (this.pointer.button === 1) {
+    // A trackpad has no middle button, so Alt (Option) with the left button
+    // drives navigation too. Alt+click without a drag still selects a loop.
+    const navigating = this.pointer.button === 1 || (this.pointer.button === 0 && e.altKey);
+    if (navigating) {
       if (e.shiftKey) this.camera.pan(dx, dy, this.canvas.clientHeight);
-      else if (e.ctrlKey) this.camera.zoom(-dy * 0.02);
+      else if (e.ctrlKey || e.metaKey) this.camera.zoom(-dy * 0.02);
       else this.camera.orbit(dx * 0.008, dy * 0.008);
       this.requestRender();
     } else if (this.pointer.button === 0 && this.pointer.dragging) {
@@ -928,7 +931,15 @@ export class Editor {
       this.emit('modal');
       return;
     }
-    this.camera.zoom(e.deltaY < 0 ? 1 : -1);
+    if (e.shiftKey) {
+      // Two-finger scroll with Shift pans, the way it does in most 3D apps.
+      this.camera.pan(-e.deltaX, -e.deltaY, this.canvas.clientHeight);
+    } else if (e.ctrlKey || e.metaKey) {
+      // Trackpad pinch arrives as a wheel event with ctrlKey set.
+      this.camera.zoom(-e.deltaY * 0.05);
+    } else {
+      this.camera.zoom(e.deltaY < 0 ? 1 : -1);
+    }
     this.requestRender();
   }
 

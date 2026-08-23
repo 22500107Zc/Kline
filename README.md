@@ -183,8 +183,17 @@ and all readable in an afternoon.
 | `.` `Home` | Frame selected, frame all |
 | `Ctrl+Z` `Ctrl+Shift+Z` | Undo, redo |
 
-Middle-drag orbits, `Shift`+middle pans, the wheel zooms, `Shift`+right click
-places the 3D cursor. The full list lives behind **Shortcuts** in the menu bar.
+### Moving around the viewport
+
+| Trackpad | Mouse | |
+|---|---|---|
+| `Option` + drag | Middle-drag | Orbit |
+| `Option`+`Shift` + drag, or `Shift` + two-finger scroll | `Shift` + middle-drag | Pan |
+| Two-finger scroll, or pinch | Wheel | Zoom |
+
+`Shift` + right click places the 3D cursor. `.` frames what is selected and
+`Home` frames everything — handy when you have lost the object off screen. The
+full list lives behind **Shortcuts** in the menu bar.
 
 ## How it is built
 

@@ -53,7 +53,7 @@ export class App {
     this.editor.on('change', () => this.syncModalChrome());
     this.syncModalChrome();
     this.editor.start();
-    this.editor.setStatus('Ready — MMB orbits, Shift+MMB pans, wheel zooms');
+    this.editor.setStatus('Ready — Option+drag orbits, Option+Shift+drag pans, scroll zooms');
   }
 
   private syncModalChrome(): void {
@@ -193,14 +193,16 @@ export class App {
     grid.appendChild(h('div', { class: 'shortcut-group' }, [
       h('h3', { text: 'Mouse' }),
       ...[
+        ['Option + drag', 'Orbit — trackpad friendly'],
+        ['Option + Shift + drag', 'Pan'],
+        ['Scroll / pinch', 'Zoom'],
+        ['Shift + scroll', 'Pan'],
+        ['Middle drag', 'Orbit (with a mouse)'],
+        ['Shift + middle', 'Pan'],
         ['Left click', 'Select'],
         ['Left drag', 'Box select'],
         ['Shift + click', 'Extend selection'],
         ['Alt + click', 'Select edge ring (Edit Mode)'],
-        ['Middle drag', 'Orbit'],
-        ['Shift + middle', 'Pan'],
-        ['Ctrl + middle', 'Zoom'],
-        ['Wheel', 'Zoom'],
         ['Shift + right click', 'Place 3D cursor'],
       ].map(([k, v]) => h('div', { class: 'shortcut-row' }, [h('kbd', { text: k }), h('span', { text: v })])),
     ]));
