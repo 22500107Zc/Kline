@@ -3,8 +3,9 @@ import { Editor } from '../editor/Editor';
 import { describePlan, executePlan } from '../build/plan';
 import { interpret, knownSubjects } from '../build/interpreter';
 import {
-  LLMConfig, PROVIDER_DEFAULTS, ProviderKind, generatePlan, loadConfig, probeProvider, saveConfig,
+  LLMConfig, PROVIDER_DEFAULTS, ProviderKind, generateProgram, loadConfig, probeProvider, saveConfig,
 } from '../build/llm';
+import { DEFAULT_LIMITS, RunResult, runProgramSandboxed } from '../build/sandbox';
 import { button, clear, h, row, select } from './dom';
 
 /**
@@ -19,8 +20,11 @@ export class BuildBar {
 
   private input = h('input', {
     class: 'build-input', type: 'text',
-    placeholder: 'Build something — "a wooden table", "12 cubes in a circle", "a castle"',
+    placeholder: 'Build anything — "a spiral staircase", "a gear with 24 teeth", "a wooden table"',
   });
+  private codePanel = h('div', { class: 'build-code hidden' });
+  private codeArea = h('textarea', { class: 'code-area' });
+  private codeLog = h('pre', { class: 'code-log' });
   private note = h('div', { class: 'build-note' });
   private settings = h('div', { class: 'build-settings hidden' });
   private statusChip = h('button', { class: 'build-chip', title: 'Local model settings' });
@@ -47,9 +51,11 @@ export class BuildBar {
         h('span', { class: 'build-mark', text: 'Build' }),
         this.input,
         button('Go', () => void this.run(), { class: 'primary build-go' }),
+        button('Code', () => this.toggleCode(), { title: 'Show and edit the program that builds it' }),
         this.statusChip,
       ]),
       this.note,
+      this.buildCodePanel(),
       this.settings,
     );
     this.setChip('offline recipes', 'idle');
@@ -63,9 +69,38 @@ export class BuildBar {
 
   private showHint(): void {
     const subjects = knownSubjects();
-    const sample = ['table', 'chair', 'house', 'tree', 'castle', 'robot', 'snowman', 'rocket'];
-    this.note.textContent =
-      `Knows ${subjects.length} things out of the box (${sample.join(', ')}…), plus "N shapes in a row / circle / stack / grid".`;
+    this.note.textContent = this.modelReady
+      ? `${this.config.model} writes the program; press Code to read or edit it.`
+      : `Anything at all needs a model — press the chip to connect one. Without it: ${subjects.length} built-in subjects, shape arrangements, or your own code under Code.`;
+  }
+
+  private buildCodePanel(): HTMLElement {
+    this.codeArea.spellcheck = false;
+    this.codeArea.placeholder =
+      "// Write a program, or press Go and let a model write one.\n// for (let i = 0; i < 12; i++) {\n//   const a = i / 12 * TAU;\n//   cyl(cos(a) * 2, sin(a) * 2, 1, 0.3, 0.3, 2, '#8b5e34');\n// }";
+    this.codeArea.addEventListener('keydown', (e) => {
+      if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        void this.runCode(this.codeArea.value, 'your code');
+      }
+    });
+    this.codePanel.append(
+      this.codeArea,
+      h('div', { class: 'btn-row' }, [
+        button('Run', () => void this.runCode(this.codeArea.value, 'your code'), { class: 'primary' }),
+        button('Copy', () => void navigator.clipboard?.writeText(this.codeArea.value)),
+        button('Hide', () => this.toggleCode()),
+      ]),
+      h('p', { class: 'dim small', text: 'Cmd/Ctrl+Enter runs it. Runs in a sandbox with no network and a 3 second limit.' }),
+      this.codeLog,
+    );
+    return this.codePanel;
+  }
+
+  private toggleCode(): void {
+    this.codePanel.classList.toggle('hidden');
+    if (!this.codePanel.classList.contains('hidden')) this.codeArea.focus();
   }
 
   private setChip(text: string, state: 'ok' | 'bad' | 'idle' | 'busy'): void {
@@ -83,48 +118,75 @@ export class BuildBar {
       return;
     }
 
-    const offline = interpret(prompt);
-    if (offline.plan && !this.preferModel) {
-      this.apply(offline.plan, prompt);
-      return;
-    }
-
+    // With a model connected, everything goes through generated code — that is
+    // what makes arbitrary requests possible. Without one, fall back to the
+    // built-in subjects so the box is never simply dead.
     if (this.modelReady) {
-      await this.runModel(prompt, offline.plan ? () => this.apply(offline.plan!, prompt) : null);
+      await this.runModel(prompt);
       return;
     }
 
+    const offline = interpret(prompt);
     if (offline.plan) {
       this.apply(offline.plan, prompt);
+      this.note.textContent += '  Connect a model (the chip on the right) to build things with no built-in recipe.';
       return;
     }
-    this.note.textContent = offline.reason ?? 'Could not build that.';
-    this.editor.setStatus('Nothing built — no recipe matched and no model is connected');
+    this.note.textContent = `${offline.reason ?? 'Could not build that.'}`;
+    this.editor.setStatus('Nothing built — connect a local model to build anything');
   }
 
-  private async runModel(prompt: string, fallback: (() => void) | null): Promise<void> {
+  private async runModel(prompt: string): Promise<void> {
     const controller = new AbortController();
     this.running = controller;
-    this.setChip('thinking…', 'busy');
-    this.note.textContent = `Asking ${this.config.model}…`;
+    this.setChip('writing code…', 'busy');
+    this.note.textContent = `${this.config.model} is writing a program…`;
+
+    let result: RunResult | null = null;
+    const verify = async (code: string): Promise<void> => {
+      result = await runProgramSandboxed(code, DEFAULT_LIMITS);
+    };
+
     try {
-      const result = await generatePlan(this.config, prompt, controller.signal);
-      this.apply(result.plan, prompt, `${result.seconds.toFixed(1)}s`);
-      if (result.warnings.length) {
-        this.note.textContent += `  (${result.warnings.slice(0, 2).join(' ')})`;
-      }
+      const program = await generateProgram(this.config, prompt, verify, controller.signal);
+      this.codeArea.value = program.code;
+      const run = result as RunResult | null;
+      if (!run) throw new Error('The program produced nothing.');
+      this.apply(
+        { name: prompt.slice(0, 30), parts: run.parts, source: `${this.config.model}` },
+        prompt,
+        `${program.seconds.toFixed(1)}s`,
+      );
+      this.codeLog.textContent = run.log.join('\n');
       this.setChip(this.config.model, 'ok');
     } catch (err) {
       const aborted = (err as Error).name === 'AbortError';
       this.setChip(this.config.model, aborted ? 'idle' : 'bad');
-      if (fallback) {
-        fallback();
-        this.note.textContent += `  (the model failed, used a built-in recipe: ${(err as Error).message})`;
-      } else {
-        this.note.textContent = aborted ? 'Cancelled.' : (err as Error).message;
+      this.note.textContent = aborted ? 'Cancelled.' : (err as Error).message;
+      if (!aborted && this.codeArea.value) {
+        this.codePanel.classList.remove('hidden');
+        this.codeLog.textContent = 'The last program is above — you can fix it and press Run.';
       }
     } finally {
       this.running = null;
+    }
+  }
+
+  /** Run whatever is in the code box, whether a model or a person wrote it. */
+  private async runCode(code: string, source: string): Promise<void> {
+    if (!code.trim()) return;
+    this.codeLog.textContent = '';
+    try {
+      const run = await runProgramSandboxed(code, DEFAULT_LIMITS);
+      this.apply(
+        { name: this.input.value.trim().slice(0, 30) || 'Program', parts: run.parts, source },
+        this.input.value.trim() || 'program',
+        `${run.ms}ms`,
+      );
+      this.codeLog.textContent = run.log.join('\n');
+    } catch (err) {
+      this.codeLog.textContent = (err as Error).message;
+      this.editor.setStatus(`The program did not run: ${(err as Error).message}`);
     }
   }
 
@@ -217,6 +279,7 @@ export class BuildBar {
     this.modelReady = result.ok;
     if (result.ok) {
       this.setChip(this.config.model, 'ok');
+      this.showHint();
       const known = result.models.includes(this.config.model);
       if (detail) {
         detail.textContent = known || result.models.length === 0

@@ -64,55 +64,65 @@ modules over `file://`.
 
 ## Just say what you want
 
-There is a **Build** box across the top of the viewport. Type into it and press
-Enter.
+There is a **Build** box across the top of the viewport. Type into it, press
+Enter, and a model writes a short program that builds what you asked for.
 
 ```
-a wooden table          a castle             12 cubes in a circle
-a tall red tower        a snowman            stack of 8 blue spheres
-stairs with 20 steps    a house              9 cylinders in a grid
+a spiral staircase with 30 steps      a gear with 24 teeth
+a suspension bridge                    a chess rook
+a city block of towers                 a DNA double helix
 ```
 
-Twenty-one subjects are built in — table, chair, stool, bench, bookshelf, bed,
-sofa, lamp, tower, stairs, wall, fence, house, tree, snowman, robot, rocket,
-car, castle, pyramid, arch — plus any shape arranged in a row, circle, stack,
-grid or scatter. Colours ("red", "#3fb5c4"), sizes ("tiny", "huge", "tall") and
-counts all work. Each build lands as a group of ordinary editable meshes.
+![Two 24-tooth gears and a sphere helix, built from generated programs](docs/build-from-code.png)
 
-**This costs nothing and needs nothing.** No account, no key, no network, no
-model: it is a parser and a set of procedural recipes, and it answers in under a
-millisecond. That is deliberate — the common cases should never depend on
-somebody's server being up.
+The program is real code against a small geometry API — `box`, `cyl`,
+`sphere`, `cone`, `torus`, `part`, plus loops and trigonometry — so the ceiling
+is what the model can express, not a list somebody wrote in advance. Press
+**Code** to read it, edit it and re-run. A gear is a loop; a staircase is a
+loop; a city is a nested loop. That is why this is code and not a menu.
 
-### Connecting a model for everything else
+Generated code is untrusted, so it runs in a Worker with `fetch`, storage and
+the DOM removed, a part budget and a three-second limit — an infinite loop gets
+terminated instead of freezing the app. All it can do is return a list of
+primitives, which goes through the same validator as everything else.
 
-Ask for a dragon and the recipes will tell you honestly that they cannot. To
-cover the long tail, point Kiln at a model you run yourself — click the chip at
-the right of the Build box.
+### You need a model for this
 
-**Ollama is the only genuinely free-forever option**, because it runs on your
-machine:
+Arbitrary requests need something that can write arbitrary programs. **Ollama
+is the only genuinely free-forever option**, because it runs on your machine:
 
 ```bash
 # install Ollama, then:
-ollama pull llama3.2
+ollama pull qwen2.5-coder:7b     # or llama3.2 on a smaller machine
 ollama serve
 ```
 
-Kiln defaults to `http://127.0.0.1:11434`. Press **Connect**, and anything the
-recipes do not recognise goes to the model instead.
+Click the chip at the right of the Build box, press **Connect**, and you are
+done. Kiln defaults to `http://127.0.0.1:11434`.
 
-The other provider is anything speaking the OpenAI chat API — Groq and
-OpenRouter have free tiers, LM Studio and llama.cpp are local. Be aware what
-"free" means there: free tiers are free *today*, rate-limited, and require an
-account. Nobody hosts inference for free indefinitely, so a hosted endpoint is
-not something this README will promise stays free forever.
+Any OpenAI-compatible endpoint works too — Groq and OpenRouter have free tiers,
+LM Studio and llama.cpp are local. Be clear-eyed about hosted "free": those
+tiers are free *today*, rate-limited, and need an account. Nobody serves GPUs
+for nothing indefinitely, so local is the only zero anyone can promise.
 
-A model is asked for the same flat JSON the recipes produce — a list of
-primitives with a position, size and colour — and everything it returns is
-validated, clamped and repaired before it reaches your scene. Small local models
-are unreliable at freeform 3D but tolerable at filling in that schema, which is
-why the schema is that small.
+Coding models do this better than chat models. When one writes something that
+does not run, Kiln hands the error back and asks again — which is usually
+enough.
+
+### Without a model
+
+Two things still work with nothing installed:
+
+- **Write the code yourself.** Press **Code** and use the same API. No model, no
+  network, no cost.
+- **Built-in subjects.** Twenty-one procedural recipes (table, chair, house,
+  tree, castle, robot, rocket, car, snowman, stairs, and so on) plus shape
+  arrangements: `12 cubes in a circle`, `stack of 8 spheres`, `9 cylinders in a
+  grid`. Instant and offline, but a fixed list — which is exactly why the code
+  path exists.
+
+Every build lands as a group of ordinary editable meshes. Tab into Edit Mode and
+keep going.
 
 ## Quick keys
 
@@ -195,9 +205,9 @@ and all readable in an afternoon.
 ## What works today
 
 **Say what you want**
-- A Build box that turns "a wooden table" or "12 cubes in a circle" into geometry
-- 21 procedural subjects plus shape arrangements, all offline and instant
-- Optional bridge to a local Ollama or OpenAI-compatible model for the rest
+- A Build box where a local model writes a program that builds what you asked for
+- A sandboxed geometry API you can also write against by hand, with no model
+- 21 procedural subjects and shape arrangements as the offline fallback
 - Command palette over every operation in the app
 
 **From a reference**
@@ -283,9 +293,10 @@ src/
   ai/client.ts        Client for a local image-to-3D server
   build/              Say-what-you-want
     plan.ts             The build DSL, validation and execution
-    recipes.ts          Procedural subjects
+    sandbox.ts          Geometry API; runs generated code in a locked-down Worker
+    llm.ts              Ollama / OpenAI-compatible code generation
+    recipes.ts          Procedural subjects, for when no model is connected
     interpreter.ts      Offline prompt -> plan
-    llm.ts              Optional Ollama / OpenAI-compatible planners
   modifiers/          Non-destructive stack; each modifier is mesh -> mesh
   scene/              Scene graph, materials, lights, the orbit camera
   render/             WebGL2 forward renderer, GLSL, buffer builders

@@ -38,7 +38,7 @@ fallback. One bundle ships to both targets.
 | Geometry kernel | `src/mesh` | Pure, DOM-free, fully unit tested |
 | Modifiers | `src/modifiers` | Each one is a pure `Mesh -> Mesh` function |
 | Scene graph | `src/scene` | Objects, materials, lights, orbit camera |
-| Build prompt | `src/build` | Pure planner + recipes; unit tested |
+| Build prompt | `src/build` | Planner, sandbox and recipes; unit tested |
 | Reference pipeline | `src/imaging` | Pure, DOM-free except `load.ts`; unit tested |
 | Local model bridge | `src/ai`, `tools/` | Two HTTP endpoints, documented in the server |
 | Renderer | `src/render` | WebGL2 only; GLSL lives in `shaders.ts` |
@@ -58,6 +58,11 @@ generators can be checked without any image files.
 existing ones: take the mesh plus a selection, keep existing face indices stable
 where you can, call `mesh.markDirty()` before returning, and return whatever the
 caller needs to rebuild its selection.
+
+**The sandbox is a security boundary.** Generated code is untrusted. If you add
+to the geometry API, add it to `HARNESS_SOURCE` and to `API_REFERENCE` together
+— a test asserts the documented calls all exist — and never hand the program a
+capability that can reach the network, the DOM or the filesystem.
 
 **A new build recipe is a function and a keyword.** Add it to `RECIPES` in
 `src/build/recipes.ts`; the tests then check automatically that it is reachable

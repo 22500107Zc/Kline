@@ -1,4 +1,5 @@
 import { BUILD_SHAPES, BuildPlan, validatePlan } from './plan';
+import { API_REFERENCE } from './sandbox';
 
 /**
  * Optional model backends for the build prompt.
@@ -241,4 +242,123 @@ export async function generatePlan(
     warnings: result.warnings,
     seconds: (Date.now() - started) / 1000,
   };
+}
+
+
+// ---------------------------------------------------------------- code output
+
+/**
+ * The other way to ask a model for geometry: have it write a short program.
+ *
+ * A flat parts list can only describe what the model can enumerate by hand. A
+ * loop can describe a 40-step spiral staircase, a gear with any tooth count, or
+ * a city block — so this is the path that actually means "build anything", and
+ * the JSON planner stays as the simpler fallback for weaker models.
+ */
+export const CODE_SYSTEM_PROMPT = `You write short JavaScript programs that build 3D models.
+
+Reply with JavaScript only. No prose, no markdown fences, no function wrapper —
+just statements that call the API below. Do not use fetch, imports, or the DOM.
+
+${API_REFERENCE}
+
+Guidance:
+- Build the object out of primitives. Use loops for anything repetitive.
+- Keep it life-sized: a chair seat is ~0.45m up, a door ~2m tall, a car ~4m long.
+- Everything sits at or above z = 0 and is centred on x = 0, y = 0.
+- Aim for 5 to 300 parts. Prefer a loop over a hundred literal calls.
+- Give parts sensible colours.
+
+Example — "a spiral staircase with 30 steps":
+const steps = 30, radius = 1.8;
+for (let i = 0; i < steps; i++) {
+  const a = i / steps * TAU * 1.25;
+  part({ shape: 'cube', at: [cos(a) * radius, sin(a) * radius, i * 0.18 + 0.09],
+         size: [1.3, 0.42, 0.18], rot: [0, 0, a * 180 / PI], color: '#8b5e34' });
+}
+cyl(0, 0, steps * 0.09, 0.24, 0.24, steps * 0.18, '#5a5a5e');`;
+
+/** Pull JavaScript out of a reply that may be fenced or prefaced with prose. */
+export function extractCode(text: string): string {
+  const fenced = [...text.matchAll(/```(?:js|javascript|ts)?\s*([\s\S]*?)```/gi)]
+    .map((m) => m[1].trim())
+    .filter(Boolean);
+  if (fenced.length) return fenced.sort((a, b) => b.length - a.length)[0];
+  // No fences: drop any leading chat before the first line that looks like code.
+  const lines = text.split('\n');
+  const start = lines.findIndex((l) => /^\s*(const|let|var|for|function|part\(|box\(|cyl\(|sphere\(|ball\(|cone\(|torus\(|plane\(|\/\/)/.test(l));
+  return (start >= 0 ? lines.slice(start) : lines).join('\n').trim();
+}
+
+export interface ProgramResult {
+  code: string;
+  seconds: number;
+}
+
+/** Ask the model for a program. Retries once with the error when it does not run. */
+export async function generateProgram(
+  config: LLMConfig,
+  prompt: string,
+  verify: (code: string) => Promise<void>,
+  signal?: AbortSignal,
+): Promise<ProgramResult> {
+  const started = Date.now();
+  const messages = [
+    { role: 'system', content: CODE_SYSTEM_PROMPT },
+    { role: 'user', content: prompt },
+  ];
+
+  let code = extractCode(await chatPlain(config, messages, signal));
+  try {
+    await verify(code);
+    return { code, seconds: (Date.now() - started) / 1000 };
+  } catch (err) {
+    // Handing the model its own error back is what turns a 3B model from
+    // unusable into usable; it fixes its own typos far more often than not.
+    messages.push({ role: 'assistant', content: code.slice(0, 2000) });
+    messages.push({
+      role: 'user',
+      content: `That failed with: ${(err as Error).message}\nReply with corrected JavaScript only.`,
+    });
+    code = extractCode(await chatPlain(config, messages, signal));
+    await verify(code);
+    return { code, seconds: (Date.now() - started) / 1000 };
+  }
+}
+
+/** Same transport as the JSON planner, without forcing a JSON response format. */
+async function chatPlain(
+  config: LLMConfig, messages: { role: string; content: string }[], signal?: AbortSignal,
+): Promise<string> {
+  const base = config.baseUrl.replace(/\/+$/, '');
+  if (config.provider === 'ollama') {
+    const response = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      signal,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: config.model,
+        messages,
+        stream: false,
+        options: { temperature: 0.2 },
+      }),
+    });
+    if (!response.ok) throw new Error(`Ollama answered ${response.status}. Is "${config.model}" pulled?`);
+    const body = (await response.json()) as { message?: { content?: string } };
+    return body.message?.content ?? '';
+  }
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
+  const response = await fetch(`${base}/chat/completions`, {
+    method: 'POST',
+    signal,
+    headers,
+    body: JSON.stringify({ model: config.model, messages, temperature: 0.2 }),
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`The endpoint answered ${response.status}. ${text.slice(0, 160)}`.trim());
+  }
+  const body = (await response.json()) as { choices?: { message?: { content?: string } }[] };
+  return body.choices?.[0]?.message?.content ?? '';
 }

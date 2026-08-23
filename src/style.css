@@ -1263,6 +1263,47 @@ button:disabled {
   margin: 0 0 6px;
 }
 
+.build-code {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--edge);
+}
+
+.build-code.hidden {
+  display: none;
+}
+
+.code-area {
+  width: 100%;
+  min-height: 160px;
+  max-height: 40vh;
+  resize: vertical;
+  padding: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  tab-size: 2;
+  color: var(--ink);
+  background: var(--shell-sunk);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+}
+
+.code-area:focus {
+  outline: none;
+  border-color: var(--ember-deep);
+}
+
+.code-log {
+  margin: 4px 0 0;
+  max-height: 90px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: pre-wrap;
+  color: var(--ember);
+}
+
 /* ----------------------------------------------------------- command palette */
 
 .palette {
