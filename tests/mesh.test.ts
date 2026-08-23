@@ -204,3 +204,44 @@ test('serialization round-trips', () => {
   assert.ok(back.positions[5].equals(c.positions[5]));
   assert.equal(back.shadeSmooth, true);
 });
+
+test('recalculate normals stays correct when faces are flipped mid-traversal', () => {
+  // Both caps of a prism are built with the same winding, so one is inverted.
+  // Reversing a face permutes its corners, and the pass has to keep following
+  // the right neighbours afterwards.
+  const n = 17;
+  const m = new Mesh();
+  const front: number[] = [];
+  const back: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    front.push(m.positions.push(new Vec3(Math.cos(a), -0.2, Math.sin(a))) - 1);
+  }
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    back.push(m.positions.push(new Vec3(Math.cos(a), 0.2, Math.sin(a))) - 1);
+  }
+  for (let i = 1; i + 1 < n; i++) {
+    m.faces.push([front[0], front[i], front[i + 1]]);
+    m.faces.push([back[0], back[i], back[i + 1]]);
+  }
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    m.faces.push([front[i], front[j], back[j], back[i]]);
+  }
+  m.faceMaterial = new Array(m.faces.length).fill(0);
+  m.markDirty();
+
+  recalculateNormals(m);
+  const exact = 0.5 * n * Math.sin((2 * Math.PI) / n) * 0.4;
+  assert.ok(Math.abs(volume(m) - exact) < 1e-9, `volume ${volume(m)} vs ${exact}`);
+
+  const t = m.topology();
+  for (let f = 0; f < m.faceCount; f++) {
+    const c = t.faceCenters[f];
+    const outward = Math.abs(c.y) > 0.19
+      ? new Vec3(0, Math.sign(c.y), 0)
+      : new Vec3(c.x, 0, c.z).normalized();
+    assert.ok(t.faceNormals[f].dot(outward) > 0.5, `face ${f} points inward`);
+  }
+});

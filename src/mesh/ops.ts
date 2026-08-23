@@ -709,10 +709,13 @@ export function recalculateNormals(mesh: Mesh, inside = false): void {
       shell.push(f);
       const loop = mesh.faces[f];
       for (let i = 0; i < loop.length; i++) {
-        const ei = t.faceEdges[f][i];
-        if (ei < 0) continue;
         const a = loop[i];
         const b = loop[(i + 1) % loop.length];
+        // Look the edge up by its vertex pair rather than by corner position:
+        // this face may already have been reversed, which permutes its corners
+        // but not the cached topology.
+        const ei = t.edgeIndex.get(mesh.edgeKey(a, b));
+        if (ei === undefined) continue;
         for (const nf of t.edges[ei].faces) {
           if (nf === f || visited[nf]) continue;
           const nloop = mesh.faces[nf];
