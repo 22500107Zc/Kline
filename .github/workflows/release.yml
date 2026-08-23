@@ -34,6 +34,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Build the app bundle
+        # electron-builder only packages dist/; without this it would happily
+        # ship an installer containing an empty window.
+        run: npm run build
+      - name: Verify the bundle exists
+        shell: bash
+        run: test -f dist/index.html
       - name: Build installers
         run: npx electron-builder ${{ matrix.target }} --publish never
         env:

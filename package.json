@@ -115,7 +115,12 @@
       "icon": "build/icon.png",
       "desktop": {
         "StartupWMClass": "Kiln"
-      }
+      },
+      "maintainer": "Kiln contributors <noreply@users.noreply.github.com>"
     }
+  },
+  "author": {
+    "name": "Kiln contributors",
+    "email": "noreply@users.noreply.github.com"
   }
 }
