@@ -72,7 +72,7 @@
       "category": "public.app-category.graphics-design",
       "target": [
         {
-          "target": "zip",
+          "target": "pkg",
           "arch": [
             "x64",
             "arm64"
@@ -80,6 +80,13 @@
         },
         {
           "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
           "arch": [
             "x64",
             "arm64"
@@ -124,6 +131,13 @@
         "StartupWMClass": "Kiln"
       },
       "maintainer": "Kiln contributors <noreply@users.noreply.github.com>"
+    },
+    "pkg": {
+      "installLocation": "/Applications",
+      "allowAnywhere": true,
+      "allowCurrentUserHome": true,
+      "isRelocatable": false,
+      "overwriteAction": "upgrade"
     }
   },
   "author": {

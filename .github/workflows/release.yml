@@ -50,6 +50,7 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: |
+            release/*.pkg
             release/*.zip
             release/*.dmg
             release/*.exe
@@ -60,16 +61,46 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Tags cut a real release; a release/* branch publishes the same assets as a
+    # prerelease, so there is always a page where one click gets you the app
+    # rather than a zip nested inside a workflow-artifact zip.
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/')
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Flatten the artifact directories
+        run: |
+          mkdir -p dist-assets
+          find artifacts -type f \( -name '*.pkg' -o -name '*.zip' -o -name '*.dmg' \
+            -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' \) \
+            -exec cp {} dist-assets/ \;
+          ls -lh dist-assets
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
-          generate_release_notes: true
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v0.1.0-preview' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Kiln 0.1.0 preview' }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          files: dist-assets/*
+          fail_on_unmatched_files: true
           body: |
-            Download the build for your platform, then see the README for the
-            first-run steps — these builds are unsigned, so macOS and Windows
-            will ask for confirmation the first time you open Kiln.
+            ### macOS — start here
+            **`Kiln-0.1.0-arm64.pkg`** (Apple Silicon, M1 and later) or
+            **`Kiln-0.1.0.pkg`** (Intel). Double-click it and the installer puts
+            **Kiln.app** into your Applications folder. Nothing to unzip, nothing
+            to drag.
+
+            These builds are unsigned, so macOS refuses the very first
+            double-click. Right-click the `.pkg` -> **Open** -> **Open** and it
+            installs. After that Kiln launches from Applications or Spotlight like
+            anything else.
+
+            The `.dmg` and `.zip` files are the same app in other wrappers, if you
+            would rather not run an installer.
+
+            ### Windows
+            **`Kiln Setup 0.1.0.exe`** to install, or **`Kiln 0.1.0.exe`** to run
+            without installing. SmartScreen: **More info** -> **Run anyway**, once.
+
+            ### Linux
+            **`Kiln-0.1.0.AppImage`** (`chmod +x` it first) or **`kiln_0.1.0_amd64.deb`**.

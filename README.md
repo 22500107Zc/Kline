@@ -14,16 +14,20 @@ browser tab. Same code either way.
 ### Get the desktop app
 
 Grab the build for your platform from the
-[Releases page](https://github.com/22500107zc/yes/releases) — macOS gets both a
-`.dmg` and a plain zipped `Kiln.app`, Windows an `.exe` installer and a portable
-`.exe`, Linux an `.AppImage` or `.deb` — and install it like anything else. Kiln gets a Dock/Start-menu entry and a desktop shortcut, opens
+[Releases page](https://github.com/22500107zc/yes/releases):
+
+- **macOS** — `.pkg`, which installs Kiln straight into Applications. (A `.dmg`
+  and a zipped `Kiln.app` are there too, if you prefer.)
+- **Windows** — an `.exe` installer, or a portable `.exe` that needs no install.
+- **Linux** — `.AppImage` or `.deb`. Kiln gets a Dock/Start-menu entry and a desktop shortcut, opens
 `.kiln` files on double-click, and has a real menu bar with native Open and
 Save dialogs.
 
 These builds are **unsigned**, so the first launch needs one extra step:
 
-- **macOS** — right-click the app ▸ **Open** ▸ **Open**, once. (If it says the
-  app is damaged, run `xattr -dr com.apple.quarantine /Applications/Kiln.app`.)
+- **macOS** — right-click the `.pkg` (or the app) ▸ **Open** ▸ **Open**, once.
+  (If it says the app is damaged, run
+  `xattr -dr com.apple.quarantine /Applications/Kiln.app`.)
 - **Windows** — SmartScreen shows "Windows protected your PC" ▸ **More info** ▸
   **Run anyway**, once.
 - **Linux** — `chmod +x Kiln-*.AppImage`, then run it.
