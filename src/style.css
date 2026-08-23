@@ -976,6 +976,153 @@ button:disabled {
   }
 }
 
+/* -------------------------------------------------------- create from reference */
+
+.create-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.drop-zone {
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  margin: 12px;
+  padding: 26px 16px;
+  text-align: center;
+  color: var(--ink-dim);
+  border: 1px dashed var(--edge);
+  border-radius: var(--radius);
+  background: var(--shell-sunk);
+  cursor: pointer;
+}
+
+.drop-zone:hover {
+  border-color: var(--ember-deep);
+  color: var(--ink);
+}
+
+.drop-mark {
+  width: 34px;
+  height: 34px;
+  color: var(--ember);
+}
+
+.drop-mark svg {
+  width: 100%;
+  height: 100%;
+}
+
+.drop-title {
+  margin: 0;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.drop-zone p {
+  margin: 0;
+}
+
+.hidden-input {
+  display: none;
+}
+
+.ref-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.ref-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.ref-preview {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--shell-sunk);
+  image-rendering: auto;
+}
+
+.scrub-row {
+  display: grid;
+  grid-template-columns: 44px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.slider {
+  width: 100%;
+  accent-color: var(--ember);
+}
+
+.mode-group {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--edge);
+}
+
+.mode-btn {
+  padding: 5px 4px;
+  color: var(--ink-dim);
+  background: var(--shell-raised);
+}
+
+.mode-btn:hover {
+  color: var(--ink);
+  background: var(--shell-hover);
+}
+
+.mode-btn.active {
+  color: var(--ember);
+  background: var(--ember-wash);
+}
+
+.create-stats {
+  margin: 8px 0 0;
+  font-family: var(--mono);
+}
+
+.drop-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 25;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  opacity: 0;
+  background: rgba(19, 18, 20, 0.72);
+  border: 2px dashed var(--ember);
+  transition: opacity 0.12s ease;
+}
+
+.drop-veil.visible {
+  opacity: 1;
+}
+
+.drop-veil p {
+  margin: 0;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--ember);
+  background: var(--shell);
+  border: 1px solid var(--ember-deep);
+  border-radius: var(--radius);
+}
+
 /* ------------------------------------------------------- desktop shell only */
 
 /*

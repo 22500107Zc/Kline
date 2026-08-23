@@ -30,6 +30,7 @@ export const ICONS: Record<string, string> = {
   modifier: wrap('<path d="M4 7h16M4 12h16M4 17h16"/><circle cx="8" cy="7" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="10" cy="17" r="2" fill="currentColor" stroke="none"/>'),
   world: wrap('<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z"/>'),
   smooth: wrap('<path d="M3 16c4 0 5-8 9-8s5 8 9 8"/>'),
+  reference: wrap('<rect x="2.5" y="4" width="13" height="11" rx="1"/><path d="M2.5 12l3.5-3.5 3 3 2-2 4 4"/><circle cx="6.5" cy="7.5" r="1.1"/><path d="M13 17.5l4.5 2.6 4-2.3v-5.2l-4-2.3-4 2.3v4.9z"/>'),
 };
 
 export function icon(name: keyof typeof ICONS | string, className = 'icon'): HTMLElement {

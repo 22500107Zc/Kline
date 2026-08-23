@@ -1,0 +1,144 @@
+import { Bitmap } from './contour';
+
+/**
+ * Getting pixels out of a dropped file.
+ *
+ * Images and videos are handled the same way downstream: both end up as a
+ * `Bitmap` sampled from a canvas, so a video is really just an image source
+ * with a playhead.
+ */
+
+export type ReferenceKind = 'image' | 'video';
+
+export interface Reference {
+  name: string;
+  kind: ReferenceKind;
+  width: number;
+  height: number;
+  element: HTMLImageElement | HTMLVideoElement;
+  /** Seconds, videos only. */
+  duration: number;
+  /** Object URL backing the element; revoke when finished with it. */
+  url: string;
+}
+
+export const ACCEPTED_TYPES = 'image/*,video/*';
+
+export function isSupportedFile(file: File): boolean {
+  return file.type.startsWith('image/') || file.type.startsWith('video/');
+}
+
+export function loadReference(file: File): Promise<Reference> {
+  const url = URL.createObjectURL(file);
+  const kind: ReferenceKind = file.type.startsWith('video/') ? 'video' : 'image';
+
+  return new Promise((resolve, reject) => {
+    const fail = (): void => {
+      URL.revokeObjectURL(url);
+      reject(new Error(`Could not read ${file.name}. Is it a format this browser supports?`));
+    };
+
+    if (kind === 'video') {
+      const video = document.createElement('video');
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = 'auto';
+      video.crossOrigin = 'anonymous';
+      video.onloadeddata = () => {
+        resolve({
+          name: file.name,
+          kind,
+          width: video.videoWidth,
+          height: video.videoHeight,
+          element: video,
+          duration: Number.isFinite(video.duration) ? video.duration : 0,
+          url,
+        });
+      };
+      video.onerror = fail;
+      video.src = url;
+      video.load();
+      return;
+    }
+
+    const image = new Image();
+    image.onload = () => {
+      resolve({
+        name: file.name,
+        kind,
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+        element: image,
+        duration: 0,
+        url,
+      });
+    };
+    image.onerror = fail;
+    image.src = url;
+  });
+}
+
+export function releaseReference(reference: Reference | null): void {
+  if (!reference) return;
+  if (reference.element instanceof HTMLVideoElement) {
+    reference.element.pause();
+    reference.element.removeAttribute('src');
+    reference.element.load();
+  }
+  URL.revokeObjectURL(reference.url);
+}
+
+/** Move a video's playhead and wait for the frame to actually be ready. */
+export function seekVideo(video: HTMLVideoElement, time: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (Math.abs(video.currentTime - time) < 1e-3 && video.readyState >= 2) {
+      resolve();
+      return;
+    }
+    const done = (): void => {
+      video.removeEventListener('seeked', done);
+      resolve();
+    };
+    video.addEventListener('seeked', done);
+    video.currentTime = Math.max(0, Math.min(time, Math.max(0, video.duration - 1e-3)));
+    // Some browsers never fire 'seeked' for a video that has not started.
+    setTimeout(done, 500);
+  });
+}
+
+const scratch = (): HTMLCanvasElement => document.createElement('canvas');
+
+/**
+ * Sample the reference's current frame into a bitmap, capped at `maxSize` on
+ * the longer edge — contour tracing does not get better above a few hundred
+ * pixels, and staying small keeps the live preview interactive.
+ */
+export function bitmapFromReference(reference: Reference, maxSize = 384): Bitmap {
+  const scale = Math.min(1, maxSize / Math.max(reference.width, reference.height));
+  const width = Math.max(1, Math.round(reference.width * scale));
+  const height = Math.max(1, Math.round(reference.height * scale));
+  const canvas = scratch();
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('This browser would not give Kiln a 2D canvas to read pixels from.');
+  ctx.drawImage(reference.element, 0, 0, width, height);
+  const { data } = ctx.getImageData(0, 0, width, height);
+  return { width, height, data };
+}
+
+/** Draw a reference frame into a visible canvas, letterboxed to fit. */
+export function drawReferenceInto(
+  canvas: HTMLCanvasElement, reference: Reference,
+): { x: number; y: number; width: number; height: number } | null {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const scale = Math.min(canvas.width / reference.width, canvas.height / reference.height);
+  const w = reference.width * scale;
+  const h = reference.height * scale;
+  const x = (canvas.width - w) / 2;
+  const y = (canvas.height - h) / 2;
+  ctx.drawImage(reference.element, x, y, w, h);
+  return { x, y, width: w, height: h };
+}

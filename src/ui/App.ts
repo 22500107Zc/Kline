@@ -17,6 +17,10 @@ export class App {
   private boxSelect = h('div', { class: 'box-select' });
   private shortcuts = h('div', { class: 'overlay-panel shortcuts hidden' });
   private viewportHint = h('div', { class: 'viewport-hint' });
+  private dropVeil = h('div', { class: 'drop-veil' }, [
+    h('p', { text: 'Drop to build geometry from it' }),
+  ]);
+  private properties!: Properties;
 
   constructor(private mount: HTMLElement) {
     this.canvas = h('canvas', { class: 'viewport-canvas' });
@@ -26,10 +30,11 @@ export class App {
     const toolbar = new Toolbar(this.editor);
     const outliner = new Outliner(this.editor);
     const properties = new Properties(this.editor);
+    this.properties = properties;
     const status = new StatusBar(this.editor);
 
     const viewport = h('main', { class: 'viewport' }, [
-      this.canvas, this.boxSelect, this.viewportHint, this.shortcuts,
+      this.canvas, this.boxSelect, this.viewportHint, this.dropVeil, this.shortcuts,
     ]);
     const right = h('div', { class: 'sidebar' }, [outliner.root, properties.root]);
 
@@ -43,6 +48,7 @@ export class App {
     this.buildShortcuts();
     this.wireKeyboard();
     this.wireDesktopShell();
+    this.wireFileDrop();
     this.editor.on('modal', () => this.syncModalChrome());
     this.editor.on('change', () => this.syncModalChrome());
     this.syncModalChrome();
@@ -93,6 +99,41 @@ export class App {
     this.mount.addEventListener('pointerdown', (e) => {
       const target = e.target as HTMLElement;
       if (!/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(target.tagName)) this.canvas.focus();
+    });
+  }
+
+  /**
+   * Dropping an image or a video anywhere over the window sends it straight to
+   * the Create panel, which turns it into geometry immediately.
+   */
+  private wireFileDrop(): void {
+    let depth = 0;
+    const hasFiles = (e: DragEvent): boolean =>
+      !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
+
+    this.mount.addEventListener('dragenter', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth++;
+      this.dropVeil.classList.add('visible');
+    });
+    this.mount.addEventListener('dragover', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    });
+    this.mount.addEventListener('dragleave', (e) => {
+      if (!hasFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) this.dropVeil.classList.remove('visible');
+    });
+    this.mount.addEventListener('drop', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      this.dropVeil.classList.remove('visible');
+      const file = e.dataTransfer?.files?.[0];
+      if (file) this.properties.openCreate(file);
     });
   }
 

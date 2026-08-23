@@ -4,11 +4,13 @@ import { MODIFIER_LABELS, Modifier, ModifierType, createModifier } from '../modi
 import { createMaterial, hexToLinear, linearToHex } from '../scene/Material';
 import { LightType, SceneObject } from '../scene/Scene';
 import { button, checkbox, clear, h, numberField, row, select } from './dom';
+import { CreatePanel } from './CreatePanel';
 import { icon } from './icons';
 
-type Tab = 'object' | 'modifiers' | 'material' | 'world';
+type Tab = 'create' | 'object' | 'modifiers' | 'material' | 'world';
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
+  { id: 'create', label: 'Create', icon: 'reference' },
   { id: 'object', label: 'Object', icon: 'mesh' },
   { id: 'modifiers', label: 'Modifiers', icon: 'modifier' },
   { id: 'material', label: 'Material', icon: 'material' },
@@ -21,8 +23,11 @@ export class Properties {
   private tab: Tab = 'object';
   private body = h('div', { class: 'prop-body' });
   private tabBar = h('div', { class: 'tab-bar' });
+  /** Kept alive across refreshes so a loaded reference survives tab switches. */
+  readonly create: CreatePanel;
 
   constructor(private editor: Editor) {
+    this.create = new CreatePanel(editor);
     this.root.appendChild(this.tabBar);
     this.root.appendChild(this.body);
     this.buildTabs();
@@ -47,10 +52,19 @@ export class Properties {
     }
   }
 
+  /** Switch to the Create tab, optionally handing it a dropped file. */
+  openCreate(file?: File): void {
+    this.tab = 'create';
+    this.buildTabs();
+    this.refresh();
+    if (file) void this.create.loadFile(file);
+  }
+
   refresh(): void {
     clear(this.body);
     const obj = this.editor.scene.activeObject;
     switch (this.tab) {
+      case 'create': this.body.appendChild(this.create.root); break;
       case 'object': this.buildObjectTab(obj); break;
       case 'modifiers': this.buildModifierTab(obj); break;
       case 'material': this.buildMaterialTab(obj); break;
