@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     tags: ['v*']
+    # Push a release/* branch to get installers as run artifacts without
+    # cutting a tag; only tags publish an actual GitHub Release.
+    branches: ['release/**']
   workflow_dispatch:
 
 permissions:
