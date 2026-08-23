@@ -21,9 +21,15 @@ pull request.
 npm run typecheck   # strict TypeScript, no implicit any, no unused locals
 npm test            # node:test over the kernel, scene, modifiers and IO
 npm run build       # make sure the production bundle still builds
+npm run app         # if you touched electron/ or src/desktop.ts
 ```
 
-CI runs the same three commands.
+CI runs the first three, then boots the desktop shell under Xvfb and
+screenshots it.
+
+The shell has to stay optional: `src/desktop.ts` is the only place allowed to
+reach for `window.kilnDesktop`, and every call through it needs a browser
+fallback. One bundle ships to both targets.
 
 ## Where things live
 
@@ -35,6 +41,7 @@ CI runs the same three commands.
 | Renderer | `src/render` | WebGL2 only; GLSL lives in `shaders.ts` |
 | Editor | `src/editor` | Modes, picking, modal operators, undo, commands |
 | UI | `src/ui` | Plain DOM, no framework |
+| Desktop shell | `electron` | Window, native menu and file dialogs (CommonJS) |
 
 ## House rules
 
