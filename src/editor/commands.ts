@@ -12,6 +12,7 @@ import { exportMTL, exportOBJ, importOBJ } from '../io/obj';
 import { exportSTL } from '../io/stl';
 import { exportGLTF } from '../io/gltf';
 import { Editor } from './Editor';
+import { pruneSelection } from './selection';
 
 export interface Command {
   id: string;
@@ -35,11 +36,9 @@ function editOp(ed: Editor, label: string, fn: (mesh: Mesh) => void): void {
   if (!obj || !mesh) return;
   ed.beginUndo(label);
   fn(mesh);
-  // Indices may have shifted; drop anything that no longer exists.
-  const valid = new Set<number>();
-  for (const v of ed.selection.verts) if (v < mesh.positions.length) valid.add(v);
-  ed.selection.verts = valid;
-  ed.recomputeDerivedSelection();
+  // Indices shift under most operators; drop anything that no longer exists.
+  pruneSelection(mesh, ed.selection);
+  ed.syncSelection('vertex');
   ed.markGeometryDirty(obj);
   ed.setStatus(label);
 }
@@ -193,7 +192,7 @@ export const COMMANDS: Command[] = [
         }
       }
       ed.selection.verts = seen;
-      ed.recomputeDerivedSelection();
+      ed.syncSelection('vertex');
       ed.setStatus(`Selected linked (${seen.size} vertices)`);
     },
   },
@@ -338,7 +337,7 @@ export const COMMANDS: Command[] = [
       if (ed.selection.faces.size > 0) {
         const r = extrudeFaces(mesh, ed.selection.faces);
         ed.selection.verts = new Set(r.movedVerts);
-        ed.recomputeDerivedSelection();
+        ed.syncSelection('vertex');
         ed.markGeometryDirty(obj);
         ed.startTransform('translate', null, false);
         const world = obj.worldMatrix(ed.scene).normalMatrix().transformDirection(r.normal);
@@ -347,7 +346,7 @@ export const COMMANDS: Command[] = [
       } else if (ed.selection.edges.size > 0) {
         const moved = extrudeEdges(mesh, ed.selection.edges);
         ed.selection.verts = new Set(moved);
-        ed.recomputeDerivedSelection();
+        ed.syncSelection('vertex');
         ed.markGeometryDirty(obj);
         ed.startTransform('translate', null, false);
       } else {
@@ -385,7 +384,7 @@ export const COMMANDS: Command[] = [
       ed.beginUndo('Duplicate');
       const r = duplicateFaces(mesh, ed.selection.faces);
       ed.selection.verts = new Set(r.verts);
-      ed.recomputeDerivedSelection();
+      ed.syncSelection('vertex');
       ed.markGeometryDirty(obj);
       ed.startTransform('translate', null, false);
     },
@@ -488,7 +487,7 @@ export const COMMANDS: Command[] = [
       const faces = new Set<number>();
       for (const v of ed.selection.verts) for (const f of t.vertFaces[v] ?? []) faces.add(f);
       ed.selection.verts = facesToVerts(mesh, faces);
-      ed.recomputeDerivedSelection();
+      ed.syncSelection('vertex');
     },
   },
 

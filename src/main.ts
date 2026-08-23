@@ -5,7 +5,10 @@ const mount = document.getElementById('app');
 if (!mount) throw new Error('Kiln could not find its mount point (#app).');
 
 try {
-  new App(mount);
+  const app = new App(mount);
+  // Scripting handle: `kiln.editor` in the browser console reaches the live
+  // scene, the command registry and every mesh operator.
+  (window as unknown as { kiln: unknown }).kiln = { app, editor: app.editor };
 } catch (err) {
   mount.innerHTML = '';
   const message = err instanceof Error ? err.message : String(err);

@@ -176,16 +176,22 @@ export class TransformSession {
     while (angle > Math.PI) angle -= Math.PI * 2;
     while (angle < -Math.PI) angle += Math.PI * 2;
 
+    const axis = this.axis === null ? this.camera.forward() : Vec3.axis(this.axis);
     const typed = this.numericValue();
-    if (typed !== null) angle = typed / RAD2DEG;
-    else if (this.modifiers.snap) {
+    if (typed !== null) {
+      // A typed angle means exactly that, in the axis's own right-handed sense.
+      this.angle = typed / RAD2DEG;
+      return Mat4.translation(this.pivot)
+        .multiply(Mat4.rotationAxis(axis, this.angle))
+        .multiply(Mat4.translation(this.pivot.neg()));
+    }
+    if (this.modifiers.snap) {
       const step = this.options.snapAngle / RAD2DEG;
       angle = Math.round(angle / step) * step;
     }
-
-    const axis = this.axis === null ? this.camera.forward() : Vec3.axis(this.axis);
-    // Screen-space rotation feels inverted when the axis points away from us.
-    const sign = this.axis === null ? -1 : Math.sign(this.camera.forward().dot(axis)) || 1;
+    // Screen angles grow clockwise (y points down), which reads as a positive
+    // right-handed rotation only when the axis points away from the camera.
+    const sign = Math.sign(this.camera.forward().dot(axis)) || 1;
     this.angle = angle * sign;
     return Mat4.translation(this.pivot)
       .multiply(Mat4.rotationAxis(axis, this.angle))

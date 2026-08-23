@@ -95,6 +95,7 @@ src/
   render/             WebGL2 forward renderer, GLSL, buffer builders
   editor/             Modes, selection, CPU picking, modal transforms, undo,
                       the command registry and keymap
+    selection.ts        Mode-authoritative selection derivation
   ui/                 Plain-DOM shell: header, toolbar, outliner, properties
 ```
 
@@ -114,6 +115,12 @@ are matched in screen space, rather than reading back a GPU id buffer. No
 pipeline stall, no second render pass, and "nearest within N pixels, preferring
 what is in front" is expressed directly.
 
+**Selection is mode-authoritative.** Whichever of vertex/edge/face mode you are
+in owns its set, and the other two are derived from it with Blender's
+conversion rules. Deriving everything from vertices is simpler but wrong: an
+edge ring around a closed shape has every corner as an endpoint, so a
+vertex-derived edge set would light up the whole mesh.
+
 **Undo takes whole-scene snapshots.** Memory in exchange for correctness: every
 operator, however exotic, is undoable without anybody writing a matching
 inverse. A modal transform pushes one snapshot before it starts, so cancelling
@@ -124,7 +131,7 @@ an extrude rolls back the extrusion *and* the move.
 ```bash
 npm run dev         # Vite dev server with HMR
 npm run typecheck   # tsc --noEmit, strict
-npm test            # ~50 unit tests over the kernel, scene, modifiers and IO
+npm test            # 56 unit tests over the kernel, scene, selection, modifiers and IO
 npm run build       # typecheck + production bundle into dist/
 ```
 

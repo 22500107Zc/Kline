@@ -10,16 +10,11 @@ import { TransformKind, TransformSession } from './transform';
 import {
   Rect, boxSelectElements, boxSelectObjects, normalizeRect, pickElement, pickObject, raycastGround,
 } from './picking';
+import { ElementSelection, deriveSelection, elementCount, emptySelection } from './selection';
 import { edgeRing, insetFaces, loopCut } from '../mesh/ops';
 
 export type EditorMode = 'object' | 'edit';
 export type PivotMode = 'median' | 'cursor';
-
-export interface ElementSelection {
-  verts: Set<number>;
-  edges: Set<number>;
-  faces: Set<number>;
-}
 
 interface TransformSnapshot {
   verts: { index: number; position: Vec3 }[] | null;
@@ -48,7 +43,7 @@ export class Editor {
   mode: EditorMode = 'object';
   editObjectId: number | null = null;
   selectMode: SelectMode = 'vertex';
-  selection: ElementSelection = { verts: new Set(), edges: new Set(), faces: new Set() };
+  selection: ElementSelection = emptySelection();
   selectionVersion = 0;
   pivotMode: PivotMode = 'median';
   statusMessage = '';
@@ -219,28 +214,30 @@ export class Editor {
     this.bumpSelection();
   }
 
-  /** Vertices are canonical; edges and faces are derived from them. */
-  recomputeDerivedSelection(): void {
+  /** The selection set the current mode edits directly. */
+  private setForMode(mode: SelectMode = this.selectMode): Set<number> {
+    return mode === 'vertex' ? this.selection.verts
+      : mode === 'edge' ? this.selection.edges
+        : this.selection.faces;
+  }
+
+  /**
+   * Re-derive the passive selection sets after an edit made in `from` mode.
+   * See `selection.ts` for why the authoritative set depends on the mode.
+   */
+  syncSelection(from: SelectMode = this.selectMode): void {
     const mesh = this.editMesh;
     if (!mesh) return;
-    const verts = this.selection.verts;
-    const t = mesh.topology();
-    this.selection.edges = new Set();
-    for (let e = 0; e < t.edges.length; e++) {
-      const rec = t.edges[e];
-      if (verts.has(rec.a) && verts.has(rec.b)) this.selection.edges.add(e);
-    }
-    this.selection.faces = new Set();
-    for (let f = 0; f < mesh.faces.length; f++) {
-      if (mesh.faces[f].every((v) => verts.has(v))) this.selection.faces.add(f);
-    }
+    deriveSelection(mesh, this.selection, from);
     this.bumpSelection();
   }
 
   setSelectMode(mode: SelectMode): void {
+    // Convert through the old mode's rules first, then hand authority over.
+    this.syncSelection(this.selectMode);
     this.selectMode = mode;
-    this.recomputeDerivedSelection();
     this.setStatus(`${mode[0].toUpperCase()}${mode.slice(1)} select`);
+    this.bumpSelection();
   }
 
   selectedVertList(): number[] {
@@ -256,8 +253,11 @@ export class Editor {
     if (this.mode === 'edit') {
       const mesh = this.editMesh;
       if (!mesh) return;
-      this.selection.verts = new Set(mesh.positions.map((_, i) => i));
-      this.recomputeDerivedSelection();
+      const count = elementCount(mesh, this.selectMode);
+      const set = this.setForMode();
+      set.clear();
+      for (let i = 0; i < count; i++) set.add(i);
+      this.syncSelection();
     } else {
       this.scene.selection = new Set(
         [...this.scene.objects.values()].filter((o) => o.visible && !o.locked).map((o) => o.id),
@@ -279,10 +279,13 @@ export class Editor {
     if (this.mode === 'edit') {
       const mesh = this.editMesh;
       if (!mesh) return;
+      const count = elementCount(mesh, this.selectMode);
+      const set = this.setForMode();
       const next = new Set<number>();
-      for (let i = 0; i < mesh.positions.length; i++) if (!this.selection.verts.has(i)) next.add(i);
-      this.selection.verts = next;
-      this.recomputeDerivedSelection();
+      for (let i = 0; i < count; i++) if (!set.has(i)) next.add(i);
+      set.clear();
+      for (const i of next) set.add(i);
+      this.syncSelection();
     } else {
       const next = new Set<number>();
       for (const o of this.scene.objects.values()) if (!this.scene.selection.has(o.id)) next.add(o.id);
@@ -316,21 +319,11 @@ export class Editor {
       if (!extend) this.clearElementSelection();
       return;
     }
-    const verts = this.vertsOfElement(mesh, hit);
-    if (!extend) this.selection.verts.clear();
-    const allSelected = verts.every((v) => this.selection.verts.has(v));
-    if (extend && allSelected) for (const v of verts) this.selection.verts.delete(v);
-    else for (const v of verts) this.selection.verts.add(v);
-    this.recomputeDerivedSelection();
-  }
-
-  private vertsOfElement(mesh: Mesh, index: number): number[] {
-    if (this.selectMode === 'vertex') return [index];
-    if (this.selectMode === 'edge') {
-      const e = mesh.topology().edges[index];
-      return e ? [e.a, e.b] : [];
-    }
-    return mesh.faces[index] ?? [];
+    const set = this.setForMode();
+    if (!extend) set.clear();
+    if (extend && set.has(hit)) set.delete(hit);
+    else set.add(hit);
+    this.syncSelection();
   }
 
   /** Grow the selection along an edge loop (Alt+click). */
@@ -343,15 +336,10 @@ export class Editor {
       xray: this.options.xray, radius: 18,
     });
     if (hit === null) return;
-    const t = mesh.topology();
     const ring = edgeRing(mesh, hit);
-    if (!extend) this.selection.verts.clear();
-    for (const ei of ring.edges) {
-      const e = t.edges[ei];
-      this.selection.verts.add(e.a);
-      this.selection.verts.add(e.b);
-    }
-    this.recomputeDerivedSelection();
+    if (!extend) this.selection.edges.clear();
+    for (const ei of ring.edges) this.selection.edges.add(ei);
+    this.syncSelection('edge');
     this.setStatus(`Selected edge ring (${ring.edges.length} edges)`);
   }
 
@@ -630,7 +618,7 @@ export class Editor {
     const r = insetFaces(fresh, m.faces, m.thickness, m.depth);
     obj.mesh = fresh;
     this.selection.verts = new Set(r.movedVerts);
-    this.recomputeDerivedSelection();
+    this.syncSelection('vertex');
     this.markGeometryDirty(obj);
     this.emit('modal');
   }
@@ -693,7 +681,7 @@ export class Editor {
     this.beginUndo('Loop Cut');
     const r = loopCut(mesh, edge, cuts);
     this.selection.verts = new Set(r.newVerts);
-    this.recomputeDerivedSelection();
+    this.syncSelection('vertex');
     this.markGeometryDirty(obj);
     this.setStatus(`Loop cut: ${cuts} loop${cuts === 1 ? '' : 's'} inserted`);
     this.emit('modal');
@@ -751,14 +739,13 @@ export class Editor {
         mesh, obj.worldMatrix(this.scene), this.camera, rect, this.viewport(),
         this.selectMode, this.options.xray,
       );
-      if (!extend && !subtract) this.selection.verts.clear();
+      const set = this.setForMode();
+      if (!extend && !subtract) set.clear();
       for (const h of hits) {
-        for (const v of this.vertsOfElement(mesh, h)) {
-          if (subtract) this.selection.verts.delete(v);
-          else this.selection.verts.add(v);
-        }
+        if (subtract) set.delete(h);
+        else set.add(h);
       }
-      this.recomputeDerivedSelection();
+      this.syncSelection();
     } else {
       const hits = boxSelectObjects(this.scene, this.camera, rect, this.viewport());
       if (!extend && !subtract) this.scene.selection.clear();
