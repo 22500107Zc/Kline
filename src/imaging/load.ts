@@ -127,6 +127,23 @@ export function bitmapFromReference(reference: Reference, maxSize = 384): Bitmap
   return { width, height, data };
 }
 
+/** The current frame as a PNG blob, for handing to a local model server. */
+export function blobFromReference(reference: Reference, maxSize = 768): Promise<Blob> {
+  const scale = Math.min(1, maxSize / Math.max(reference.width, reference.height));
+  const canvas = scratch();
+  canvas.width = Math.max(1, Math.round(reference.width * scale));
+  canvas.height = Math.max(1, Math.round(reference.height * scale));
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return Promise.reject(new Error('This browser would not give Kiln a 2D canvas.'));
+  ctx.drawImage(reference.element, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('Could not encode the frame as a PNG.'));
+    }, 'image/png');
+  });
+}
+
 /** Draw a reference frame into a visible canvas, letterboxed to fit. */
 export function drawReferenceInto(
   canvas: HTMLCanvasElement, reference: Reference,

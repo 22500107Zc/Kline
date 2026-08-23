@@ -1123,6 +1123,50 @@ button:disabled {
   border-radius: var(--radius);
 }
 
+.ai-section .prop-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-status {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--edge);
+  color: var(--ink-faint);
+  background: var(--shell-sunk);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-status.ok {
+  color: var(--axis-y);
+  border-color: color-mix(in srgb, var(--axis-y) 45%, var(--edge));
+}
+
+.ai-status.bad {
+  color: var(--axis-x);
+  border-color: color-mix(in srgb, var(--axis-x) 45%, var(--edge));
+}
+
+.ai-status.busy {
+  color: var(--ember);
+  border-color: var(--ember-deep);
+}
+
+.btn.primary {
+  color: var(--ember);
+  border-color: var(--ember-deep);
+  background: var(--ember-wash);
+}
+
 /* ------------------------------------------------------- desktop shell only */
 
 /*

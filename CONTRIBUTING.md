@@ -38,6 +38,8 @@ fallback. One bundle ships to both targets.
 | Geometry kernel | `src/mesh` | Pure, DOM-free, fully unit tested |
 | Modifiers | `src/modifiers` | Each one is a pure `Mesh -> Mesh` function |
 | Scene graph | `src/scene` | Objects, materials, lights, orbit camera |
+| Reference pipeline | `src/imaging` | Pure, DOM-free except `load.ts`; unit tested |
+| Local model bridge | `src/ai`, `tools/` | Two HTTP endpoints, documented in the server |
 | Renderer | `src/render` | WebGL2 only; GLSL lives in `shaders.ts` |
 | Editor | `src/editor` | Modes, picking, modal operators, undo, commands |
 | UI | `src/ui` | Plain DOM, no framework |
@@ -45,9 +47,11 @@ fallback. One bundle ships to both targets.
 
 ## House rules
 
-**Anything in `src/mesh` needs a test.** Assert an invariant, not a number:
+**Anything in `src/mesh` or `src/imaging` needs a test.** Assert an invariant, not a number:
 "the mesh is still a closed manifold", "the volume is unchanged", "every face
-is a quad". `tests/mesh.test.ts` has helpers for closedness and signed volume.
+is a quad". `tests/mesh.test.ts` has helpers for closedness and signed volume, and
+`tests/imaging.test.ts` builds synthetic bitmaps from a paint callback so the
+generators can be checked without any image files.
 
 **Operators mutate in place and report what moved.** Follow the shape of the
 existing ones: take the mesh plus a selection, keep existing face indices stable

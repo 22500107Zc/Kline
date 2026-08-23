@@ -7,9 +7,10 @@ import {
   meshFromHeightfield, meshFromLathe, meshFromSilhouette,
 } from '../imaging/generate';
 import {
-  Reference, bitmapFromReference, drawReferenceInto, isSupportedFile, loadReference,
-  releaseReference, seekVideo,
+  Reference, bitmapFromReference, blobFromReference, drawReferenceInto, isSupportedFile,
+  loadReference, releaseReference, seekVideo,
 } from '../imaging/load';
+import { BackendInfo, generateMesh, probeBackend, storeEndpoint, storedEndpoint } from '../ai/client';
 import { button, checkbox, clear, h, numberField, row, select } from './dom';
 
 type Mode = 'silhouette' | 'lathe' | 'relief';
@@ -52,6 +53,16 @@ export class CreatePanel {
   private relief: Required<Pick<HeightfieldOptions, 'resolution' | 'size' | 'height' | 'invert' | 'solid' | 'smooth'>> = {
     resolution: 128, size: 2, height: 0.35, invert: false, solid: false, smooth: true,
   };
+
+  private endpoint = storedEndpoint();
+  private backend: BackendInfo | null = null;
+  private backendModel = '';
+  private aiPrompt = '';
+  private aiRunning: AbortController | null = null;
+  /** Whether a probe has run, so the rebuild does not clobber its message. */
+  private aiChecked = false;
+  private aiStatus = h('span', { class: 'ai-status', text: 'not checked' });
+  private aiNote = h('p', { class: 'dim small' });
 
   private preview = h('canvas', { class: 'ref-preview' });
   private body = h('div', { class: 'create-body' });
@@ -117,6 +128,7 @@ export class CreatePanel {
     this.body.appendChild(this.modeSection());
     this.body.appendChild(this.settingsSection());
     this.body.appendChild(this.actionsSection());
+    this.body.appendChild(this.aiSection());
     this.drawPreview();
   }
 
@@ -297,6 +309,121 @@ export class CreatePanel {
       ]),
       h('p', { class: 'dim small', text: 'Tweaks rebuild the object in place. Everything after that is normal modelling — Tab into Edit Mode and keep going.' }),
     ]);
+  }
+
+  /**
+   * Hand the frame to a local image-to-3D model, if one is running. The whole
+   * feature is opt-in and points at 127.0.0.1 by default: no endpoint, no
+   * network traffic.
+   */
+  private aiSection(): HTMLElement {
+    const section = h('section', { class: 'prop-section ai-section' }, [
+      h('h3', { class: 'prop-heading' }, [
+        h('span', { text: 'Local AI model' }),
+        this.aiStatus,
+      ]),
+    ]);
+
+    const input = h('input', { class: 'text-input', type: 'text', value: this.endpoint });
+    input.addEventListener('keydown', (e) => e.stopPropagation());
+    input.addEventListener('change', () => {
+      this.endpoint = input.value.trim() || this.endpoint;
+      storeEndpoint(this.endpoint);
+      void this.checkBackend();
+    });
+    section.appendChild(row('Server', input));
+
+    if (this.backend && this.backend.models.length > 1) {
+      section.appendChild(row('Model', select(
+        this.backend.models.map((m) => ({ value: m, label: m })),
+        this.backendModel || this.backend.models[0],
+        (v) => { this.backendModel = v; },
+      )));
+    }
+
+    const prompt = h('input', {
+      class: 'text-input', type: 'text', value: this.aiPrompt,
+      placeholder: 'optional hint, if the model takes one',
+    });
+    prompt.addEventListener('keydown', (e) => e.stopPropagation());
+    prompt.addEventListener('input', () => { this.aiPrompt = prompt.value; });
+    section.appendChild(row('Prompt', prompt));
+
+    section.appendChild(h('div', { class: 'btn-row' }, [
+      button(this.aiRunning ? 'Cancel' : 'Generate 3D', () => {
+        if (this.aiRunning) {
+          this.aiRunning.abort();
+          return;
+        }
+        void this.runBackend();
+      }, { class: this.aiRunning ? '' : 'primary', title: 'Send this frame to the local model' }),
+      button('Check', () => void this.checkBackend(), { title: 'See whether a server is listening' }),
+    ]));
+    section.appendChild(this.aiNote);
+    if (!this.aiChecked && !this.aiRunning) {
+      this.aiNote.textContent =
+        'Optional. Point this at a local image-to-3D server — tools/kiln-ai-server.py in the repo is a working example. Everything above works without it.';
+    }
+    return section;
+  }
+
+  private setBackendStatus(text: string, state: 'ok' | 'bad' | 'idle' | 'busy'): void {
+    this.aiStatus.textContent = text;
+    this.aiStatus.className = `ai-status ${state}`;
+  }
+
+  private async checkBackend(): Promise<void> {
+    this.aiChecked = true;
+    this.setBackendStatus('checking…', 'busy');
+    const result = await probeBackend(this.endpoint);
+    if (result.ok) {
+      this.backend = result.info;
+      this.backendModel = this.backendModel || result.info.models[0] || '';
+      this.setBackendStatus(result.info.name, 'ok');
+      this.aiNote.textContent = result.info.detail ?? 'Ready.';
+    } else {
+      this.backend = null;
+      this.setBackendStatus('offline', 'bad');
+      this.aiNote.textContent = `${result.reason} at ${this.endpoint}. Start a server, or keep using the generators above.`;
+    }
+    this.build();
+  }
+
+  private async runBackend(): Promise<void> {
+    if (!this.reference) return;
+    const controller = new AbortController();
+    this.aiRunning = controller;
+    this.setBackendStatus('generating…', 'busy');
+    this.aiNote.textContent = 'Working. This can take anywhere from seconds to minutes.';
+    this.build();
+    const started = Date.now();
+    try {
+      const image = await blobFromReference(this.reference);
+      const result = await generateMesh(this.endpoint, {
+        image,
+        model: this.backendModel || undefined,
+        prompt: this.aiPrompt || undefined,
+        signal: controller.signal,
+      });
+      this.editor.beginUndo('Generate with local model');
+      const object = this.editor.scene.add('mesh', result.name || 'AI Mesh', result.mesh);
+      object.position = this.placementFor(result.mesh);
+      this.editor.selectObject(object.id);
+      this.editor.markGeometryDirty(object);
+      this.editor.frameSelected();
+      const seconds = result.seconds ?? (Date.now() - started) / 1000;
+      this.setBackendStatus('done', 'ok');
+      this.aiNote.textContent =
+        `${result.mesh.faceCount.toLocaleString()} faces in ${seconds.toFixed(1)}s. It is a normal mesh now — edit it like anything else.`;
+      this.editor.setStatus(`${object.name}: ${result.mesh.faceCount.toLocaleString()} faces from the local model`);
+    } catch (err) {
+      const aborted = (err as Error).name === 'AbortError';
+      this.setBackendStatus(aborted ? 'cancelled' : 'failed', aborted ? 'idle' : 'bad');
+      this.aiNote.textContent = aborted ? 'Cancelled.' : (err as Error).message;
+    } finally {
+      this.aiRunning = null;
+      this.build();
+    }
   }
 
   // ---------------------------------------------------------------- generate

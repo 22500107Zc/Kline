@@ -2,9 +2,9 @@
 
 **A 3D modelling application for your desktop — and your browser.** Kiln is an
 open source alternative to Blender's modelling workflow: mesh editing, a
-non-destructive modifier stack, PBR materials and glTF export, in about 7,000
-lines of dependency-free TypeScript. No account, no server; your scenes never
-leave your machine.
+non-destructive modifier stack, PBR materials and glTF export, in dependency-free
+TypeScript. Drop in a photo or a video and it builds geometry from it. No
+account, no server; nothing you open ever leaves your machine.
 
 ![Kiln editing a subdivided form](docs/screenshot.png)
 
@@ -57,6 +57,59 @@ modules over `file://`.
 
 ---
 
+## Build from a reference
+
+![A traced mug reference extruded into a solid, hole and all](docs/reference-to-mesh.png)
+
+Drag an image or a video anywhere onto the window. Kiln reads it locally, traces
+it, and builds a mesh straight away — then rebuilds that same object as you
+adjust the settings, with the detected outline drawn over your reference so the
+threshold is something you can see rather than guess. Videos are scrubbable, so
+any frame can be the source.
+
+| Mode | What it does | Good for |
+|---|---|---|
+| **Cut Out** | Traces the outline and extrudes it into a solid, holes included | Logos, signage, silhouettes, flat parts |
+| **Turn** | Revolves the profile around a vertical axis | Vases, bottles, turned legs, anything round |
+| **Relief** | Displaces a grid by image brightness | Carvings, terrain, depth maps, stamps |
+
+These are deterministic geometry, not a model: no weights to download, no GPU,
+no network, a few milliseconds per rebuild. What comes out is an ordinary
+editable mesh — press Tab and keep modelling.
+
+### Hooking up a local AI model
+
+For genuine single-image reconstruction (TripoSR, InstantMesh, TRELLIS,
+Hunyuan3D and friends), Kiln talks to a model server you run yourself. It does
+not bundle weights — those are gigabytes and want a GPU — but the other half is
+in the box:
+
+```bash
+python3 tools/kiln-ai-server.py                  # echo backend, verifies the wiring
+python3 tools/kiln-ai-server.py --backend triposr
+```
+
+Then in Kiln: **Create ▸ Local AI model ▸ Check ▸ Generate 3D**. The server
+defaults to `127.0.0.1`, so your images stay on your machine unless you
+deliberately point it somewhere else.
+
+The contract is two endpoints, so pointing Kiln at your own pipeline means
+writing one function:
+
+```
+GET  /health    -> {"name": str, "models": [str], "detail": str}
+POST /generate  -> multipart: image, model, prompt, detail
+                <- an OBJ, or {"format":"obj","data":"...","seconds":float}
+```
+
+The included `--backend triposr` implementation is a reference: it is written
+against TripoSR's published API but needs you to install the model and its
+weights, and it has not been run in this repository's CI, which has no GPU. The
+`echo` backend is exercised end to end and is there so you can confirm the
+connection before installing anything.
+
+---
+
 ## Why this exists
 
 Blender is extraordinary and Kiln is not trying to replace it. What Kiln
@@ -70,6 +123,12 @@ mesh kernel, the renderer, the modifiers and the UI are all in this repository
 and all readable in an afternoon.
 
 ## What works today
+
+**From a reference**
+- Drop an image or video anywhere in the window; scrub a video to pick a frame
+- Cut Out, Turn and Relief generators, rebuilt live as you tune them
+- Automatic subject detection by brightness, transparency or a single channel
+- Optional bridge to a local image-to-3D model server
 
 **Modelling**
 - Vertex, edge and face select modes with box select, edge-ring select and
@@ -132,6 +191,11 @@ src/
     Mesh.ts             n-gon polygon mesh + cached derived topology
     primitives.ts       Blender-compatible primitive builders
     ops.ts              extrude, inset, loop cut, Catmull-Clark, merge, dissolve…
+  imaging/            Reference to geometry
+    contour.ts          Thresholding, marching-squares tracing, simplification
+    triangulate.ts      Ear clipping with hole bridging
+    generate.ts         Silhouette, lathe and heightfield builders
+  ai/client.ts        Client for a local image-to-3D server
   modifiers/          Non-destructive stack; each modifier is mesh -> mesh
   scene/              Scene graph, materials, lights, the orbit camera
   render/             WebGL2 forward renderer, GLSL, buffer builders
@@ -193,10 +257,13 @@ genuine topology regressions.
 Honest list of what Blender has that Kiln does not: bevel, knife and
 poly-build tools, UV unwrapping and texturing, sculpting, rendering beyond the
 viewport, animation and rigging, physics, geometry nodes, and Python scripting.
+Reference images cannot yet be pinned in the viewport to model against, and
+photogrammetry from a video's many frames is not implemented — the video path
+uses one frame at a time.
 Meshes above roughly a million triangles will also make the viewport
 uncomfortable — surfaces are uploaded unindexed today.
 
-Bevel, UV unwrapping and a knife tool are next.
+Bevel, UV unwrapping, viewport reference planes and a knife tool are next.
 
 ## Contributing
 
