@@ -14,9 +14,9 @@ browser tab. Same code either way.
 ### Get the desktop app
 
 Grab the build for your platform from the
-[Releases page](https://github.com/22500107zc/yes/releases) — `.dmg` for macOS,
-`.exe` for Windows, `.AppImage` or `.deb` for Linux — and install it like
-anything else. Kiln gets a Dock/Start-menu entry and a desktop shortcut, opens
+[Releases page](https://github.com/22500107zc/yes/releases) — macOS gets both a
+`.dmg` and a plain zipped `Kiln.app`, Windows an `.exe` installer and a portable
+`.exe`, Linux an `.AppImage` or `.deb` — and install it like anything else. Kiln gets a Dock/Start-menu entry and a desktop shortcut, opens
 `.kiln` files on double-click, and has a real menu bar with native Open and
 Save dialogs.
 
