@@ -1,6 +1,6 @@
 import { AABB, DEG2RAD, Mat4, Vec3, decomposeMatrix } from '../core/math';
 import { Mesh } from '../mesh/Mesh';
-import { PrimitiveKind, buildPrimitive } from '../mesh/primitives';
+import { PRIMITIVES, PrimitiveKind, buildPrimitive } from '../mesh/primitives';
 import { Renderer, SelectMode, ShadingMode, LineSegment, THEME, ViewportOptions } from '../render/Renderer';
 import { LightType, Scene, SceneObject, SerializedScene } from '../scene/Scene';
 import { ViewportCamera } from '../scene/ViewportCamera';
@@ -463,8 +463,8 @@ export class Editor {
   }
 
   addPrimitive(kind: PrimitiveKind): SceneObject {
-    this.beginUndo(`Add ${kind}`);
-    const label = kind[0].toUpperCase() + kind.slice(1);
+    const label = PRIMITIVES.find((p) => p.kind === kind)?.label ?? kind;
+    this.beginUndo(`Add ${label}`);
     const obj = this.scene.add('mesh', label, buildPrimitive(kind));
     obj.position = this.scene.cursor.clone();
     this.selectObject(obj.id);

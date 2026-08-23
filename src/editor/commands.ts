@@ -590,7 +590,8 @@ export function keyChord(e: KeyboardEvent): string {
   if (e.ctrlKey || e.metaKey) parts.push('ctrl');
   if (e.altKey) parts.push('alt');
   if (e.shiftKey) parts.push('shift');
-  let key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  // Lowercase everything so named keys ("Tab", "Home") match the keymap too.
+  let key = e.key.toLowerCase();
   if (e.code.startsWith('Numpad') && e.code !== 'NumpadEnter') key = e.code.toLowerCase();
   parts.push(key);
   return parts.join('+');

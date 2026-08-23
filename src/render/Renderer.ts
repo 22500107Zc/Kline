@@ -375,11 +375,12 @@ export class Renderer {
     p.setMat4('uViewProj', viewProj.m);
     p.setMat4('uInvViewProj', viewProj.inverse().m);
     p.setVec3('uCamPos', eye.x, eye.y, eye.z);
-    // Step the grid by powers of ten so it stays readable at any zoom.
+    // Step the grid by powers of ten so it stays readable at any zoom: the fine
+    // grid lands roughly one order of magnitude below the visible span.
     const span = camera.orthoHalfHeight() * 2;
-    const decade = Math.pow(10, Math.floor(Math.log10(Math.max(span, 1e-4))) - 1);
+    const decade = Math.pow(10, Math.round(Math.log10(Math.max(span, 1e-4))) - 1);
     p.setFloat('uSpacing', decade);
-    p.setFloat('uFadeDistance', Math.max(20, camera.distance * 12));
+    p.setFloat('uFadeDistance', Math.max(20, camera.distance * 6));
     p.setVec3('uLineColor', ...THEME.grid);
     p.setVec3('uXAxisColor', ...THEME.axisX);
     p.setVec3('uYAxisColor', ...THEME.axisY);
