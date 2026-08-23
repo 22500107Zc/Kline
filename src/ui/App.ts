@@ -6,6 +6,8 @@ import { Properties } from './Properties';
 import { StatusBar } from './StatusBar';
 import { Toolbar } from './Toolbar';
 import { clear, h } from './dom';
+import { COMMANDS as ALL_COMMANDS } from '../editor/commands';
+import { applyDesktopChrome, desktop } from '../desktop';
 
 /** Assembles the shell around the viewport and routes keyboard input. */
 export class App {
@@ -40,6 +42,7 @@ export class App {
 
     this.buildShortcuts();
     this.wireKeyboard();
+    this.wireDesktopShell();
     this.editor.on('modal', () => this.syncModalChrome());
     this.editor.on('change', () => this.syncModalChrome());
     this.syncModalChrome();
@@ -90,6 +93,27 @@ export class App {
     this.mount.addEventListener('pointerdown', (e) => {
       const target = e.target as HTMLElement;
       if (!/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(target.tagName)) this.canvas.focus();
+    });
+  }
+
+  /** Hand the native menu our command registry and accept its callbacks. */
+  private wireDesktopShell(): void {
+    const bridge = desktop();
+    if (!bridge) return;
+    applyDesktopChrome();
+    bridge.registerCommands(ALL_COMMANDS.map((c) => ({
+      id: c.id, label: c.label, category: c.category, shortcut: c.shortcut,
+    })));
+    bridge.onCommand((id) => runCommand(this.editor, id));
+    bridge.onShowShortcuts(() => this.toggleShortcuts());
+    bridge.onOpenFile((file) => {
+      if (!file) return;
+      try {
+        this.editor.loadSceneJSON(JSON.parse(file.text));
+        this.editor.setStatus(`Opened ${file.name}`);
+      } catch (err) {
+        this.editor.setStatus(`Could not open ${file.name}: ${(err as Error).message}`);
+      }
     });
   }
 

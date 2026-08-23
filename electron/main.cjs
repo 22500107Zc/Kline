@@ -1,0 +1,280 @@
+/*
+ * Kiln desktop shell.
+ *
+ * A thin Electron host around the same static bundle the web build ships.
+ * It adds the three things a browser tab cannot: a real application window,
+ * a native menu bar driven by Kiln's own command registry, and native file
+ * dialogs for opening and saving scenes.
+ */
+
+const { app, BrowserWindow, Menu, dialog, ipcMain, net, protocol, shell } = require('electron');
+const path = require('node:path');
+const fs = require('node:fs');
+const { pathToFileURL } = require('node:url');
+
+const DIST = path.join(__dirname, '..', 'dist');
+const IS_MAC = process.platform === 'darwin';
+const STATE_FILE = path.join(app.getPath('userData'), 'window-state.json');
+
+// A privileged custom scheme, because ES modules and service workers are both
+// blocked on file:// — this gives the bundle a proper secure origin.
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'kiln',
+  privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, codeCache: true },
+}]);
+
+let mainWindow = null;
+/** A .kiln path from the command line or a Finder double-click, held until the window is ready. */
+let pendingOpen = null;
+
+function readWindowState() {
+  try {
+    const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (Number.isFinite(s.width) && Number.isFinite(s.height)) return s;
+  } catch {
+    /* First run, or the file is unreadable — fall back to defaults. */
+  }
+  return { width: 1440, height: 900 };
+}
+
+function saveWindowState(win) {
+  if (!win || win.isDestroyed()) return;
+  const bounds = win.isMaximized() ? win.getNormalBounds() : win.getBounds();
+  try {
+    fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ ...bounds, maximized: win.isMaximized() }));
+  } catch {
+    /* Losing the window position is not worth interrupting a quit. */
+  }
+}
+
+function serveBundle() {
+  protocol.handle('kiln', (request) => {
+    const url = new URL(request.url);
+    let pathname = decodeURIComponent(url.pathname);
+    if (pathname === '' || pathname === '/') pathname = '/index.html';
+    const target = path.join(DIST, path.normalize(pathname));
+    if (!target.startsWith(DIST)) return new Response('Forbidden', { status: 403 });
+    if (!fs.existsSync(target)) return new Response('Not found', { status: 404 });
+    return net.fetch(pathToFileURL(target).toString());
+  });
+}
+
+function createWindow() {
+  const state = readWindowState();
+  mainWindow = new BrowserWindow({
+    x: state.x,
+    y: state.y,
+    width: state.width,
+    height: state.height,
+    minWidth: 900,
+    minHeight: 600,
+    backgroundColor: '#131214',
+    title: 'Kiln',
+    show: false,
+    autoHideMenuBar: false,
+    titleBarStyle: IS_MAC ? 'hiddenInset' : 'default',
+    trafficLightPosition: IS_MAC ? { x: 14, y: 10 } : undefined,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  if (state.maximized) mainWindow.maximize();
+  mainWindow.once('ready-to-show', () => mainWindow.show());
+  // The page title is written for a browser tab; the window keeps the app name.
+  mainWindow.on('page-title-updated', (event) => event.preventDefault());
+  mainWindow.on('close', () => saveWindowState(mainWindow));
+  mainWindow.on('closed', () => { mainWindow = null; });
+
+  // Anything that is not the app itself belongs in the user's browser.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  mainWindow.loadURL('kiln://app/');
+
+  // Smoke-test hook: `KILN_SMOKE=<png path> electron .` boots the shell, saves a
+  // screenshot and exits, so CI can prove the desktop build actually renders.
+  if (process.env.KILN_SMOKE) {
+    mainWindow.webContents.once('did-finish-load', () => {
+      setTimeout(async () => {
+        const image = await mainWindow.webContents.capturePage();
+        fs.writeFileSync(process.env.KILN_SMOKE, image.toPNG());
+        const menu = Menu.getApplicationMenu();
+        console.log(JSON.stringify({
+          menus: menu ? menu.items.map((i) => i.label) : [],
+          title: mainWindow.getTitle(),
+        }));
+        app.exit(0);
+      }, 2500);
+    });
+  }
+
+  return mainWindow;
+}
+
+/** Turn Kiln's own shortcut strings into Electron accelerators. */
+function toAccelerator(shortcut) {
+  if (!shortcut || !/ctrl\+/i.test(shortcut)) return undefined; // single keys stay with the canvas
+  if (/numpad/i.test(shortcut)) return undefined;
+  return shortcut.replace(/ctrl/gi, 'CmdOrCtrl');
+}
+
+const MENU_ORDER = ['File', 'Edit', 'Add', 'Object', 'Mesh', 'Select', 'View'];
+
+function buildMenu(commands) {
+  const send = (id) => () => mainWindow?.webContents.send('kiln:command', id);
+  const byCategory = new Map();
+  for (const cmd of commands ?? []) {
+    const list = byCategory.get(cmd.category) ?? [];
+    list.push(cmd);
+    byCategory.set(cmd.category, list);
+  }
+
+  const template = [];
+
+  if (IS_MAC) {
+    template.push({
+      label: 'Kiln',
+      submenu: [
+        { role: 'about' }, { type: 'separator' },
+        { role: 'services' }, { type: 'separator' },
+        { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' },
+        { type: 'separator' }, { role: 'quit' },
+      ],
+    });
+  }
+
+  for (const category of MENU_ORDER) {
+    const items = (byCategory.get(category) ?? []).map((cmd) => ({
+      label: cmd.label,
+      accelerator: toAccelerator(cmd.shortcut),
+      click: send(cmd.id),
+    }));
+    if (category === 'File') {
+      if (items.length) items.push({ type: 'separator' });
+      items.push(IS_MAC ? { role: 'close' } : { role: 'quit' });
+    }
+    if (category === 'View') {
+      items.push(
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+        { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'toggleDevTools' },
+      );
+    }
+    if (items.length) template.push({ label: category, submenu: items });
+  }
+
+  template.push({
+    label: 'Help',
+    submenu: [
+      { label: 'Keyboard Shortcuts', click: () => mainWindow?.webContents.send('kiln:shortcuts') },
+      { type: 'separator' },
+      {
+        label: 'Kiln on GitHub',
+        click: () => shell.openExternal('https://github.com/22500107zc/yes'),
+      },
+    ],
+  });
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function queueOpen(filePath) {
+  if (!filePath || !filePath.endsWith('.kiln')) return;
+  if (mainWindow) mainWindow.webContents.send('kiln:open-file', readScene(filePath));
+  else pendingOpen = filePath;
+}
+
+function readScene(filePath) {
+  try {
+    return { name: path.basename(filePath), text: fs.readFileSync(filePath, 'utf8') };
+  } catch (err) {
+    dialog.showErrorBox('Could not open scene', `${filePath}\n\n${err.message}`);
+    return null;
+  }
+}
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv) => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+    queueOpen(argv.find((a) => a.endsWith('.kiln')));
+  });
+
+  app.on('open-file', (event, filePath) => {
+    event.preventDefault();
+    queueOpen(filePath);
+  });
+
+  app.whenReady().then(() => {
+    serveBundle();
+    buildMenu([]);
+    createWindow();
+    queueOpen(process.argv.find((a) => a.endsWith('.kiln')));
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+
+  app.on('window-all-closed', () => {
+    if (!IS_MAC) app.quit();
+  });
+}
+
+// The renderer owns the command registry, so it tells the shell what to show.
+ipcMain.on('kiln:register-commands', (_event, commands) => {
+  buildMenu(commands);
+  if (pendingOpen && mainWindow) {
+    mainWindow.webContents.send('kiln:open-file', readScene(pendingOpen));
+    pendingOpen = null;
+  }
+});
+
+const FILTERS = {
+  kiln: { name: 'Kiln Scene', extensions: ['kiln'] },
+  obj: { name: 'Wavefront OBJ', extensions: ['obj'] },
+  mtl: { name: 'Material Library', extensions: ['mtl'] },
+  stl: { name: 'STL', extensions: ['stl'] },
+  gltf: { name: 'glTF 2.0', extensions: ['gltf'] },
+};
+
+// Every export goes through a real Save dialog rather than a silent download.
+ipcMain.handle('kiln:save-file', async (_event, { defaultName, data, binary }) => {
+  const ext = String(defaultName ?? '').split('.').pop()?.toLowerCase() ?? '';
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export',
+    defaultPath: defaultName ?? 'untitled',
+    filters: FILTERS[ext] ? [FILTERS[ext]] : [],
+  });
+  if (canceled || !filePath) return null;
+  try {
+    fs.writeFileSync(filePath, binary ? Buffer.from(data) : data, binary ? undefined : 'utf8');
+    return filePath;
+  } catch (err) {
+    dialog.showErrorBox('Could not save file', `${filePath}\n\n${err.message}`);
+    return null;
+  }
+});
+
+ipcMain.handle('kiln:open-scene', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: 'Open Scene',
+    properties: ['openFile'],
+    filters: [{ name: 'Kiln Scene', extensions: ['kiln'] }],
+  });
+  if (canceled || filePaths.length === 0) return null;
+  return readScene(filePaths[0]);
+});

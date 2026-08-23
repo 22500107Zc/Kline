@@ -1,0 +1,36 @@
+/**
+ * The renderer half of the desktop shell.
+ *
+ * Everything here is a no-op in a browser tab: `window.kilnDesktop` only exists
+ * when Kiln is running inside its Electron host, so the same bundle ships to
+ * both without a second build.
+ */
+
+export interface OpenedFile {
+  name: string;
+  text: string;
+}
+
+export interface DesktopBridge {
+  platform: string;
+  registerCommands: (commands: { id: string; label: string; category: string; shortcut?: string }[]) => void;
+  onCommand: (fn: (id: string) => void) => void;
+  onShowShortcuts: (fn: () => void) => void;
+  onOpenFile: (fn: (file: OpenedFile | null) => void) => void;
+  saveFile: (defaultName: string, data: string | Uint8Array, binary?: boolean) => Promise<string | null>;
+  openScene: () => Promise<OpenedFile | null>;
+}
+
+export function desktop(): DesktopBridge | null {
+  return (window as unknown as { kilnDesktop?: DesktopBridge }).kilnDesktop ?? null;
+}
+
+export const isDesktop = (): boolean => desktop() !== null;
+
+/** Mark the document so the shell can style itself as a native window. */
+export function applyDesktopChrome(): void {
+  const bridge = desktop();
+  if (!bridge) return;
+  document.documentElement.classList.add('is-desktop');
+  if (bridge.platform === 'darwin') document.documentElement.classList.add('is-mac');
+}

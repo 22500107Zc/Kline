@@ -1,45 +1,59 @@
 # Kiln
 
-**A 3D modelling application that runs in a browser tab.** Kiln is an open source
-alternative to Blender's modelling workflow — mesh editing, a non-destructive
-modifier stack, PBR materials and glTF export — in a static bundle with no
-runtime dependencies, no account and no server. Your scenes never leave your
-machine.
+**A 3D modelling application for your desktop — and your browser.** Kiln is an
+open source alternative to Blender's modelling workflow: mesh editing, a
+non-destructive modifier stack, PBR materials and glTF export, in about 7,000
+lines of dependency-free TypeScript. No account, no server; your scenes never
+leave your machine.
 
 ![Kiln editing a subdivided form](docs/screenshot.png)
+
+Kiln runs two ways: as a **desktop app** you double-click, or as a page in a
+browser tab. Same code either way.
+
+### Get the desktop app
+
+Grab the build for your platform from the
+[Releases page](https://github.com/22500107zc/yes/releases) — `.dmg` for macOS,
+`.exe` for Windows, `.AppImage` or `.deb` for Linux — and install it like
+anything else. Kiln gets a Dock/Start-menu entry and a desktop shortcut, opens
+`.kiln` files on double-click, and has a real menu bar with native Open and
+Save dialogs.
+
+These builds are **unsigned**, so the first launch needs one extra step:
+
+- **macOS** — right-click the app ▸ **Open** ▸ **Open**, once. (If it says the
+  app is damaged, run `xattr -dr com.apple.quarantine /Applications/Kiln.app`.)
+- **Windows** — SmartScreen shows "Windows protected your PC" ▸ **More info** ▸
+  **Run anyway**, once.
+- **Linux** — `chmod +x Kiln-*.AppImage`, then run it.
+
+### Or build it yourself
 
 ```bash
 git clone https://github.com/22500107zc/yes.git kiln
 cd kiln
 npm install
+
+npm run app     # build and launch the desktop app
+npm run dist    # build an installer for the machine you are on -> release/
+npm run dev     # web version with hot reload, for working on Kiln itself
+```
+
+`npm run dist` only builds for the OS it runs on — macOS installers need a Mac.
+The release workflow builds all three on tag push.
+
+### Or just use the browser
+
+```bash
 npm start       # builds, then opens http://localhost:4173
 ```
 
-Use `npm run dev` instead while you are working on Kiln itself — same app, with
-hot reload. Kiln needs a browser with WebGL2 (Chrome, Firefox, Edge and Safari
-15+ all work).
-
-### Install it as a desktop app
-
-Kiln is a web app, so there is no installer to download — but it installs like
-a native one. With `npm start` running, in **Chrome or Edge**:
-
-- **macOS** — open the ⋮ menu ▸ *Cast, Save and Share* ▸ **Install page as app**.
-  Kiln lands in `~/Applications/Chrome Apps` and shows up in Spotlight and the
-  Dock like anything else.
-- **Windows** — ⋮ ▸ *Apps* ▸ **Install this site as an app**. It gets a Start
-  menu entry and can be pinned to the taskbar.
-- **Linux** — ⋮ ▸ *Cast, Save and Share* ▸ **Install page as app**, which writes
-  a normal `.desktop` entry.
-
-Installed, Kiln opens in its own window with no browser chrome, and it keeps
-working with the dev server stopped and the network off — the service worker
-caches the whole app, which is under 200 KB. Safari and Firefox have no
-install command; **File ▸ Add to Dock** in Safari 17+ is the closest equivalent.
-
-To host it for yourself instead, `npm run build` and serve `dist/` from
-anywhere — it is plain static files. Opening `dist/index.html` straight off
-disk will *not* work: browsers block ES modules over `file://`.
+Chrome and Edge can install that page as a standalone app too (⋮ ▸ *Install page
+as app*), which is lighter than the Electron build and works offline once
+cached. Kiln needs WebGL2 — Chrome, Firefox, Edge and Safari 15+ all have it.
+Opening `dist/index.html` straight off disk will *not* work: browsers block ES
+modules over `file://`.
 
 ---
 
@@ -111,6 +125,7 @@ places the 3D cursor. The full list lives behind **Shortcuts** in the menu bar.
 ## How it is built
 
 ```
+electron/            Desktop shell: window, native menu, file dialogs
 src/
   core/math.ts        Vec3, Mat4, AABB, ray intersection, matrix decomposition
   mesh/               The geometry kernel
@@ -124,6 +139,7 @@ src/
                       the command registry and keymap
     selection.ts        Mode-authoritative selection derivation
   ui/                 Plain-DOM shell: header, toolbar, outliner, properties
+  desktop.ts          Bridge to the Electron host; a no-op in a browser tab
 ```
 
 Three decisions shape everything else:
@@ -160,6 +176,8 @@ npm run dev         # Vite dev server with HMR
 npm run typecheck   # tsc --noEmit, strict
 npm test            # 56 unit tests over the kernel, scene, selection, modifiers and IO
 npm run build       # typecheck + production bundle into dist/
+npm run app         # run the desktop shell against the built bundle
+npm run dist        # package installers for the current OS into release/
 ```
 
 `dist/` is a static folder — drop it on any host, no backend required.

@@ -1,10 +1,25 @@
-/** Browser download / upload helpers. */
+import { desktop } from '../desktop';
+
+/**
+ * File in and out. In a browser tab these are downloads and an <input type=file>;
+ * in the desktop shell the same calls become native Save and Open dialogs.
+ */
 
 export function downloadText(filename: string, text: string, mime = 'text/plain'): void {
+  const bridge = desktop();
+  if (bridge) {
+    void bridge.saveFile(filename, text, false);
+    return;
+  }
   downloadBlob(filename, new Blob([text], { type: mime }));
 }
 
 export function downloadBinary(filename: string, data: ArrayBuffer, mime = 'application/octet-stream'): void {
+  const bridge = desktop();
+  if (bridge) {
+    void bridge.saveFile(filename, new Uint8Array(data), true);
+    return;
+  }
   downloadBlob(filename, new Blob([data], { type: mime }));
 }
 
@@ -20,6 +35,8 @@ function downloadBlob(filename: string, blob: Blob): void {
 }
 
 export function openTextFile(accept: string): Promise<{ name: string; text: string } | null> {
+  const bridge = desktop();
+  if (bridge && accept.includes('.kiln')) return bridge.openScene();
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';

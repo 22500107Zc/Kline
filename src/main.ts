@@ -3,7 +3,7 @@ import './style.css';
 
 // Registering the worker is what lets browsers install Kiln as a desktop app,
 // and what makes it start without a network connection afterwards.
-if ('serviceWorker' in navigator && import.meta.env.PROD) {
+if ('serviceWorker' in navigator && import.meta.env.PROD && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => {
     // Resolve against the page, not this module: the bundle lives in assets/.
     const url = `${import.meta.env.BASE_URL}sw.js`;

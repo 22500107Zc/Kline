@@ -975,3 +975,25 @@ button:disabled {
     display: none;
   }
 }
+
+/* ------------------------------------------------------- desktop shell only */
+
+/*
+ * Inside the Electron host the header doubles as the window's title bar, so it
+ * has to be draggable while everything interactive inside it stays clickable.
+ */
+.is-desktop .header {
+  -webkit-app-region: drag;
+}
+
+.is-desktop .header button,
+.is-desktop .header .menu,
+.is-desktop .header .seg-group,
+.is-desktop .header .mode-switch {
+  -webkit-app-region: no-drag;
+}
+
+/* Leave room for the traffic lights on macOS. */
+.is-mac .header {
+  padding-left: 86px;
+}
