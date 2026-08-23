@@ -2,17 +2,44 @@
 
 **A 3D modelling application that runs in a browser tab.** Kiln is an open source
 alternative to Blender's modelling workflow — mesh editing, a non-destructive
-modifier stack, PBR materials and glTF export — with nothing to install and no
-runtime dependencies.
+modifier stack, PBR materials and glTF export — in a static bundle with no
+runtime dependencies, no account and no server. Your scenes never leave your
+machine.
 
 ![Kiln editing a subdivided form](docs/screenshot.png)
 
 ```bash
+git clone https://github.com/22500107zc/yes.git kiln
+cd kiln
 npm install
-npm run dev     # http://localhost:5173
+npm start       # builds, then opens http://localhost:4173
 ```
 
-Kiln needs a browser with WebGL2 (Chrome, Firefox, Edge and Safari 15+ all work).
+Use `npm run dev` instead while you are working on Kiln itself — same app, with
+hot reload. Kiln needs a browser with WebGL2 (Chrome, Firefox, Edge and Safari
+15+ all work).
+
+### Install it as a desktop app
+
+Kiln is a web app, so there is no installer to download — but it installs like
+a native one. With `npm start` running, in **Chrome or Edge**:
+
+- **macOS** — open the ⋮ menu ▸ *Cast, Save and Share* ▸ **Install page as app**.
+  Kiln lands in `~/Applications/Chrome Apps` and shows up in Spotlight and the
+  Dock like anything else.
+- **Windows** — ⋮ ▸ *Apps* ▸ **Install this site as an app**. It gets a Start
+  menu entry and can be pinned to the taskbar.
+- **Linux** — ⋮ ▸ *Cast, Save and Share* ▸ **Install page as app**, which writes
+  a normal `.desktop` entry.
+
+Installed, Kiln opens in its own window with no browser chrome, and it keeps
+working with the dev server stopped and the network off — the service worker
+caches the whole app, which is under 200 KB. Safari and Firefox have no
+install command; **File ▸ Add to Dock** in Safari 17+ is the closest equivalent.
+
+To host it for yourself instead, `npm run build` and serve `dist/` from
+anywhere — it is plain static files. Opening `dist/index.html` straight off
+disk will *not* work: browsers block ES modules over `file://`.
 
 ---
 

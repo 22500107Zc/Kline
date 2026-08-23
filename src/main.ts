@@ -1,6 +1,18 @@
 import { App } from './ui/App';
 import './style.css';
 
+// Registering the worker is what lets browsers install Kiln as a desktop app,
+// and what makes it start without a network connection afterwards.
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  window.addEventListener('load', () => {
+    // Resolve against the page, not this module: the bundle lives in assets/.
+    const url = `${import.meta.env.BASE_URL}sw.js`;
+    navigator.serviceWorker.register(url, { scope: import.meta.env.BASE_URL }).catch(() => {
+      /* Installing offline support is a bonus; never block startup on it. */
+    });
+  });
+}
+
 const mount = document.getElementById('app');
 if (!mount) throw new Error('Kiln could not find its mount point (#app).');
 
