@@ -62,6 +62,71 @@ modules over `file://`.
 
 ---
 
+## Just say what you want
+
+There is a **Build** box across the top of the viewport. Type into it and press
+Enter.
+
+```
+a wooden table          a castle             12 cubes in a circle
+a tall red tower        a snowman            stack of 8 blue spheres
+stairs with 20 steps    a house              9 cylinders in a grid
+```
+
+Twenty-one subjects are built in — table, chair, stool, bench, bookshelf, bed,
+sofa, lamp, tower, stairs, wall, fence, house, tree, snowman, robot, rocket,
+car, castle, pyramid, arch — plus any shape arranged in a row, circle, stack,
+grid or scatter. Colours ("red", "#3fb5c4"), sizes ("tiny", "huge", "tall") and
+counts all work. Each build lands as a group of ordinary editable meshes.
+
+**This costs nothing and needs nothing.** No account, no key, no network, no
+model: it is a parser and a set of procedural recipes, and it answers in under a
+millisecond. That is deliberate — the common cases should never depend on
+somebody's server being up.
+
+### Connecting a model for everything else
+
+Ask for a dragon and the recipes will tell you honestly that they cannot. To
+cover the long tail, point Kiln at a model you run yourself — click the chip at
+the right of the Build box.
+
+**Ollama is the only genuinely free-forever option**, because it runs on your
+machine:
+
+```bash
+# install Ollama, then:
+ollama pull llama3.2
+ollama serve
+```
+
+Kiln defaults to `http://127.0.0.1:11434`. Press **Connect**, and anything the
+recipes do not recognise goes to the model instead.
+
+The other provider is anything speaking the OpenAI chat API — Groq and
+OpenRouter have free tiers, LM Studio and llama.cpp are local. Be aware what
+"free" means there: free tiers are free *today*, rate-limited, and require an
+account. Nobody hosts inference for free indefinitely, so a hosted endpoint is
+not something this README will promise stays free forever.
+
+A model is asked for the same flat JSON the recipes produce — a list of
+primitives with a position, size and colour — and everything it returns is
+validated, clamped and repaired before it reaches your scene. Small local models
+are unreliable at freeform 3D but tolerable at filling in that schema, which is
+why the schema is that small.
+
+## Quick keys
+
+| | |
+|---|---|
+| `Cmd/Ctrl + K` | Search every command — the fastest way to find anything |
+| `Cmd/Ctrl + B` | Jump to the Build box |
+| `?` | The full keyboard sheet |
+
+The palette lists commands from the other mode too, marked, so you can discover
+that Recalculate Normals lives in Edit Mode instead of finding nothing.
+
+---
+
 ## Build from a reference
 
 ![A traced mug reference extruded into a solid, hole and all](docs/reference-to-mesh.png)
@@ -128,6 +193,12 @@ mesh kernel, the renderer, the modifiers and the UI are all in this repository
 and all readable in an afternoon.
 
 ## What works today
+
+**Say what you want**
+- A Build box that turns "a wooden table" or "12 cubes in a circle" into geometry
+- 21 procedural subjects plus shape arrangements, all offline and instant
+- Optional bridge to a local Ollama or OpenAI-compatible model for the rest
+- Command palette over every operation in the app
 
 **From a reference**
 - Drop an image or video anywhere in the window; scrub a video to pick a frame
@@ -210,6 +281,11 @@ src/
     triangulate.ts      Ear clipping with hole bridging
     generate.ts         Silhouette, lathe and heightfield builders
   ai/client.ts        Client for a local image-to-3D server
+  build/              Say-what-you-want
+    plan.ts             The build DSL, validation and execution
+    recipes.ts          Procedural subjects
+    interpreter.ts      Offline prompt -> plan
+    llm.ts              Optional Ollama / OpenAI-compatible planners
   modifiers/          Non-destructive stack; each modifier is mesh -> mesh
   scene/              Scene graph, materials, lights, the orbit camera
   render/             WebGL2 forward renderer, GLSL, buffer builders

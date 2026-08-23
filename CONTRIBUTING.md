@@ -38,6 +38,7 @@ fallback. One bundle ships to both targets.
 | Geometry kernel | `src/mesh` | Pure, DOM-free, fully unit tested |
 | Modifiers | `src/modifiers` | Each one is a pure `Mesh -> Mesh` function |
 | Scene graph | `src/scene` | Objects, materials, lights, orbit camera |
+| Build prompt | `src/build` | Pure planner + recipes; unit tested |
 | Reference pipeline | `src/imaging` | Pure, DOM-free except `load.ts`; unit tested |
 | Local model bridge | `src/ai`, `tools/` | Two HTTP endpoints, documented in the server |
 | Renderer | `src/render` | WebGL2 only; GLSL lives in `shaders.ts` |
@@ -47,7 +48,7 @@ fallback. One bundle ships to both targets.
 
 ## House rules
 
-**Anything in `src/mesh` or `src/imaging` needs a test.** Assert an invariant, not a number:
+**Anything in `src/mesh`, `src/imaging` or `src/build` needs a test.** Assert an invariant, not a number:
 "the mesh is still a closed manifold", "the volume is unchanged", "every face
 is a quad". `tests/mesh.test.ts` has helpers for closedness and signed volume, and
 `tests/imaging.test.ts` builds synthetic bitmaps from a paint callback so the
@@ -57,6 +58,10 @@ generators can be checked without any image files.
 existing ones: take the mesh plus a selection, keep existing face indices stable
 where you can, call `mesh.markDirty()` before returning, and return whatever the
 caller needs to rebuild its selection.
+
+**A new build recipe is a function and a keyword.** Add it to `RECIPES` in
+`src/build/recipes.ts`; the tests then check automatically that it is reachable
+from a prompt, sits on the ground and has plausible dimensions.
 
 **New user-facing actions go in the command registry.** Add an entry to
 `COMMANDS` in `src/editor/commands.ts` and, if it deserves a key, a `KEYMAP`

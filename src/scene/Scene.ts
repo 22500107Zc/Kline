@@ -99,7 +99,11 @@ export class SceneObject {
     this.evalCache = null;
   }
 
-  bounds(scene: Scene, editMode = false): AABB {
+  /**
+   * World-space bounds, including children — a group's extent is its contents,
+   * otherwise framing an empty puts the camera inside whatever hangs off it.
+   */
+  bounds(scene: Scene, editMode = false, depth = 0): AABB {
     const b = new AABB();
     const m = this.worldMatrix(scene);
     const geo = this.evaluated(editMode);
@@ -107,6 +111,12 @@ export class SceneObject {
       for (const p of geo.positions) b.expand(m.transformPoint(p));
     } else {
       b.expand(m.transformPoint(new Vec3()));
+    }
+    if (depth < 32) {
+      for (const id of this.children) {
+        const child = scene.get(id);
+        if (child && child.visible) b.union(child.bounds(scene, editMode, depth + 1));
+      }
     }
     return b;
   }

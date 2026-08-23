@@ -6,6 +6,8 @@ import { Properties } from './Properties';
 import { StatusBar } from './StatusBar';
 import { Toolbar } from './Toolbar';
 import { clear, h } from './dom';
+import { BuildBar } from './BuildBar';
+import { CommandPalette } from './CommandPalette';
 import { COMMANDS as ALL_COMMANDS } from '../editor/commands';
 import { applyDesktopChrome, desktop } from '../desktop';
 
@@ -21,6 +23,8 @@ export class App {
     h('p', { text: 'Drop to build geometry from it' }),
   ]);
   private properties!: Properties;
+  private palette!: CommandPalette;
+  private buildBar!: BuildBar;
 
   constructor(private mount: HTMLElement) {
     this.canvas = h('canvas', { class: 'viewport-canvas' });
@@ -33,8 +37,11 @@ export class App {
     this.properties = properties;
     const status = new StatusBar(this.editor);
 
+    this.buildBar = new BuildBar(this.editor);
+    this.palette = new CommandPalette(this.editor);
     const viewport = h('main', { class: 'viewport' }, [
-      this.canvas, this.boxSelect, this.viewportHint, this.dropVeil, this.shortcuts,
+      this.canvas, this.buildBar.root, this.boxSelect, this.viewportHint,
+      this.dropVeil, this.shortcuts, this.palette.root,
     ]);
     const right = h('div', { class: 'sidebar' }, [outliner.root, properties.root]);
 
@@ -77,12 +84,30 @@ export class App {
 
   private wireKeyboard(): void {
     document.addEventListener('keydown', (e) => {
+      // The app-wide chords work from anywhere, including inside a text field.
+      const meta = e.ctrlKey || e.metaKey;
+      if (meta && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        this.palette.toggle();
+        return;
+      }
+      if (meta && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        this.buildBar.focus();
+        return;
+      }
+
       const target = e.target as HTMLElement | null;
       if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
 
       if (!this.shortcuts.classList.contains('hidden') && e.key === 'Escape') {
         this.toggleShortcuts();
         e.preventDefault();
+        return;
+      }
+      if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+        e.preventDefault();
+        this.toggleShortcuts();
         return;
       }
       if (this.editor.handleKey(e)) {
@@ -190,6 +215,15 @@ export class App {
         ])),
       ]));
     }
+    grid.appendChild(h('div', { class: 'shortcut-group' }, [
+      h('h3', { text: 'Quick keys' }),
+      ...[
+        ['Cmd/Ctrl + K', 'Search every command'],
+        ['Cmd/Ctrl + B', 'Jump to the Build prompt'],
+        ['?', 'This sheet'],
+      ].map(([k, v]) => h('div', { class: 'shortcut-row' }, [h('kbd', { text: k }), h('span', { text: v })])),
+    ]));
+
     grid.appendChild(h('div', { class: 'shortcut-group' }, [
       h('h3', { text: 'Mouse' }),
       ...[

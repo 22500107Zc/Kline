@@ -137,3 +137,28 @@ test('colour conversion round-trips through sRGB hex', () => {
     assert.equal(linearToHex(hexToLinear(hex)), hex);
   }
 });
+
+test('a group\'s bounds include its children', () => {
+  const s = new Scene();
+  const group = s.add('empty', 'Group');
+  const child = s.add('mesh', 'Cube', createCube());
+  child.position = new Vec3(0, 0, 5);
+  s.setParent(child.id, group.id);
+
+  const alone = s.add('empty', 'Lonely').bounds(s);
+  assert.ok(alone.size().length() < 1e-9, 'an empty on its own is a point');
+
+  const box = group.bounds(s);
+  assert.ok(box.max.z > 5.9 && box.min.z < 4.1, `group bounds z ${box.min.z}..${box.max.z}`);
+  assert.ok(box.size().x > 1.9, 'and its width');
+});
+
+test('hidden children are left out of a group\'s bounds', () => {
+  const s = new Scene();
+  const group = s.add('empty', 'Group');
+  const child = s.add('mesh', 'Cube', createCube());
+  child.position = new Vec3(0, 0, 20);
+  child.visible = false;
+  s.setParent(child.id, group.id);
+  assert.ok(group.bounds(s).size().length() < 1e-9);
+});
