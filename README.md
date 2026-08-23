@@ -16,8 +16,9 @@ browser tab. Same code either way.
 Grab the build for your platform from the
 [Releases page](https://github.com/22500107zc/yes/releases):
 
-- **macOS** — `.pkg`, which installs Kiln straight into Applications. (A `.dmg`
-  and a zipped `Kiln.app` are there too, if you prefer.)
+- **macOS** — `Kiln-0.1.0-universal.pkg`, one file for both Apple Silicon and
+  Intel, which installs Kiln straight into Applications. (A `.dmg` and a zipped
+  `Kiln.app` are there too, if you prefer.)
 - **Windows** — an `.exe` installer, or a portable `.exe` that needs no install.
 - **Linux** — `.AppImage` or `.deb`. Kiln gets a Dock/Start-menu entry and a desktop shortcut, opens
 `.kiln` files on double-click, and has a real menu bar with native Open and
