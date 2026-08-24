@@ -207,6 +207,53 @@ export class Properties {
       ]));
     }
 
+    if (obj.type === 'mesh' && obj.physics) {
+      const body = obj.physics;
+      const passive = body.kind === 'passive';
+      this.body.appendChild(this.section('Rigid Body', [
+        row('Kind', select(
+          [{ value: 'active', label: 'Active — falls' }, { value: 'passive', label: 'Passive — held still' }],
+          body.kind,
+          (v) => {
+            ed.beginUndo('Rigid body kind');
+            body.kind = v === 'passive' ? 'passive' : 'active';
+            body.mass = body.kind === 'passive' ? 0 : Math.max(0.001, body.mass || 1);
+            ed.emit('change');
+          },
+        )),
+        row('Shape', select(
+          [{ value: 'box', label: 'Box' }, { value: 'sphere', label: 'Sphere' }],
+          body.shape,
+          (v) => {
+            ed.beginUndo('Rigid body shape');
+            body.shape = v === 'sphere' ? 'sphere' : 'box';
+            ed.emit('change');
+          },
+        )),
+        ...(passive ? [] : [row('Mass', numberField({
+          label: 'kg', value: body.mass, step: 0.1, min: 0.001, precision: 3,
+          onChange: (v) => { body.mass = v; ed.emit('change'); },
+        }))]),
+        row('Friction', numberField({
+          label: '', value: body.friction, step: 0.05, min: 0, max: 1, precision: 2,
+          onChange: (v) => { body.friction = v; ed.emit('change'); },
+        })),
+        row('Bounce', numberField({
+          label: '', value: body.restitution, step: 0.05, min: 0, max: 1, precision: 2,
+          onChange: (v) => { body.restitution = v; ed.emit('change'); },
+        })),
+        h('div', { class: 'btn-row' }, [
+          h('button', { class: 'btn primary', text: 'Bake', on: { click: () => runCommand(ed, 'physics.bake') } }),
+          h('button', { class: 'btn', text: 'Clear bake', on: { click: () => runCommand(ed, 'physics.clearBake') } }),
+          h('button', { class: 'btn', text: 'Remove', on: { click: () => runCommand(ed, 'physics.remove') } }),
+        ]),
+        h('p', {
+          class: 'dim small',
+          text: 'Baking writes the simulation to keyframes over the timeline range and replaces any location or rotation animation on these objects.',
+        }),
+      ]));
+    }
+
     if (obj.type === 'armature' && obj.armature) {
       const arm = obj.armature;
       const rows: HTMLElement[] = [];

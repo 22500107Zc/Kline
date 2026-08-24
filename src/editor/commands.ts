@@ -6,7 +6,7 @@ import {
   extrudeFaces, facesToVerts, flipNormals, makeFace, mergeByDistance, mergeVertices,
   recalculateNormals, smoothVertices, subdivideFaces, triangulateFaces,
 } from '../mesh/ops';
-import { Scene } from '../scene/Scene';
+import { Scene, createPhysicsBody } from '../scene/Scene';
 import { bevelVertices, markBevelWeight } from '../mesh/bevel';
 import { voxelRemesh, voxelSizeForTarget } from '../mesh/remesh';
 import { BooleanOp, dissolveCoplanar, isSolid, meshBoolean, stitchTJunctions } from '../mesh/boolean';
@@ -16,6 +16,7 @@ import {
   cubeProject, cylinderProject, markSeams, planarProject, smartProject, sphereProject, unwrap,
 } from '../uv/unwrap';
 import { blankTexture, generateCheckerTexture, loadTextureFile } from '../scene/Texture';
+import { bakeToKeyframes, clearBake } from '../physics/bake';
 import { FALLOFF_LABELS, FalloffType } from './proportional';
 import { SNAP_LABELS, SnapMode } from './snapping';
 import { BRUSH_LABELS, SculptBrush } from '../sculpt/sculpt';
@@ -874,6 +875,80 @@ export const COMMANDS: Command[] = [
     run: (ed) => {
       ed.options.uvCheck = !ed.options.uvCheck;
       ed.setStatus(`UV checker ${ed.options.uvCheck ? 'on' : 'off'}`);
+      ed.emit('change');
+      ed.requestRender();
+    },
+  },
+
+  // --------------------------------------------------------------- Physics
+  {
+    id: 'physics.makeActive', label: 'Make Rigid Body (active)', category: 'Object', mode: 'object',
+    run: (ed) => {
+      const objs = [...ed.scene.selection].map((id) => ed.scene.get(id)).filter((o) => o?.type === 'mesh');
+      if (objs.length === 0) {
+        ed.setStatus('Select a mesh first');
+        return;
+      }
+      ed.beginUndo('Make rigid body');
+      for (const o of objs) o!.physics = createPhysicsBody('active');
+      ed.setStatus(`${objs.length} object${objs.length === 1 ? '' : 's'} will fall`);
+      ed.emit('change');
+    },
+    enabled: (ed) => ed.scene.selection.size > 0,
+  },
+  {
+    id: 'physics.makePassive', label: 'Make Rigid Body (passive)', category: 'Object', mode: 'object',
+    run: (ed) => {
+      const objs = [...ed.scene.selection].map((id) => ed.scene.get(id)).filter((o) => o?.type === 'mesh');
+      if (objs.length === 0) return;
+      ed.beginUndo('Make passive body');
+      for (const o of objs) o!.physics = createPhysicsBody('passive');
+      ed.setStatus(`${objs.length} object${objs.length === 1 ? '' : 's'} will hold still and be landed on`);
+      ed.emit('change');
+    },
+    enabled: (ed) => ed.scene.selection.size > 0,
+  },
+  {
+    id: 'physics.remove', label: 'Remove Rigid Body', category: 'Object', mode: 'object',
+    run: (ed) => {
+      ed.beginUndo('Remove rigid body');
+      let n = 0;
+      for (const id of ed.scene.selection) {
+        const o = ed.scene.get(id);
+        if (o?.physics) {
+          o.physics = null;
+          n++;
+        }
+      }
+      ed.setStatus(n ? `Removed ${n} rigid bod${n === 1 ? 'y' : 'ies'}` : 'None of those were rigid bodies');
+      ed.emit('change');
+    },
+    enabled: (ed) => ed.scene.selection.size > 0,
+  },
+  {
+    id: 'physics.bake', label: 'Bake Physics to Keyframes', category: 'Object', mode: 'object',
+    run: (ed) => {
+      ed.beginUndo('Bake physics');
+      const t0 = Date.now();
+      const r = bakeToKeyframes(ed.scene);
+      if (r.bodies === 0) {
+        ed.setStatus('Nothing to simulate — mark some objects as active rigid bodies first');
+        return;
+      }
+      ed.setStatus(
+        `Baked ${r.bodies} bod${r.bodies === 1 ? 'y' : 'ies'} over ${r.frames} frames `
+        + `(${r.keys} keys) in ${Date.now() - t0}ms`,
+      );
+      ed.emit('change');
+      ed.requestRender();
+    },
+  },
+  {
+    id: 'physics.clearBake', label: 'Clear Baked Physics', category: 'Object', mode: 'object',
+    run: (ed) => {
+      ed.beginUndo('Clear baked physics');
+      const n = clearBake(ed.scene);
+      ed.setStatus(n ? `Cleared the bake on ${n} object${n === 1 ? '' : 's'}` : 'Nothing was baked');
       ed.emit('change');
       ed.requestRender();
     },

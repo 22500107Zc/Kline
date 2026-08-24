@@ -7,6 +7,27 @@ import {
   Channel, TimelineSettings, cloneChannels, completeTransform, defaultTimeline, sampleChannels,
 } from '../anim/animation';
 import { ArmatureData, cloneArmature, createArmature } from '../anim/armature';
+import { BodyShape } from '../physics/rigidbody';
+
+/** How an object takes part in a rigid body simulation. */
+export interface PhysicsBody {
+  /** Passive bodies never move; they are the floor and the walls. */
+  kind: 'active' | 'passive';
+  shape: BodyShape;
+  mass: number;
+  friction: number;
+  restitution: number;
+}
+
+export function createPhysicsBody(kind: 'active' | 'passive' = 'active'): PhysicsBody {
+  return {
+    kind,
+    shape: 'box',
+    mass: kind === 'passive' ? 0 : 1,
+    friction: 0.5,
+    restitution: 0.1,
+  };
+}
 
 export type ObjectType = 'mesh' | 'light' | 'camera' | 'empty' | 'armature';
 export type LightType = 'point' | 'sun' | 'spot' | 'area';
@@ -74,6 +95,12 @@ export class SceneObject {
   camera: CameraData | null = null;
   /** Bones, when this object is an armature. */
   armature: ArmatureData | null = null;
+  /**
+   * Rigid body settings, when this object takes part in a simulation. Kept on
+   * the object rather than in a separate world so it survives a save and
+   * travels with a copied object.
+   */
+  physics: PhysicsBody | null = null;
 
   private evalCache: { key: string; revision: number; mesh: Mesh } | null = null;
 
@@ -432,6 +459,7 @@ export class Scene {
         light: o.light ? { ...o.light, color: [...o.light.color] as [number, number, number] } : null,
         camera: o.camera ? { ...o.camera } : null,
         armature: o.armature ? cloneArmature(o.armature) : null,
+        physics: o.physics ? { ...o.physics } : null,
         animation: cloneChannels(o.animation),
       })),
     };
@@ -463,6 +491,7 @@ export class Scene {
       o.light = od.light ?? null;
       o.camera = od.camera ?? null;
       o.armature = od.armature ? cloneArmature(od.armature) : null;
+      o.physics = od.physics ? { ...od.physics } : null;
       o.animation = cloneChannels(od.animation ?? []);
       s.objects.set(o.id, o);
       s.nextId = Math.max(s.nextId, o.id + 1);
@@ -491,6 +520,7 @@ export interface SerializedObject {
   light: LightData | null;
   camera: CameraData | null;
   armature?: ArmatureData | null;
+  physics?: PhysicsBody | null;
   animation?: Channel[];
 }
 
