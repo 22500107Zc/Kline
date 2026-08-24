@@ -4,7 +4,8 @@ import { ArmatureResolver, Modifier, ObjectResolver, evaluateStack, stackKey } f
 import { Material, cloneMaterial, createMaterial } from './Material';
 import { SceneTexture, reserveTextureId } from './Texture';
 import {
-  Channel, TimelineSettings, cloneChannels, completeTransform, defaultTimeline, sampleChannels,
+  Channel, TimelineSettings, cloneChannels, completeTransform, defaultTimeline,
+  samplePropertyChannels, sampleChannels,
 } from '../anim/animation';
 import { ArmatureData, cloneArmature, createArmature } from '../anim/armature';
 import { BodyShape } from '../physics/rigidbody';
@@ -420,9 +421,63 @@ export class Scene {
       obj.position = next.position;
       obj.rotation = next.rotation;
       obj.scale = next.scale;
+      if (this.applyProperties(obj, frame)) obj.invalidate();
       changed = true;
     }
     return changed;
+  }
+
+  /**
+   * Drive the non-transform channels: a light dimming, a lens pulling back, a
+   * material going matte.
+   *
+   * A component with no channel is left alone, so keying only the red of a
+   * colour does not blank the other two. Materials are shared, so an animated
+   * material is animated everywhere it is used — which is what a shared
+   * material means, and better than silently giving each object its own copy.
+   */
+  private applyProperties(obj: SceneObject, frame: number): boolean {
+    const sampled = samplePropertyChannels(obj.animation, frame);
+    if (sampled.size === 0) return false;
+    const put = (target: number[] | undefined, values: number[]): void => {
+      if (!target) return;
+      for (let i = 0; i < values.length && i < target.length; i++) {
+        if (!Number.isNaN(values[i])) target[i] = values[i];
+      }
+    };
+    const material = this.materials[obj.materialSlots[0] ?? 0];
+    for (const [path, values] of sampled) {
+      const first = values[0];
+      switch (path) {
+        case 'light.energy':
+          if (obj.light && !Number.isNaN(first)) obj.light.energy = first;
+          break;
+        case 'light.color':
+          put(obj.light?.color, values);
+          break;
+        case 'camera.fov':
+          if (obj.camera && !Number.isNaN(first)) obj.camera.fov = first;
+          break;
+        case 'material.color':
+          put(material?.color, values);
+          break;
+        case 'material.roughness':
+          if (material && !Number.isNaN(first)) material.roughness = first;
+          break;
+        case 'material.metallic':
+          if (material && !Number.isNaN(first)) material.metallic = first;
+          break;
+        case 'material.alpha':
+          if (material && !Number.isNaN(first)) material.alpha = first;
+          break;
+        case 'material.emissionStrength':
+          if (material && !Number.isNaN(first)) material.emissionStrength = first;
+          break;
+        default:
+          break;
+      }
+    }
+    return true;
   }
 
   /**

@@ -10,7 +10,42 @@ import { Vec3 } from '../core/math';
  */
 
 export type Interpolation = 'constant' | 'linear' | 'bezier';
-export type ChannelPath = 'position' | 'rotation' | 'scale';
+/**
+ * What a channel drives.
+ *
+ * Transforms are the three everyone starts with. The rest are the properties
+ * people reach for immediately afterwards and then find they cannot animate: a
+ * light dimming, a lens pulling back, a material going matte. They are named
+ * rather than open-ended so that loading a file can never produce a channel
+ * pointing at something that does not exist.
+ */
+export type ChannelPath =
+  | 'position' | 'rotation' | 'scale'
+  | 'light.energy' | 'light.color'
+  | 'camera.fov'
+  | 'material.color' | 'material.roughness' | 'material.metallic' | 'material.alpha'
+  | 'material.emissionStrength';
+
+/** Paths that are not the object's own transform. */
+export const PROPERTY_PATHS: ChannelPath[] = [
+  'light.energy', 'light.color', 'camera.fov',
+  'material.color', 'material.roughness', 'material.metallic', 'material.alpha',
+  'material.emissionStrength',
+];
+
+/** How many components a path has: 3 for a vector or colour, 1 for a scalar. */
+export function pathComponents(path: ChannelPath): number {
+  switch (path) {
+    case 'position':
+    case 'rotation':
+    case 'scale':
+    case 'light.color':
+    case 'material.color':
+      return 3;
+    default:
+      return 1;
+  }
+}
 
 export interface Keyframe {
   frame: number;
@@ -42,6 +77,14 @@ export const CHANNEL_LABELS: Record<ChannelPath, string> = {
   position: 'Location',
   rotation: 'Rotation',
   scale: 'Scale',
+  'light.energy': 'Light power',
+  'light.color': 'Light colour',
+  'camera.fov': 'Focal FOV',
+  'material.color': 'Base colour',
+  'material.roughness': 'Roughness',
+  'material.metallic': 'Metallic',
+  'material.alpha': 'Alpha',
+  'material.emissionStrength': 'Emission strength',
 };
 
 function findChannel(channels: Channel[], path: ChannelPath, index: number): Channel | undefined {
@@ -99,12 +142,12 @@ function autoSlope(keys: Keyframe[], i: number): number {
   const cur = keys[i];
   const prev = keys[i - 1];
   const next = keys[i + 1];
-  if (!prev || !next) {
-    const other = prev ?? next;
-    if (!other) return 0;
-    const df = cur.frame - other.frame;
-    return df === 0 ? 0 : (cur.value - other.value) / df;
-  }
+  // A key at either end of a channel has no second neighbour to take a
+  // direction from, and using the one it has gives it the straight-line slope
+  // — which makes a two-key "bezier" a straight line, and an ease that does not
+  // ease is just a slower way of writing linear. Flat instead: the value
+  // starts and finishes at rest, which is what easing means.
+  if (!prev || !next) return 0;
   const dPrev = cur.value - prev.value;
   const dNext = next.value - cur.value;
   if (dPrev * dNext <= 0) return 0;
@@ -159,6 +202,7 @@ export interface SampledTransform {
 export function sampleChannels(channels: Channel[], frame: number): SampledTransform {
   const out: SampledTransform = { position: null, rotation: null, scale: null };
   for (const ch of channels) {
+    if (ch.path !== 'position' && ch.path !== 'rotation' && ch.path !== 'scale') continue;
     const v = sampleChannel(ch, frame);
     if (v === null) continue;
     const key = ch.path;
@@ -206,5 +250,51 @@ export function offsetKeys(channels: Channel[], delta: number): void {
   for (const ch of channels) {
     for (const k of ch.keys) k.frame += Math.round(delta);
     ch.keys.sort((a, b) => a.frame - b.frame);
+  }
+}
+
+/**
+ * Everything a channel can drive that is not the object's transform, sampled
+ * at a frame.
+ *
+ * Returned as a flat map rather than applied here, because these live on
+ * different objects — a light's power on the light, a material's colour on the
+ * scene's shared material list — and the animation module has no business
+ * knowing about either.
+ */
+export function samplePropertyChannels(
+  channels: Channel[], frame: number,
+): Map<ChannelPath, number[]> {
+  const out = new Map<ChannelPath, number[]>();
+  for (const ch of channels) {
+    if (!PROPERTY_PATHS.includes(ch.path)) continue;
+    const v = sampleChannel(ch, frame);
+    if (v === null) continue;
+    let slot = out.get(ch.path);
+    if (!slot) {
+      slot = new Array(pathComponents(ch.path)).fill(NaN);
+      out.set(ch.path, slot);
+    }
+    if (ch.index < slot.length) slot[ch.index] = v;
+  }
+  return out;
+}
+
+/** Read the current value of a path, for keying it where it stands. */
+export function channelDefault(path: ChannelPath): number[] {
+  switch (path) {
+    case 'scale':
+      return [1, 1, 1];
+    case 'light.color':
+    case 'material.color':
+      return [1, 1, 1];
+    case 'light.energy':
+      return [100];
+    case 'camera.fov':
+      return [0.69];
+    case 'material.roughness':
+      return [0.5];
+    default:
+      return new Array(pathComponents(path)).fill(0);
   }
 }

@@ -1655,6 +1655,73 @@ button:disabled {
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
 }
 
+.graph-editor {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 34;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: #141316f7;
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  box-shadow: 0 14px 36px #00000080;
+}
+
+.graph-editor.hidden {
+  display: none;
+}
+
+.graph-body {
+  display: flex;
+  gap: 8px;
+}
+
+.graph-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 96px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.graph-group {
+  margin-top: 4px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.graph-chan {
+  text-align: left;
+  padding: 1px 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-dim);
+  background: var(--shell-raised);
+  border-left: 3px solid var(--edge);
+  border-radius: 2px;
+}
+
+.graph-chan:hover {
+  color: var(--ink);
+}
+
+.graph-chan.off {
+  opacity: 0.4;
+}
+
+.graph-canvas {
+  border: 1px solid var(--edge-soft);
+  border-radius: var(--radius);
+  cursor: crosshair;
+}
+
 .uv-canvas {
   border: 1px solid var(--edge-soft);
   border-radius: var(--radius);

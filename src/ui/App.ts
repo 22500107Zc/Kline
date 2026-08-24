@@ -13,6 +13,7 @@ import { applyDesktopChrome, desktop } from '../desktop';
 import { Timeline } from './Timeline';
 import { RenderWindow } from './RenderWindow';
 import { UVEditor } from './UVEditor';
+import { GraphEditor } from './GraphEditor';
 import { SculptPanel } from './SculptPanel';
 import { formatAge } from '../editor/recovery';
 
@@ -39,6 +40,7 @@ export class App {
   private buildBar!: BuildBar;
   private renderWindow!: RenderWindow;
   private uvEditor!: UVEditor;
+  private graphEditor!: GraphEditor;
   private recoveryBar = h('div', { class: 'recovery-bar hidden' });
 
   constructor(private mount: HTMLElement) {
@@ -56,11 +58,12 @@ export class App {
     this.palette = new CommandPalette(this.editor);
     this.renderWindow = new RenderWindow(this.editor);
     this.uvEditor = new UVEditor(this.editor);
+    this.graphEditor = new GraphEditor(this.editor);
     const sculptPanel = new SculptPanel(this.editor);
     const timeline = new Timeline(this.editor);
     const viewport = h('main', { class: 'viewport' }, [
       this.canvas, this.buildBar.root, this.boxSelect, this.knifeLine, this.viewportHint,
-      sculptPanel.root, this.uvEditor.root, this.dropVeil, this.shortcuts,
+      sculptPanel.root, this.uvEditor.root, this.graphEditor.root, this.dropVeil, this.shortcuts,
       this.renderWindow.root, this.palette.root,
     ]);
     const right = h('div', { class: 'sidebar' }, [outliner.root, properties.root]);
@@ -156,6 +159,11 @@ export class App {
         this.uvEditor.toggle();
         return;
       }
+      if (meta && e.key.toLowerCase() === 'g') {
+        e.preventDefault();
+        this.graphEditor.toggle();
+        return;
+      }
       if (e.key === 'Escape') {
         if (this.renderWindow.visible) {
           this.renderWindow.hide();
@@ -164,6 +172,11 @@ export class App {
         }
         if (this.uvEditor.visible) {
           this.uvEditor.hide();
+          e.preventDefault();
+          return;
+        }
+        if (this.graphEditor.visible) {
+          this.graphEditor.hide();
           e.preventDefault();
           return;
         }
