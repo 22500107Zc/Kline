@@ -14,7 +14,7 @@ import { Timeline } from './Timeline';
 import { RenderWindow } from './RenderWindow';
 import { UVEditor } from './UVEditor';
 import { SculptPanel } from './SculptPanel';
-import { clearAutosave, formatAge, readAutosave } from '../editor/persistence';
+import { formatAge } from '../editor/recovery';
 
 /** Assembles the shell around the viewport and routes keyboard input. */
 export class App {
@@ -74,7 +74,7 @@ export class App {
     this.editor.loadStoredPreferences();
     this.offerRecovery();
     this.editor.renderer.onTexturesReady = () => this.editor.requestRender();
-    window.addEventListener('beforeunload', () => this.editor.autosaveNow(false));
+    window.addEventListener('beforeunload', () => void this.editor.autosaveNow(false));
     this.editor.on('modal', () => this.syncModalChrome());
     this.editor.on('change', () => this.syncModalChrome());
     this.syncModalChrome();
@@ -226,40 +226,63 @@ export class App {
    * restoring silently — the user may well have wanted the blank scene.
    */
   private offerRecovery(): void {
-    const rec = readAutosave();
-    if (!rec) return;
-    const objectCount = rec.scene.objects?.length ?? 0;
-    if (objectCount === 0) return;
-    clear(this.recoveryBar);
-    this.recoveryBar.append(
-      h('span', {
-        text: `Recovered a scene from ${formatAge(Date.now() - rec.savedAt)} (${objectCount} objects).`,
-      }),
-      h('button', {
-        class: 'btn primary', text: 'Restore',
-        on: {
-          click: () => {
-            try {
-              this.editor.loadSceneJSON(rec.scene);
-              this.editor.setStatus('Restored the recovered scene');
-            } catch (err) {
-              this.editor.setStatus(`Could not restore: ${(err as Error).message}`);
-            }
-            this.recoveryBar.classList.add('hidden');
+    void this.editor.recovery.list().then((slots) => {
+      const usable = slots.filter((s) => s.objectCount > 0);
+      if (usable.length === 0) return;
+      const newest = usable[0];
+      clear(this.recoveryBar);
+
+      // More than one copy is kept now, and the one you want is often not the
+      // newest — the newest may already contain whatever went wrong.
+      const picker = h('select', { class: 'input' }) as HTMLSelectElement;
+      for (const slot of usable) {
+        picker.append(
+          h('option', {
+            value: String(slot.id),
+            text: `${formatAge(Date.now() - slot.savedAt)} · ${slot.objectCount} object${slot.objectCount === 1 ? '' : 's'}`,
+          }),
+        );
+      }
+      picker.value = String(newest.id);
+
+      this.recoveryBar.append(
+        h('span', { text: 'A scene from your last session is still here.' }),
+        usable.length > 1 ? picker : h('span', {
+          text: `Saved ${formatAge(Date.now() - newest.savedAt)} (${newest.objectCount} objects).`,
+        }),
+        h('button', {
+          class: 'btn primary', text: 'Restore',
+          on: {
+            click: () => {
+              const id = usable.length > 1 ? Number(picker.value) : newest.id;
+              void this.editor.recovery.load(id).then((rec) => {
+                if (!rec) {
+                  this.editor.setStatus('That recovery copy is no longer there');
+                  return;
+                }
+                try {
+                  this.editor.loadSceneJSON(rec.scene);
+                  this.editor.setStatus('Restored the recovered scene');
+                } catch (err) {
+                  this.editor.setStatus(`Could not restore: ${(err as Error).message}`);
+                }
+              });
+              this.recoveryBar.classList.add('hidden');
+            },
           },
-        },
-      }),
-      h('button', {
-        class: 'btn', text: 'Discard',
-        on: {
-          click: () => {
-            clearAutosave();
-            this.recoveryBar.classList.add('hidden');
+        }),
+        h('button', {
+          class: 'btn', text: 'Discard',
+          on: {
+            click: () => {
+              void this.editor.recovery.discard();
+              this.recoveryBar.classList.add('hidden');
+            },
           },
-        },
-      }),
-    );
-    this.recoveryBar.classList.remove('hidden');
+        }),
+      );
+      this.recoveryBar.classList.remove('hidden');
+    });
   }
 
   private toggleShortcuts(): void {

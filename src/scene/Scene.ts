@@ -363,7 +363,11 @@ export class Scene {
     return changed;
   }
 
-  toJSON(): SerializedScene {
+  /**
+   * `meshes` lets a caller reuse serialized mesh data it already holds — undo
+   * passes its snapshot store so an untouched mesh is not copied again.
+   */
+  toJSON(meshes?: { serialize(m: Mesh): ReturnType<Mesh['toJSON']> }): SerializedScene {
     return {
       format: 'kiln-scene',
       version: 1,
@@ -387,7 +391,7 @@ export class Scene {
         locked: o.locked,
         parent: o.parent,
         children: [...o.children],
-        mesh: o.mesh ? o.mesh.toJSON() : null,
+        mesh: o.mesh ? (meshes ? meshes.serialize(o.mesh) : o.mesh.toJSON()) : null,
         modifiers: JSON.parse(JSON.stringify(o.modifiers)),
         materialSlots: [...o.materialSlots],
         light: o.light ? { ...o.light, color: [...o.light.color] as [number, number, number] } : null,

@@ -22,7 +22,8 @@ import { transferUV } from '../uv/transfer';
 import { RenderJob } from '../render/pathtrace/RenderJob';
 import { RenderSettings, defaultRenderSettings } from '../render/pathtrace/types';
 import { buildTraceScene, cameraFromObject, cameraFromViewport } from '../render/pathtrace/build';
-import { Preferences, defaultPreferences, loadPreferences, savePreferences, writeAutosave } from './persistence';
+import { Preferences, defaultPreferences, loadPreferences, savePreferences } from './persistence';
+import { RecoveryStore } from './recovery';
 
 export type EditorMode = 'object' | 'edit' | 'sculpt';
 export type PivotMode = 'median' | 'cursor';
@@ -61,6 +62,7 @@ export class Editor {
   readonly camera = new ViewportCamera();
   readonly renderer: Renderer;
   readonly history = new History();
+  readonly recovery = new RecoveryStore();
 
   mode: EditorMode = 'object';
   editObjectId: number | null = null;
@@ -395,7 +397,7 @@ export class Editor {
   snapshot(label: string): EditorSnapshot {
     return {
       label,
-      scene: this.scene.toJSON(),
+      scene: this.scene.toJSON(this.history.store),
       mode: this.mode,
       editObject: this.editObjectId,
       selectMode: this.selectMode,
@@ -1123,18 +1125,26 @@ export class Editor {
     this.autosaveTimer = setInterval(() => this.autosaveNow(false), period) as unknown as number;
   }
 
-  /** Write a recovery copy. Returns false when storage refused it. */
-  autosaveNow(announce = true): boolean {
-    const res = writeAutosave(this.scene.toJSON(), 'Autosave');
-    if (res.ok) {
-      this.dirtySinceSave = false;
-      if (announce) this.setStatus('Autosaved');
-      return true;
-    }
-    if (announce || this.dirtySinceSave) {
-      this.setStatus(`Autosave skipped — ${res.reason ?? 'storage unavailable'}`);
-    }
-    return false;
+  /**
+   * Write a recovery copy.
+   *
+   * Storage is asynchronous, so this returns before the write lands; that is
+   * deliberate, because the alternative is stalling the frame on a scene that
+   * may be tens of megabytes. The store serializes overlapping saves itself.
+   */
+  autosaveNow(announce = true): Promise<boolean> {
+    const scene = this.scene.toJSON();
+    return this.recovery.save(scene, 'Autosave').then((res) => {
+      if (res.ok) {
+        this.dirtySinceSave = false;
+        if (announce) this.setStatus(`Autosaved (${res.where === 'indexeddb' ? 'local database' : 'browser storage'})`);
+        return true;
+      }
+      if (announce || this.dirtySinceSave) {
+        this.setStatus(`Autosave skipped — ${res.reason ?? 'storage unavailable'}`);
+      }
+      return false;
+    });
   }
 
   confirmModal(): void {

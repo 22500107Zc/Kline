@@ -1,14 +1,14 @@
-import { SerializedScene } from '../scene/Scene';
-
 /**
- * Local persistence: preferences, the recent-file list and a crash-recovery
- * autosave. All of it is best-effort — storage can be full, disabled or
- * unavailable (a file:// page, a private window), and none of that is worth
- * interrupting the user over, so every path degrades to "no saved state".
+ * Local persistence: preferences and the recent-file list. Both are small and
+ * both are best-effort — storage can be full, disabled or unavailable (a
+ * file:// page, a private window), and none of that is worth interrupting the
+ * user over, so every path degrades to "no saved state".
+ *
+ * Crash recovery used to live here too. It outgrew `localStorage` and moved to
+ * `recovery.ts`, which uses IndexedDB.
  */
 
 const PREFS_KEY = 'kiln.preferences';
-const AUTOSAVE_KEY = 'kiln.autosave';
 const RECENT_KEY = 'kiln.recent';
 
 export interface Preferences {
@@ -74,58 +74,6 @@ export function savePreferences(p: Preferences): void {
   }
 }
 
-export interface AutosaveRecord {
-  savedAt: number;
-  name: string;
-  scene: SerializedScene;
-}
-
-export interface AutosaveResult {
-  ok: boolean;
-  reason?: string;
-  bytes?: number;
-}
-
-export function writeAutosave(scene: SerializedScene, name: string): AutosaveResult {
-  const s = storage();
-  if (!s) return { ok: false, reason: 'Local storage is unavailable' };
-  const payload = JSON.stringify({ savedAt: Date.now(), name, scene } satisfies AutosaveRecord);
-  try {
-    s.setItem(AUTOSAVE_KEY, payload);
-    return { ok: true, bytes: payload.length };
-  } catch {
-    // Almost always the quota: embedded textures make a scene very large.
-    try {
-      s.removeItem(AUTOSAVE_KEY);
-    } catch {
-      /* ignore */
-    }
-    return { ok: false, reason: 'Scene is too large to autosave locally', bytes: payload.length };
-  }
-}
-
-export function readAutosave(): AutosaveRecord | null {
-  const s = storage();
-  if (!s) return null;
-  try {
-    const raw = s.getItem(AUTOSAVE_KEY);
-    if (!raw) return null;
-    const rec = JSON.parse(raw) as AutosaveRecord;
-    return rec && rec.scene ? rec : null;
-  } catch {
-    return null;
-  }
-}
-
-export function clearAutosave(): void {
-  const s = storage();
-  try {
-    s?.removeItem(AUTOSAVE_KEY);
-  } catch {
-    /* ignore */
-  }
-}
-
 export interface RecentEntry {
   name: string;
   openedAt: number;
@@ -152,14 +100,4 @@ export function noteRecentFile(name: string): void {
   } catch {
     /* ignore */
   }
-}
-
-export function formatAge(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s}s ago`;
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m} min ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h} h ago`;
-  return `${Math.round(h / 24)} days ago`;
 }
