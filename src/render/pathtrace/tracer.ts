@@ -395,7 +395,6 @@ function skyColor(scene: TraceScene, dz: number, out: Float64Array): void {
 }
 
 const hitScratch: Hit = { ...noHit };
-const shadowScratch: Hit = { ...noHit };
 const tangent = new Float64Array(6);
 const dir = new Float64Array(3);
 const envScratch = new Float64Array(3);
@@ -413,6 +412,174 @@ const FIREFLY_CLAMP = 1.25;
 const SAMPLE_CLAMP = 6;
 
 /**
+ * The chance the scatter step would have picked this direction, per unit solid
+ * angle. It has to mirror the sampling code below exactly — the same lobe
+ * split, the same GGX distribution — or the MIS weights stop summing to one
+ * and the image drifts light or dark.
+ */
+function bsdfPdfFor(
+  nx: number, ny: number, nz: number, vx: number, vy: number, vz: number,
+  lx: number, ly: number, lz: number, rough: number, metallic: number, ndl: number,
+): number {
+  const ndv = Math.max(1e-4, nx * vx + ny * vy + nz * vz);
+  const fresnel = 0.04 + 0.96 * Math.pow(1 - ndv, 5);
+  const specProb = Math.min(0.9, Math.max(0.1, Math.max(metallic, fresnel)));
+
+  let hx = vx + lx;
+  let hy = vy + ly;
+  let hz = vz + lz;
+  const hl = Math.hypot(hx, hy, hz) || 1;
+  hx /= hl;
+  hy /= hl;
+  hz /= hl;
+  const ndh = Math.max(1e-4, nx * hx + ny * hy + nz * hz);
+  const vdh = Math.max(1e-4, vx * hx + vy * hy + vz * hz);
+  const a = rough * rough;
+  const a2 = a * a;
+  const denom = ndh * ndh * (a2 - 1) + 1;
+  const d = a2 / (Math.PI * denom * denom);
+  // Half-vector density, converted from the half vector to the outgoing one.
+  const pSpec = (d * ndh) / (4 * vdh);
+  const pDiff = ndl / Math.PI;
+  return specProb * pSpec + (1 - specProb) * pDiff;
+}
+
+const shadowHit: Hit = { ...noHit };
+const shadowTint = new Float64Array(3);
+
+/**
+ * How much of a light survives the trip to a shading point, as an RGB factor
+ * in `shadowTint`. Returns false when the path is fully blocked.
+ *
+ * A binary "did anything get in the way" is wrong the moment the scene has
+ * glass in it: a window would cast the same shadow as a brick. Transmissive
+ * surfaces tint the light and let the ray carry on; so does an alpha cutout,
+ * proportionally. Everything else stops it.
+ */
+function shadowTransmittance(
+  scene: TraceScene, bvh: Bvh,
+  ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, tMax: number,
+): boolean {
+  shadowTint[0] = 1;
+  shadowTint[1] = 1;
+  shadowTint[2] = 1;
+  let travelled = 0;
+  // Bounded: a ray through a dozen panes of glass contributes nothing worth
+  // the traversals, and an unbounded loop is a hang waiting to happen.
+  for (let step = 0; step < 8; step++) {
+    const remaining = tMax - travelled;
+    if (remaining <= EPS) return true;
+    if (!intersect(scene, bvh, ox, oy, oz, dx, dy, dz, remaining, false, shadowHit)) return true;
+    const mi = scene.material[shadowHit.tri] * MATERIAL_STRIDE;
+    const alpha = scene.materials[mi + 9];
+    const transmission = scene.materials[mi + 10];
+    const openness = transmission + (1 - transmission) * (1 - alpha);
+    if (openness <= 0.001) return false;
+    // Tinted glass colours what passes; a clear cutout does not.
+    shadowTint[0] *= openness * (transmission > 0 ? scene.materials[mi] : 1);
+    shadowTint[1] *= openness * (transmission > 0 ? scene.materials[mi + 1] : 1);
+    shadowTint[2] *= openness * (transmission > 0 ? scene.materials[mi + 2] : 1);
+    if (shadowTint[0] + shadowTint[1] + shadowTint[2] < 1e-4) return false;
+    const advance = shadowHit.t + EPS * 4;
+    travelled += advance;
+    ox += dx * advance;
+    oy += dy * advance;
+    oz += dz * advance;
+  }
+  return true;
+}
+
+const lightPoint = new Float64Array(6);
+
+/**
+ * Pick an emissive triangle in proportion to its area and a uniform point on
+ * it. Writes position into 0..2 and the geometric normal into 3..5, and
+ * returns the triangle index, or -1 when the scene has no emitters.
+ */
+function sampleEmissive(scene: TraceScene, rng: Rng, out: Float64Array): number {
+  const n = scene.emissive.length;
+  if (n === 0 || scene.emissiveArea <= 0) return -1;
+  // Binary search the running area sum.
+  const target = rng.next() * scene.emissiveArea;
+  let lo = 0;
+  let hi = n - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (scene.emissiveCdf[mid] < target) lo = mid + 1;
+    else hi = mid;
+  }
+  const tri = scene.emissive[lo];
+  const o = tri * 9;
+  // The usual square-root warp, which spreads points evenly over a triangle
+  // where a naive pair of uniforms would bunch them into one corner.
+  let a = rng.next();
+  let b = rng.next();
+  const sa = Math.sqrt(a);
+  a = 1 - sa;
+  b = b * sa;
+  const c = 1 - a - b;
+  out[0] = scene.positions[o] * a + scene.positions[o + 3] * b + scene.positions[o + 6] * c;
+  out[1] = scene.positions[o + 1] * a + scene.positions[o + 4] * b + scene.positions[o + 7] * c;
+  out[2] = scene.positions[o + 2] * a + scene.positions[o + 5] * b + scene.positions[o + 8] * c;
+  const e1x = scene.positions[o + 3] - scene.positions[o];
+  const e1y = scene.positions[o + 4] - scene.positions[o + 1];
+  const e1z = scene.positions[o + 5] - scene.positions[o + 2];
+  const e2x = scene.positions[o + 6] - scene.positions[o];
+  const e2y = scene.positions[o + 7] - scene.positions[o + 1];
+  const e2z = scene.positions[o + 8] - scene.positions[o + 2];
+  let cx = e1y * e2z - e1z * e2y;
+  let cy = e1z * e2x - e1x * e2z;
+  let cz = e1x * e2y - e1y * e2x;
+  const cl = Math.hypot(cx, cy, cz) || 1;
+  out[3] = cx / cl;
+  out[4] = cy / cl;
+  out[5] = cz / cl;
+  return tri;
+}
+
+/** Area of one triangle, for converting between area and solid-angle pdfs. */
+function triangleArea(scene: TraceScene, tri: number): number {
+  const o = tri * 9;
+  const e1x = scene.positions[o + 3] - scene.positions[o];
+  const e1y = scene.positions[o + 4] - scene.positions[o + 1];
+  const e1z = scene.positions[o + 5] - scene.positions[o + 2];
+  const e2x = scene.positions[o + 6] - scene.positions[o];
+  const e2y = scene.positions[o + 7] - scene.positions[o + 1];
+  const e2z = scene.positions[o + 8] - scene.positions[o + 2];
+  const cx = e1y * e2z - e1z * e2y;
+  const cy = e1z * e2x - e1x * e2z;
+  const cz = e1x * e2y - e1y * e2x;
+  return Math.hypot(cx, cy, cz) * 0.5;
+}
+
+/**
+ * The probability, per unit solid angle, that light sampling would have
+ * produced this direction towards this emissive triangle. Needed to weight a
+ * BSDF ray that lands on an emitter against the light sample that could have
+ * found it.
+ */
+function emissivePdf(scene: TraceScene, tri: number, dist: number, cosAtLight: number): number {
+  if (scene.emissiveArea <= 0 || cosAtLight <= 1e-6) return 0;
+  const area = triangleArea(scene, tri);
+  if (area <= 0) return 0;
+  // Uniform over total area, converted to solid angle at the shading point.
+  return (dist * dist) / (cosAtLight * scene.emissiveArea);
+}
+
+/**
+ * The balance heuristic, squared — the "power heuristic" with beta 2. Given
+ * two ways of finding the same light path, it weights each by how likely it
+ * was to have found it, which suppresses the variance either strategy has
+ * where the other is strong.
+ */
+function powerHeuristic(pdfA: number, pdfB: number): number {
+  const a = pdfA * pdfA;
+  const b = pdfB * pdfB;
+  const sum = a + b;
+  return sum > 0 ? a / sum : 0;
+}
+
+/**
  * Trace one path and return its radiance. Written as a loop with an explicit
  * throughput rather than recursion so the depth limit is exact and the hot
  * path allocates nothing.
@@ -420,14 +587,24 @@ const SAMPLE_CLAMP = 6;
 function radiance(
   scene: TraceScene, bvh: Bvh, rng: Rng, maxBounces: number,
   ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
-  out: Float64Array,
+  out: Float64Array, feature: Float64Array | null = null,
 ): void {
+  if (feature) {
+    feature[0] = 0; feature[1] = 0; feature[2] = 0;
+    feature[3] = 0; feature[4] = 0; feature[5] = 0;
+    feature[6] = 0;
+  }
   let tr = 1;
   let tg = 1;
   let tb = 1;
   let ar = 0;
   let ag = 0;
   let ab = 0;
+  /**
+   * Solid-angle pdf of the direction that got us here, or 0 for the camera
+   * ray and for perfectly specular steps where light sampling cannot compete.
+   */
+  let bsdfPdf = 0;
 
   for (let bounce = 0; bounce <= maxBounces; bounce++) {
     if (!intersect(scene, bvh, ox, oy, oz, dx, dy, dz, Infinity, false, hitScratch)) {
@@ -435,6 +612,12 @@ function radiance(
       ar += tr * envScratch[0];
       ag += tg * envScratch[1];
       ab += tb * envScratch[2];
+      if (feature && bounce === 0) {
+        feature[0] = envScratch[0];
+        feature[1] = envScratch[1];
+        feature[2] = envScratch[2];
+        feature[6] = 1e9;
+      }
       break;
     }
 
@@ -469,13 +652,46 @@ function radiance(
     const metallic = scene.materials[mi + 3];
     const rough = Math.max(0.015, scene.materials[mi + 4]);
     const emitStrength = scene.materials[mi + 8];
+    const alpha = scene.materials[mi + 9];
+    const transmission = scene.materials[mi + 10];
+    const ior = Math.max(1.0001, scene.materials[mi + 11]);
+
+    if (feature && bounce === 0) {
+      // Glass and mirrors have no surface colour worth guiding a filter with,
+      // so leave their albedo white and let the normal do the work.
+      const flat = transmission > 0.5 || metallic > 0.9;
+      feature[0] = flat ? 1 : albR;
+      feature[1] = flat ? 1 : albG;
+      feature[2] = flat ? 1 : albB;
+      feature[3] = nx;
+      feature[4] = ny;
+      feature[5] = nz;
+      feature[6] = t;
+    }
 
     if (emitStrength > 0) {
-      // Emissive surfaces are not in the analytic light list, so there is no
-      // direct-lighting estimate to double count against.
-      ar += tr * scene.materials[mi + 5] * emitStrength;
-      ag += tg * scene.materials[mi + 6] * emitStrength;
-      ab += tb * scene.materials[mi + 7] * emitStrength;
+      // Emissive surfaces are sampled directly as well, so this hit and that
+      // sample are two routes to the same light path. Weight by which route
+      // was more likely to find it; without that, every emitter is counted
+      // twice and the image comes out too bright.
+      let weight = 1;
+      if (bsdfPdf > 0 && scene.emissiveArea > 0) {
+        const cosAtLight = Math.max(0, -(nx * dx + ny * dy + nz * dz));
+        const pl = emissivePdf(scene, tri, t, cosAtLight);
+        weight = pl > 0 ? powerHeuristic(bsdfPdf, pl) : 1;
+      }
+      ar += tr * scene.materials[mi + 5] * emitStrength * weight;
+      ag += tg * scene.materials[mi + 6] * emitStrength * weight;
+      ab += tb * scene.materials[mi + 7] * emitStrength * weight;
+    }
+
+    // Alpha is a cutout, not glass: the ray carries on unchanged, which is
+    // what leaves and fences want and what refraction would get wrong.
+    if (alpha < 1 && rng.next() > alpha) {
+      ox = px + dx * EPS;
+      oy = py + dy * EPS;
+      oz = pz + dz * EPS;
+      continue;
     }
 
     // ---- next event estimation against the analytic lights
@@ -530,21 +746,116 @@ function radiance(
       }
       const ndl = nx * lx + ny * ly + nz * lz;
       if (ndl <= 0 || atten <= 0) continue;
-      if (intersect(
+      if (!shadowTransmittance(
         scene, bvh, px + nx * EPS, py + ny * EPS, pz + nz * EPS,
-        lx, ly, lz, dist - EPS * 4, true, shadowScratch,
+        lx, ly, lz, dist - EPS * 4,
       )) continue;
       const contrib = ndl * atten;
       const kd = (1 - metallic) / Math.PI;
       const spec = ggxSpecular(nx, ny, nz, -dx, -dy, -dz, lx, ly, lz, rough, metallic, albR, albG, albB);
-      ar += tr * (albR * kd + spec[0]) * scene.lights[lo + 4] * contrib;
-      ag += tg * (albG * kd + spec[1]) * scene.lights[lo + 5] * contrib;
-      ab += tb * (albB * kd + spec[2]) * scene.lights[lo + 6] * contrib;
+      ar += tr * (albR * kd + spec[0]) * scene.lights[lo + 4] * contrib * shadowTint[0];
+      ag += tg * (albG * kd + spec[1]) * scene.lights[lo + 5] * contrib * shadowTint[1];
+      ab += tb * (albB * kd + spec[2]) * scene.lights[lo + 6] * contrib * shadowTint[2];
+    }
+
+    // ---- next event estimation against emissive surfaces
+    //
+    // An emission plane is how most people light an interior, and finding one
+    // by chance is hopeless: a diffuse bounce lands on it about as often as it
+    // covers the hemisphere. Sampling it directly turns that noise into a
+    // clean estimate, and the MIS weight keeps it honest where the BSDF was
+    // the better route anyway.
+    if (transmission < 1 && scene.emissiveArea > 0) {
+      const etri = sampleEmissive(scene, rng, lightPoint);
+      if (etri >= 0) {
+        let ex = lightPoint[0] - px;
+        let ey = lightPoint[1] - py;
+        let ez = lightPoint[2] - pz;
+        const edist = Math.hypot(ex, ey, ez) || 1e-6;
+        ex /= edist;
+        ey /= edist;
+        ez /= edist;
+        const ndl = nx * ex + ny * ey + nz * ez;
+        const cosAtLight = Math.abs(lightPoint[3] * ex + lightPoint[4] * ey + lightPoint[5] * ez);
+        if (ndl > 0 && cosAtLight > 1e-6) {
+          const pl = emissivePdf(scene, etri, edist, cosAtLight);
+          if (pl > 0 && shadowTransmittance(
+            scene, bvh, px + nx * EPS, py + ny * EPS, pz + nz * EPS,
+            ex, ey, ez, edist - EPS * 8,
+          )) {
+            const emi = scene.material[etri] * MATERIAL_STRIDE;
+            const es = scene.materials[emi + 8];
+            const kd = (1 - metallic) / Math.PI;
+            const spec = ggxSpecular(nx, ny, nz, -dx, -dy, -dz, ex, ey, ez, rough, metallic, albR, albG, albB);
+            // pdf of the BSDF having chosen this same direction, for the weight.
+            const pb = bsdfPdfFor(nx, ny, nz, -dx, -dy, -dz, ex, ey, ez, rough, metallic, ndl);
+            const wl = powerHeuristic(pl, pb);
+            const gain = Math.min(FIREFLY_CLAMP * 4, (ndl * wl) / pl);
+            ar += tr * (albR * kd + spec[0]) * scene.materials[emi + 5] * es * gain * shadowTint[0];
+            ag += tg * (albG * kd + spec[1]) * scene.materials[emi + 6] * es * gain * shadowTint[1];
+            ab += tb * (albB * kd + spec[2]) * scene.materials[emi + 7] * es * gain * shadowTint[2];
+          }
+        }
+      }
     }
 
     if (bounce === maxBounces) break;
 
     // ---- choose the next direction
+
+    // Glass. The surface either reflects or refracts, in the proportion
+    // Fresnel gives, and which one this ray does is decided by a coin flip
+    // rather than by tracing both — splitting every glass hit in two makes the
+    // path count explode through a window pane.
+    if (transmission > 0 && rng.next() < transmission) {
+      // `backface` told us the geometric normal faced away, which for a closed
+      // solid means we are on the way out.
+      const eta = backface ? ior : 1 / ior;
+      const cosI = Math.min(1, Math.max(0, -(nx * dx + ny * dy + nz * dz)));
+      const sinT2 = eta * eta * (1 - cosI * cosI);
+      // Schlick against the real interface, so the grazing sheen on glass is
+      // right rather than the metal-ish 0.04 the opaque path assumes.
+      const r0 = ((ior - 1) / (ior + 1)) ** 2;
+      const reflectance = sinT2 > 1 ? 1 : r0 + (1 - r0) * Math.pow(1 - cosI, 5);
+      if (rng.next() < reflectance) {
+        // Total internal reflection, or the reflected share of the split.
+        const dn = dx * nx + dy * ny + dz * nz;
+        dir[0] = dx - 2 * dn * nx;
+        dir[1] = dy - 2 * dn * ny;
+        dir[2] = dz - 2 * dn * nz;
+      } else {
+        const cosT = Math.sqrt(Math.max(0, 1 - sinT2));
+        const k = eta * cosI - cosT;
+        dir[0] = eta * dx + k * nx;
+        dir[1] = eta * dy + k * ny;
+        dir[2] = eta * dz + k * nz;
+        // Tinted glass: the colour multiplies in on the way through, not on
+        // every bounce off the surface.
+        tr *= albR;
+        tg *= albG;
+        tb *= albB;
+      }
+      normalize3(dir);
+      // A specular event: no direction has finite density, so light sampling
+      // could never have produced it and MIS must not try to weight it.
+      bsdfPdf = 0;
+      const along = dir[0] * nx + dir[1] * ny + dir[2] * nz;
+      ox = px + (along > 0 ? nx : -nx) * EPS;
+      oy = py + (along > 0 ? ny : -ny) * EPS;
+      oz = pz + (along > 0 ? nz : -nz) * EPS;
+      dx = dir[0];
+      dy = dir[1];
+      dz = dir[2];
+      if (bounce >= 3) {
+        const p = Math.min(0.95, Math.max(tr, tg, tb));
+        if (rng.next() > p) break;
+        tr /= p;
+        tg /= p;
+        tb /= p;
+      }
+      continue;
+    }
+
     const fresnel = 0.04 + (1 - 0.04) * Math.pow(1 - Math.max(0, -(nx * dx + ny * dy + nz * dz)), 5);
     // Bounded so neither lobe is ever sampled so rarely that the 1/p weight
     // of a single hit dominates the pixel's average.
@@ -584,6 +895,7 @@ function radiance(
       tr *= (f0r + (1 - f0r) * fs) * shared;
       tg *= (f0g + (1 - f0g) * fs) * shared;
       tb *= (f0b + (1 - f0b) * fs) * shared;
+      bsdfPdf = bsdfPdfFor(nx, ny, nz, -dx, -dy, -dz, dir[0], dir[1], dir[2], rough, metallic, ndl);
     } else {
       // Cosine-weighted hemisphere.
       const u1 = rng.next();
@@ -601,6 +913,8 @@ function radiance(
       tr *= albR * kd / (1 - specProb);
       tg *= albG * kd / (1 - specProb);
       tb *= albB * kd / (1 - specProb);
+      const ndl = Math.max(1e-4, dir[0] * nx + dir[1] * ny + dir[2] * nz);
+      bsdfPdf = bsdfPdfFor(nx, ny, nz, -dx, -dy, -dz, dir[0], dir[1], dir[2], rough, metallic, ndl);
     }
 
     ox = px + nx * EPS;
@@ -664,6 +978,7 @@ function ggxSpecular(
 // ------------------------------------------------------------ band render
 
 const sample = new Float64Array(3);
+const feature = new Float64Array(7);
 
 /**
  * Accumulate `req.samples` samples per pixel for one horizontal band.
@@ -676,6 +991,9 @@ export function renderBand(
   const { width, height, maxBounces } = settings;
   const rows = req.y1 - req.y0;
   const data = new Float32Array(rows * width * 3);
+  const albedo = new Float32Array(rows * width * 3);
+  const normal = new Float32Array(rows * width * 3);
+  const depth = new Float32Array(rows * width);
   const cam = scene.camera;
   const aspect = width / Math.max(1, height);
   const tanHalf = Math.tan(cam.fovY * 0.5);
@@ -686,6 +1004,13 @@ export function renderBand(
       let r = 0;
       let g = 0;
       let b = 0;
+      let far = 0;
+      let fag = 0;
+      let fab = 0;
+      let fnx = 0;
+      let fny = 0;
+      let fnz = 0;
+      let fd = 0;
       for (let s = 0; s < req.samples; s++) {
         const sx = (x + rng.next()) / width * 2 - 1;
         const sy = 1 - (y + rng.next()) / height * 2;
@@ -714,19 +1039,61 @@ export function renderBand(
           dx /= l;
           dy /= l;
           dz /= l;
+
+          if (cam.aperture > 0) {
+            // A real lens gathers over its whole opening, so every point off
+            // the focal plane arrives as a disc rather than a point. Move the
+            // ray's origin to a random point on that opening and re-aim it at
+            // where the pinhole ray would have crossed the focal plane; what
+            // is in focus stays put, everything else spreads.
+            const fd = cam.focusDistance;
+            const fx = ox + dx * fd;
+            const fy = oy + dy * fd;
+            const fz = oz + dz * fd;
+            // Concentric-ish disc sample: sqrt keeps it uniform over area.
+            const rr = Math.sqrt(rng.next()) * cam.aperture;
+            const ra = rng.next() * Math.PI * 2;
+            const lx = Math.cos(ra) * rr;
+            const ly = Math.sin(ra) * rr;
+            ox += cam.right[0] * lx + cam.up[0] * ly;
+            oy += cam.right[1] * lx + cam.up[1] * ly;
+            oz += cam.right[2] * lx + cam.up[2] * ly;
+            dx = fx - ox;
+            dy = fy - oy;
+            dz = fz - oz;
+            const fl = Math.hypot(dx, dy, dz) || 1;
+            dx /= fl;
+            dy /= fl;
+            dz /= fl;
+          }
         }
-        radiance(scene, bvh, rng, maxBounces, ox, oy, oz, dx, dy, dz, sample);
+        radiance(scene, bvh, rng, maxBounces, ox, oy, oz, dx, dy, dz, sample, feature);
         r += Math.min(sample[0], SAMPLE_CLAMP);
         g += Math.min(sample[1], SAMPLE_CLAMP);
         b += Math.min(sample[2], SAMPLE_CLAMP);
+        far += feature[0];
+        fag += feature[1];
+        fab += feature[2];
+        fnx += feature[3];
+        fny += feature[4];
+        fnz += feature[5];
+        fd += Math.min(feature[6], 1e6);
       }
-      const o = ((y - req.y0) * width + x) * 3;
+      const pi = (y - req.y0) * width + x;
+      const o = pi * 3;
       data[o] = r;
       data[o + 1] = g;
       data[o + 2] = b;
+      albedo[o] = far;
+      albedo[o + 1] = fag;
+      albedo[o + 2] = fab;
+      normal[o] = fnx;
+      normal[o + 1] = fny;
+      normal[o + 2] = fnz;
+      depth[pi] = fd;
     }
   }
-  return { y0: req.y0, y1: req.y1, samples: req.samples, data };
+  return { y0: req.y0, y1: req.y1, samples: req.samples, data, albedo, normal, depth };
 }
 
 /** ACES-ish tonemap plus sRGB encode, matching the viewport. */

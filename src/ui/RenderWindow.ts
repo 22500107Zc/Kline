@@ -66,12 +66,25 @@ export class RenderWindow {
       input.addEventListener('keydown', (e) => e.stopPropagation());
       return h('label', { class: 'tl-range' }, [h('span', { text: label }), input]);
     };
+    // Denoising is a post step over what has already accumulated, so it can be
+    // toggled mid-render and the result repainted without starting over.
+    const dn = h('input', { type: 'checkbox', checked: s.denoise }) as HTMLInputElement;
+    dn.addEventListener('change', () => {
+      s.denoise = dn.checked;
+      const job = this.editor.activeRender;
+      if (job) job.settings.denoise = s.denoise;
+      this.repaint();
+    });
+    dn.addEventListener('keydown', (e) => e.stopPropagation());
+
     this.settingsRow.append(
       num('Width', s.width, (v) => { s.width = Math.min(4096, v); }),
       num('Height', s.height, (v) => { s.height = Math.min(4096, v); }),
       num('Samples', s.samples, (v) => { s.samples = Math.min(8192, v); }),
       num('Bounces', s.maxBounces, (v) => { s.maxBounces = Math.min(32, v); }),
       h('label', { class: 'tl-range exposure' }, [h('span', { text: 'Exposure' }), stops, stopsLabel]),
+      h('label', { class: 'tl-range', title: 'Edge-aware filter over the accumulated samples' },
+        [h('span', { text: 'Denoise' }), dn]),
     );
   }
 

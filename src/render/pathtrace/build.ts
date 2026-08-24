@@ -58,9 +58,11 @@ export function buildTraceScene(scene: Scene, camera: TraceCamera, skyStrength =
     materials[o + 7] = m.emission[2];
     materials[o + 8] = m.emissionStrength;
     materials[o + 9] = m.alpha;
+    materials[o + 10] = m.transmission;
+    materials[o + 11] = Math.max(1.0001, m.ior);
   }
   if (scene.materials.length === 0) {
-    materials.set([0.75, 0.75, 0.78, 0, 0.5, 0, 0, 0, 0, 1]);
+    materials.set([0.75, 0.75, 0.78, 0, 0.5, 0, 0, 0, 0, 1, 0, 1.45]);
   }
 
   const lightObjects = [...scene.objects.values()].filter((o) => o.type === 'light' && o.visible && o.light);
@@ -88,12 +90,45 @@ export function buildTraceScene(scene: Scene, camera: TraceCamera, skyStrength =
     lights[o + 11] = Math.cos(l.spotAngle);
   });
 
+  const positions = new Float32Array(posList);
+  const material = new Int32Array(matList);
+
+  // Emissive triangles, kept with a running area sum so a light sample can
+  // pick one in proportion to how much of the scene's glow it accounts for.
+  const emissiveList: number[] = [];
+  const cdfList: number[] = [];
+  let area = 0;
+  for (let tri = 0; tri < material.length; tri++) {
+    const mo = material[tri] * MATERIAL_STRIDE;
+    const strength = materials[mo + 8];
+    if (strength <= 0) continue;
+    if (materials[mo + 5] + materials[mo + 6] + materials[mo + 7] <= 0) continue;
+    const o = tri * 9;
+    const e1x = positions[o + 3] - positions[o];
+    const e1y = positions[o + 4] - positions[o + 1];
+    const e1z = positions[o + 5] - positions[o + 2];
+    const e2x = positions[o + 6] - positions[o];
+    const e2y = positions[o + 7] - positions[o + 1];
+    const e2z = positions[o + 8] - positions[o + 2];
+    const cx = e1y * e2z - e1z * e2y;
+    const cy = e1z * e2x - e1x * e2z;
+    const cz = e1x * e2y - e1y * e2x;
+    const a = Math.hypot(cx, cy, cz) * 0.5;
+    if (!(a > 0)) continue;
+    area += a;
+    emissiveList.push(tri);
+    cdfList.push(area);
+  }
+
   return {
-    positions: new Float32Array(posList),
+    positions,
     normals: new Float32Array(nrmList),
     uvs: new Float32Array(uvList),
-    material: new Int32Array(matList),
+    material,
     materials,
+    emissive: new Int32Array(emissiveList),
+    emissiveCdf: new Float32Array(cdfList),
+    emissiveArea: area,
     lights,
     lightCount: lightObjects.length,
     background: [...scene.world.background] as [number, number, number],
@@ -117,6 +152,10 @@ export function cameraFromViewport(vc: ViewportCamera): TraceCamera {
     fovY: vc.fov,
     orthographic: vc.orthographic,
     orthoHeight: vc.orthoHalfHeight(),
+    // The viewport camera is a pinhole; depth of field belongs to a real
+    // camera object, where the user can see and set it.
+    aperture: 0,
+    focusDistance: vc.distance,
   };
 }
 
@@ -137,5 +176,7 @@ export function cameraFromObject(scene: Scene, objId: number): TraceCamera | nul
     fovY: obj.camera.fov,
     orthographic: false,
     orthoHeight: 1,
+    aperture: Math.max(0, obj.camera.aperture ?? 0),
+    focusDistance: Math.max(1e-3, obj.camera.focusDistance ?? 5),
   };
 }

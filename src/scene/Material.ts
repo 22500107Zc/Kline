@@ -8,6 +8,14 @@ export interface Material {
   emissionStrength: number;
   /** 0 = fully transparent, 1 = opaque. Alpha-blended in the viewport. */
   alpha: number;
+  /**
+   * How much light passes through and refracts rather than scattering off the
+   * surface. 1 with a low roughness is glass; alpha is a cutout by comparison,
+   * since it lets light through without bending it.
+   */
+  transmission: number;
+  /** Index of refraction. 1.45 is glass, 1.33 water, 2.4 diamond. */
+  ior: number;
   /** Scene texture id multiplied into the base colour, or null for a flat colour. */
   baseColorTexture: number | null;
   /** Tiling and offset applied to the mesh's coordinates before sampling. */
@@ -27,6 +35,8 @@ export function createMaterial(partial: Partial<Material> = {}): Material {
     emission: partial.emission ?? [0, 0, 0],
     emissionStrength: partial.emissionStrength ?? 0,
     alpha: partial.alpha ?? 1,
+    transmission: partial.transmission ?? 0,
+    ior: partial.ior ?? 1.45,
     baseColorTexture: partial.baseColorTexture ?? null,
     uvScale: partial.uvScale ?? [1, 1],
     uvOffset: partial.uvOffset ?? [0, 0],

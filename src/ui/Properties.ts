@@ -223,6 +223,18 @@ export class Properties {
           label: 'm', value: cam.far, step: 10, min: 1,
           onChange: (v) => { cam.far = v; ed.requestRender(); },
         })),
+        row('Aperture', numberField({
+          label: 'm', value: cam.aperture ?? 0, step: 0.005, precision: 3, min: 0,
+          onChange: (v) => { cam.aperture = v; ed.requestRender(); ed.emit('change'); },
+        })),
+        row('Focus distance', numberField({
+          label: 'm', value: cam.focusDistance ?? 8, step: 0.1, precision: 2, min: 0.01,
+          onChange: (v) => { cam.focusDistance = v; ed.requestRender(); ed.emit('change'); },
+        })),
+        h('p', {
+          class: 'dim small',
+          text: 'An aperture above zero blurs everything off the focus distance, in a full render (F12).',
+        }),
       ]));
     }
   }
@@ -541,12 +553,26 @@ export class Properties {
         onLive: (v) => { mat.alpha = v; live(); },
         onChange: (v) => { mat.alpha = v; live(); ed.emit('change'); },
       })),
+      row('Transmission', numberField({
+        label: '', value: mat.transmission, step: 0.01, min: 0, max: 1,
+        onLive: (v) => { mat.transmission = v; live(); },
+        onChange: (v) => { mat.transmission = v; live(); ed.emit('change'); },
+      })),
+      row('IOR', numberField({
+        label: '', value: mat.ior, step: 0.01, min: 1, max: 3,
+        onLive: (v) => { mat.ior = v; live(); },
+        onChange: (v) => { mat.ior = v; live(); ed.emit('change'); },
+      })),
       row('Emission', this.colorInput(mat.emission, (c) => { mat.emission = c; live(); })),
       row('Emission strength', numberField({
         label: '', value: mat.emissionStrength, step: 0.1, min: 0,
         onLive: (v) => { mat.emissionStrength = v; live(); },
         onChange: (v) => { mat.emissionStrength = v; live(); ed.emit('change'); },
       })),
+      h('p', {
+        class: 'dim small',
+        text: 'Transmission and emission are traced in a full render (F12); the viewport approximates them.',
+      }),
       h('p', { class: 'dim small', text: 'Material shading shows in the Material and Rendered viewport modes (press Z).' }),
     ]));
 

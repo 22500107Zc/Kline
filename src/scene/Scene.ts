@@ -27,6 +27,13 @@ export interface CameraData {
   far: number;
   orthographic: boolean;
   orthoScale: number;
+  /**
+   * Lens radius in scene units. Zero is a pinhole — everything sharp, which is
+   * what a renderer does by default and what no real camera does.
+   */
+  aperture?: number;
+  /** Distance to the plane that stays sharp when the aperture is open. */
+  focusDistance?: number;
 }
 
 export function createLightData(type: LightType = 'point'): LightData {
@@ -40,7 +47,10 @@ export function createLightData(type: LightType = 'point'): LightData {
 }
 
 export function createCameraData(): CameraData {
-  return { fov: 39.6 * (Math.PI / 180), near: 0.1, far: 1000, orthographic: false, orthoScale: 6 };
+  return {
+    fov: 39.6 * (Math.PI / 180), near: 0.1, far: 1000, orthographic: false, orthoScale: 6,
+    aperture: 0, focusDistance: 8,
+  };
 }
 
 export class SceneObject {

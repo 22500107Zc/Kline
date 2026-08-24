@@ -4,8 +4,11 @@
  * worker with no serialization step of its own.
  */
 
-/** Per material: colour(3) metallic roughness emission(3) emissionStrength alpha. */
-export const MATERIAL_STRIDE = 10;
+/**
+ * Per material: colour(3) metallic roughness emission(3) emissionStrength
+ * alpha transmission ior.
+ */
+export const MATERIAL_STRIDE = 12;
 /** Per light: position(3) type colour(3) radius direction(3) spotCos. */
 export const LIGHT_STRIDE = 12;
 
@@ -18,6 +21,13 @@ export interface TraceCamera {
   fovY: number;
   orthographic: boolean;
   orthoHeight: number;
+  /**
+   * Lens radius in scene units. Zero is a pinhole; anything larger throws
+   * everything off the focal plane out of focus, the way a real lens does.
+   */
+  aperture: number;
+  /** Distance to the plane that stays sharp. */
+  focusDistance: number;
 }
 
 export interface TraceScene {
@@ -32,6 +42,16 @@ export interface TraceScene {
   materials: Float32Array;
   lights: Float32Array;
   lightCount: number;
+  /**
+   * Triangles with emissive materials, so they can be sampled directly rather
+   * than found by luck. Without this an emission plane — the way most people
+   * light an interior — is pure noise.
+   */
+  emissive: Int32Array;
+  /** Running sum of emissive triangle areas, for picking one by area. */
+  emissiveCdf: Float32Array;
+  /** Total emissive area; zero when the scene has no emissive surfaces. */
+  emissiveArea: number;
   background: [number, number, number];
   ambient: number;
   /** Strength of the sky as an area light, on top of the flat background. */
@@ -49,12 +69,17 @@ export interface RenderSettings {
   transparentBackground: boolean;
   /** Stops of exposure applied before tonemapping; 0 leaves it alone. */
   exposure: number;
+  /**
+   * Run the edge-aware filter over the result. Worth it below a few hundred
+   * samples, where the noise floor is what you notice rather than the light.
+   */
+  denoise: boolean;
 }
 
 export function defaultRenderSettings(): RenderSettings {
   return {
     width: 960, height: 540, samples: 128, maxBounces: 6,
-    samplesPerPass: 4, transparentBackground: false, exposure: 0,
+    samplesPerPass: 4, transparentBackground: false, exposure: 0, denoise: true,
   };
 }
 
@@ -72,4 +97,12 @@ export interface BandResult {
   samples: number;
   /** RGB radiance sums for the band, 3 floats per pixel. */
   data: Float32Array;
+  /**
+   * First-hit surface colour, normal and distance, summed the same way. These
+   * are what let a filter tell a noisy flat wall from a genuine edge: they
+   * come out of the same rays for free and carry almost no noise themselves.
+   */
+  albedo: Float32Array;
+  normal: Float32Array;
+  depth: Float32Array;
 }

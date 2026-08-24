@@ -1,3 +1,4 @@
+import { denoise } from './denoise';
 import { Bvh, buildBvh, renderBand, tonemapToImage } from './tracer';
 import { BandRequest, BandResult, RenderSettings, TraceScene } from './types';
 
@@ -12,6 +13,14 @@ import { BandRequest, BandResult, RenderSettings, TraceScene } from './types';
  */
 export class RenderJob {
   readonly accum: Float32Array;
+  /**
+   * First-hit surface colour, normal and distance, accumulated alongside the
+   * radiance. They cost nothing extra to gather and they are what lets the
+   * filter tell an edge from noise.
+   */
+  readonly accumAlbedo: Float32Array;
+  readonly accumNormal: Float32Array;
+  readonly accumDepth: Float32Array;
   samplesDone = 0;
   triangles = 0;
   cancelled = false;
@@ -32,7 +41,11 @@ export class RenderJob {
     private scene: TraceScene,
     readonly settings: RenderSettings,
   ) {
-    this.accum = new Float32Array(settings.width * settings.height * 3);
+    const px = settings.width * settings.height;
+    this.accum = new Float32Array(px * 3);
+    this.accumAlbedo = new Float32Array(px * 3);
+    this.accumNormal = new Float32Array(px * 3);
+    this.accumDepth = new Float32Array(px);
   }
 
   get totalPasses(): number {
@@ -44,14 +57,54 @@ export class RenderJob {
   }
 
   /** Tonemapped pixels for whatever has accumulated so far. */
-  toImageData(): ImageData {
+  toImageData(filter = this.settings.denoise): ImageData {
     const { width, height } = this.settings;
     const out = new Uint8ClampedArray(width * height * 4);
+    const samples = Math.max(1, this.samplesDone);
+    const source = filter ? this.filtered(samples) : this.accum;
     tonemapToImage(
-      this.accum, Math.max(1, this.samplesDone), width, height, out,
+      source, filter ? 1 : samples, width, height, out,
       this.settings.transparentBackground, null, this.settings.exposure,
     );
     return new ImageData(out, width, height);
+  }
+
+  /**
+   * The accumulated image with the edge-aware filter applied.
+   *
+   * Filter strength falls off as samples accumulate: at eight samples the
+   * noise is the thing you see and a heavy filter is a clear win, while at a
+   * thousand there is little left to remove and over-filtering would only cost
+   * detail. Below four passes the reach is too short to help at all.
+   */
+  private filtered(samples: number): Float32Array {
+    const { width, height } = this.settings;
+    const n = width * height;
+    const inv = 1 / samples;
+    const color = new Float32Array(n * 3);
+    const albedo = new Float32Array(n * 3);
+    const normal = new Float32Array(n * 3);
+    const depth = new Float32Array(n);
+    for (let i = 0; i < n * 3; i++) {
+      color[i] = this.accum[i] * inv;
+      albedo[i] = this.accumAlbedo[i] * inv;
+      normal[i] = this.accumNormal[i] * inv;
+    }
+    for (let i = 0; i < n; i++) depth[i] = this.accumDepth[i] * inv;
+    // Normals averaged over samples come back short; renormalize so the
+    // agreement test measures direction rather than sample count.
+    for (let i = 0; i < n; i++) {
+      const o = i * 3;
+      const l = Math.hypot(normal[o], normal[o + 1], normal[o + 2]);
+      if (l > 1e-6) {
+        normal[o] /= l;
+        normal[o + 1] /= l;
+        normal[o + 2] /= l;
+      }
+    }
+    const passes = samples >= 512 ? 3 : samples >= 128 ? 4 : 5;
+    const colorSigma = samples >= 512 ? 1.5 : samples >= 128 ? 2.5 : 4;
+    return denoise({ width, height, color, albedo, normal, depth }, { passes, colorSigma });
   }
 
   async run(): Promise<void> {
@@ -153,7 +206,13 @@ export class RenderJob {
   private absorb(result: BandResult): void {
     const { width } = this.settings;
     const base = result.y0 * width * 3;
-    for (let i = 0; i < result.data.length; i++) this.accum[base + i] += result.data[i];
+    for (let i = 0; i < result.data.length; i++) {
+      this.accum[base + i] += result.data[i];
+      this.accumAlbedo[base + i] += result.albedo[i];
+      this.accumNormal[base + i] += result.normal[i];
+    }
+    const dbase = result.y0 * width;
+    for (let i = 0; i < result.depth.length; i++) this.accumDepth[dbase + i] += result.depth[i];
   }
 
   private completePass(): void {

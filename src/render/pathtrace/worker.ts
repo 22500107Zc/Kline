@@ -31,6 +31,8 @@ ctx.onmessage = (e: MessageEvent): void => {
   }
   if (msg.type === 'band' && scene && settings && bvh) {
     const result = renderBand(scene, bvh, settings, msg.req);
-    ctx.postMessage({ type: 'band', result }, [result.data.buffer]);
+    ctx.postMessage({ type: 'band', result }, [
+      result.data.buffer, result.albedo.buffer, result.normal.buffer, result.depth.buffer,
+    ]);
   }
 };
