@@ -224,11 +224,21 @@ the UI are all in this repository, and each piece is readable on its own.
 - Vertex, edge and face select modes with box select, edge-ring select and
   x-ray selection
 - **Bevel** (`Ctrl+B`) with drag-to-width, scroll-to-segments and a profile
-  control — rounds edges and face regions, and stays watertight doing it
+  control. The arc is centred where a real fillet's is, so a rounded cube comes
+  out with the volume Steiner's formula says it should have; the width clamps
+  globally rather than per corner, so it stays even instead of pinching; and
+  per-edge weights let one operation round the hard corners heavily and leave
+  the soft ones alone
 - **Booleans** — union, difference and intersect, destructively or as a live
-  modifier pointed at another object
+  modifier pointed at another object. Surface-based rather than BSP, so two
+  curved surfaces meeting almost tangentially cost nothing special — the case
+  that hangs a BSP boolean finishes here in about 60ms — and the result is
+  repaired back to a closed solid rather than left with hairline cracks
 - Extrude region (constrained to the face normal), inset with live preview,
   loop cut with a scroll-adjustable cut count and on-canvas preview
+- **Knife** (`K`) — click a line over the model and it cuts along it, sharing
+  the new vertices between both faces on every edge it crosses so the seam is
+  a seam and not a hairline crack
 - Bisect with a cap, spin/revolve, bridge edge loops, symmetrize, poke,
   limited dissolve, T-junction repair
 - **Decimate** by quadric error metrics — cut a scan or a subdivided mesh to a
@@ -243,7 +253,14 @@ the UI are all in this repository, and each piece is readable on its own.
   `Shift` for precision, `Esc` to cancel
 
 **Sculpting**
-- Eight brushes: draw, smooth, inflate, grab, flatten, scrape, pinch, crease
+- Eleven brushes: draw, smooth, inflate, grab, flatten, scrape, pinch, crease,
+  mask, weight and colour
+- Dabs land at a fixed spacing along the stroke, so the same gesture gives the
+  same result whether you draw it fast or slowly
+- **Voxel remesh** — rebuild the topology at an even density from the shape
+  alone, for when a limb you pulled out has run out of polygons
+- **Masking** holds part of the model still, so you can sculpt a face without
+  dragging the ear along with it
 - Radius, strength and auto-smooth; `Ctrl` inverts, `[` and `]` resize
 - X/Y/Z symmetry, and a brush ring drawn on the surface so you can see the
   falloff before you commit to it
@@ -252,25 +269,59 @@ the UI are all in this repository, and each piece is readable on its own.
 - **Unwrap** (`U`) with least-squares conformal maps, cut along seams you mark
   or where the surface folds past an angle limit
 - Smart, cube, cylinder, sphere and planar projection
-- Islands packed at a shared texel density, so one texture resolves the whole
-  model evenly
-- A UV editor (`Cmd/Ctrl+U`) that shades every face by stretch, because a
-  wireframe layout cannot show the thing that actually ruins a texture
+- Islands packed at a shared texel density by a MaxRects packer that tries
+  several orderings and bin widths, so one texture resolves the whole model
+  evenly and does not spend half of itself on air
+- A UV editor (`Cmd/Ctrl+U`) that shades every face by stretch — a wireframe
+  layout cannot show the thing that actually ruins a texture — and lets you
+  drag the coordinates directly
+- **Texture painting** straight onto the model, stamped once per face so a
+  seam gets painted from both sides and does not show as a gap
+- **Vertex colours**, for getting colour onto something without unwrapping it
+  first
 - Image textures with tiling and offset, plus a generated UV checker
 
 **Animation**
 - Keyframes on location, rotation and scale, with constant, linear and
   auto-eased bezier interpolation
+- Keyframes on properties too: light power and colour, camera field of view,
+  material colour, roughness, metallic, alpha and emission
+- A **graph editor** (`Cmd/Ctrl+G`) that draws the actual curves — drag keys to
+  retime or revalue them, and see the easing rather than guessing at it
 - A timeline with a scrubbable playhead, keyframe markers, frame range, fps
   and looping playback
 - Exported into glTF as real animation samplers
 
+**Rigging**
+- Armatures with bones you extrude into a chain, drawn as octahedra so their
+  roll is visible
+- **Bind with automatic weights** in one step — weights, modifier and link
+- Four bone influences per vertex, saved with the mesh so subdividing carries
+  them
+- A weight brush for fixing what the automatic pass got wrong
+
+**Physics**
+- Rigid bodies, active and passive, as boxes or spheres
+- **Bake to keyframes** over the timeline, after which nothing depends on the
+  solver — the animation is the artefact
+- Sequential-impulse contacts with positional correction, so a stack settles
+  instead of sinking or shuffling
+
 **Rendering**
 - A **path-traced renderer**: BVH-accelerated, metallic-roughness GGX, soft
-  shadows from sized lights, emissive surfaces, a sky dome and global
-  illumination
+  shadows from sized lights, a sky dome and global illumination
+- **Glass** — transmission and index of refraction, with total internal
+  reflection, and shadow rays that pass through it instead of treating a window
+  as a brick
+- **Emissive surfaces sampled directly**, with multiple importance sampling, so
+  an emission plane lights a room cleanly instead of as noise
+- **Depth of field** from a camera aperture and focus distance
+- An **edge-aware denoiser** guided by surface colour, normal and depth, so a
+  low-sample preview is usable — noise falls off as the square root of samples,
+  which makes the last of the speckle the most expensive part of the image
 - Progressive — the image refines pass by pass, across every core the machine
-  has, and you can re-grade the exposure without restarting
+  has, and you can re-grade the exposure or toggle the denoiser without
+  restarting
 - Save the result as a PNG
 
 **Scene**
@@ -284,6 +335,10 @@ the UI are all in this repository, and each piece is readable on its own.
 
 **Viewport**
 - Solid (studio-lit), Material (scene-lit PBR) and Wireframe shading
+- **Shadow mapping** from the strongest sun or spot, filtered so the edges are
+  soft rather than stepped
+- Mipmapped, anisotropically filtered textures — without them a textured floor
+  shimmers on every camera move
 - Infinite grid that re-scales by powers of ten, selection outlines, edit-mode
   overlays, light and camera gizmos, a 3D cursor
 - Orbit/pan/zoom, orthographic toggle, numpad axis views, frame selected/all
@@ -292,8 +347,13 @@ the UI are all in this repository, and each piece is readable on its own.
 - Save and open scenes as `.kiln` (plain JSON — diffable, scriptable)
 - Import OBJ; export OBJ + MTL, binary STL, and glTF 2.0 with
   `KHR_lights_punctual`
-- Snapshot undo/redo across every operation, including modifier edits
-- Crash-recovery autosave, offered rather than restored silently on next launch
+- Snapshot undo/redo across every operation, including modifier edits. Snapshots
+  share the meshes an edit did not touch, so editing one object in a scene of
+  twenty no longer copies all twenty, and the history is bounded by memory as
+  well as by a step count
+- Crash-recovery autosave to IndexedDB, which has room for a real scene — five
+  rolling copies, offered rather than restored silently, because the one you
+  want back is often not the newest
 
 ## Keyboard
 
@@ -303,7 +363,9 @@ the UI are all in this repository, and each piece is readable on its own.
 | `1` `2` `3` | Vertex / edge / face select |
 | `G` `R` `S` | Move, rotate, scale — then `X`/`Y`/`Z`, or type a number |
 | `E` `I` `Ctrl+R` `Ctrl+B` | Extrude, inset, loop cut, bevel |
+| `K` | Knife — click points, `Enter` to cut |
 | `U` | Unwrap the selection |
+| `Cmd/Ctrl+U` `Cmd/Ctrl+G` | UV editor, graph editor |
 | `O` `Shift+Tab` | Proportional editing, snapping |
 | `I` `Alt+I` | Insert / delete keyframe (Object Mode) |
 | `Space` `←` `→` | Play, step a frame |
@@ -349,17 +411,30 @@ src/
     llm.ts              Ollama / OpenAI-compatible code generation
     recipes.ts          Procedural subjects, for when no model is connected
     interpreter.ts      Offline prompt -> plan
-    bevel.ts            Fan-based bevel: sectors, profiles, corner caps
-    boolean.ts          BSP constructive solid geometry + T-junction repair
+    bevel.ts            Fan-based bevel: sectors, profiles, corner patches
+    csg.ts              Surface-based booleans: BVH crossings, cut, classify
+    bvh.ts              Triangle BVH: box queries, raycasts, inside tests
+    boolean.ts          Post-cut repair: coplanar dissolve, stitching, manifold
+    knife.ts            Screen-space cutting with shared seam vertices
+    remesh.ts           Signed distance field + marching cubes
+    skin.ts             Bone weights, envelope binding, linear blend skinning
     modeling.ts         Bisect, spin, bridge, symmetrize, poke
     decimate.ts         Quadric error metric simplification
-  uv/unwrap.ts        Islands, LSCM flattening, projections, packing
+  uv/
+    unwrap.ts           Islands, LSCM flattening, projections
+    pack.ts             MaxRects island packing
+    transfer.ts         Resampling coordinates across an edit
+  paint/texture.ts    Painting onto a texture through the UV layout
   sculpt/sculpt.ts    Brushes, falloff and the hash grid they query
-  anim/animation.ts   Channels, interpolation, sampling
+  physics/            Rigid bodies, and baking them down to keyframes
+  anim/
+    animation.ts        Channels, interpolation, sampling
+    armature.ts         Bones, pose evaluation, skinning matrices
   modifiers/          Non-destructive stack; each modifier is mesh -> mesh
   scene/              Scene graph, materials, lights, the orbit camera
   render/             WebGL2 forward renderer, GLSL, buffer builders
     pathtrace/          BVH, GGX path tracer, worker pool, progressive job
+      denoise.ts          Edge-aware a-trous filter, guided by the first hit
   editor/             Modes, selection, CPU picking, modal transforms, undo,
                       the command registry and keymap
     selection.ts        Mode-authoritative selection derivation
@@ -389,10 +464,24 @@ conversion rules. Deriving everything from vertices is simpler but wrong: an
 edge ring around a closed shape has every corner as an endpoint, so a
 vertex-derived edge set would light up the whole mesh.
 
-**Undo takes whole-scene snapshots.** Memory in exchange for correctness: every
-operator, however exotic, is undoable without anybody writing a matching
-inverse. A modal transform pushes one snapshot before it starts, so cancelling
-an extrude rolls back the extrusion *and* the move.
+**Undo takes whole-scene snapshots, but shares what did not change.** Snapshots
+in exchange for correctness: every operator, however exotic, is undoable
+without anybody writing a matching inverse. The obvious cost — copying every
+mesh in the scene on every edit — is avoided by serializing each mesh once per
+revision and letting every snapshot point at the same frozen blob, so the work
+is proportional to what the edit touched. A modal transform pushes one snapshot
+before it starts, so cancelling an extrude rolls back the extrusion *and* the
+move.
+
+**Booleans work on surfaces, not on a tree of planes.** The classic BSP
+approach splits every polygon against every plane it meets, which is fine on
+flat operands and never finishes on two rounded surfaces meeting almost
+tangentially. Kiln finds the triangle pairs that actually cross through a BVH,
+cuts only those, and classifies each piece by ray parity — so the work is
+proportional to the number of crossings rather than to their arrangement.
+Floating point still leaves the occasional sliver, and no tolerance setting
+removes those without eating real detail, so the result is repaired back to a
+closed solid instead.
 
 ## Development
 
@@ -418,26 +507,35 @@ genuine topology regressions.
 
 Honest list of what Blender has that Kiln does not:
 
-- **Rigging and skinning.** Animation here keyframes object transforms; there
-  are no armatures, no weights and no shape keys.
-- **Physics and simulation.** No rigid bodies, cloth, fluid or particles.
 - **Geometry nodes** and **Python scripting.** The Build box writes JavaScript
   against a sandboxed geometry API instead, and `kiln.editor` in the browser
   console reaches the live scene.
-- **Knife and poly-build.** Bisect cuts with a plane; there is no freehand cut.
-- **Texture painting.** Textures can be loaded and mapped, not painted.
-- **Dynamic topology while sculpting.** The brushes move the vertices that are
-  there, so detail needs a Subdivision modifier or a subdivide first.
-- **UDIMs, multiple UV maps, and vertex colours.**
+- **Inverse kinematics and constraints.** Bones are posed directly; there is no
+  IK chain, no copy-rotation, no drivers.
+- **Shape keys** and **non-linear animation.** One action per object, no NLA
+  strips, no blending between takes.
+- **Cloth, fluid, smoke and particles.** Physics here is rigid bodies only.
+- **Dynamic topology while sculpting.** Voxel remesh rebuilds the whole mesh at
+  an even density; the brushes themselves move the vertices that are there.
+- **A node-based shader editor.** Materials are a fixed metallic-roughness set
+  with one base colour map.
+- **UDIMs and multiple UV maps.** One layout, one 1024² paint map per material.
+- **Convex hulls and mesh colliders** for physics. Bodies are boxes or spheres
+  fitted to the bounds.
 
 Also true, and worth knowing before you rely on it: the path tracer runs on the
 CPU, so a large image at a high sample count is minutes rather than seconds;
+one light casts viewport shadows rather than all of them; box-box physics
+contacts ignore rotation, so a tumbling crate settles as an upright one;
 reference images cannot be pinned in the viewport to model against;
 photogrammetry from a video's many frames is not implemented; and meshes above
 roughly a million triangles make the viewport uncomfortable, because surfaces
-are uploaded unindexed.
+are uploaded unindexed — which is deliberate, since flat shading, per-face
+materials and per-face selection all need attributes that differ between the
+faces meeting at a vertex.
 
-Rigging, texture painting and a knife tool are next.
+The desktop builds are **unsigned**, and signing them needs certificates that
+cost money rather than code.
 
 ## Contributing
 
