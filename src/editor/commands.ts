@@ -15,7 +15,7 @@ import { decimate } from '../mesh/decimate';
 import {
   cubeProject, cylinderProject, markSeams, planarProject, smartProject, sphereProject, unwrap,
 } from '../uv/unwrap';
-import { generateCheckerTexture, loadTextureFile } from '../scene/Texture';
+import { blankTexture, generateCheckerTexture, loadTextureFile } from '../scene/Texture';
 import { FALLOFF_LABELS, FalloffType } from './proportional';
 import { SNAP_LABELS, SnapMode } from './snapping';
 import { BRUSH_LABELS, SculptBrush } from '../sculpt/sculpt';
@@ -820,6 +820,54 @@ export const COMMANDS: Command[] = [
       });
     },
     enabled: (ed) => ed.mode === 'edit' && ed.selection.edges.size > 0,
+  },
+  {
+    id: 'paint.newTexture', label: 'New Paint Map', category: 'Mesh',
+    run: (ed) => {
+      const obj = ed.editObject ?? ed.scene.get(ed.scene.active ?? -1);
+      if (!obj || obj.type !== 'mesh') {
+        ed.setStatus('Select a mesh first');
+        return;
+      }
+      ed.beginUndo('New paint map');
+      // A blank white map, and a material to hang it on if there is not one.
+      let slot = obj.materialSlots[0];
+      if (slot === undefined || !ed.scene.materials[slot]) {
+        slot = ed.scene.addMaterial();
+        obj.materialSlots = [slot];
+      }
+      const tex = blankTexture(`${obj.name} paint`, 1024);
+      ed.scene.textures.push(tex);
+      ed.scene.materials[slot].baseColorTexture = tex.id;
+      if (!obj.mesh?.hasUV) {
+        // Painting needs somewhere to put the pixels; an unwrapped mesh has
+        // nowhere, so do the obvious thing rather than failing.
+        smartProject(obj.mesh!, 66, 0.01);
+        ed.setStatus(`Made a 1024² paint map and unwrapped ${obj.name} for it`);
+      } else {
+        ed.setStatus(`Made a 1024² paint map for ${obj.name}`);
+      }
+      obj.invalidate();
+      ed.markGeometryDirty(obj);
+      ed.emit('change');
+    },
+    enabled: (ed) => !!(ed.editObject ?? ed.scene.get(ed.scene.active ?? -1)),
+  },
+  {
+    id: 'paint.clearColors', label: 'Clear Vertex Colours', category: 'Mesh',
+    run: (ed) => {
+      const mesh = (ed.editObject ?? ed.scene.get(ed.scene.active ?? -1))?.mesh;
+      if (!mesh?.colors) {
+        ed.setStatus('Nothing painted');
+        return;
+      }
+      ed.beginUndo('Clear vertex colours');
+      mesh.colors = null;
+      mesh.markDirty();
+      ed.setStatus('Vertex colours cleared');
+      ed.emit('change');
+      ed.requestRender();
+    },
   },
   {
     id: 'view.uvCheck', label: 'Toggle UV Checker', category: 'View',

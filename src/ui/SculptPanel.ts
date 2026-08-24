@@ -1,6 +1,7 @@
 import { Editor } from '../editor/Editor';
 import { BRUSH_LABELS, SculptBrush } from '../sculpt/sculpt';
 import { runCommand } from '../editor/commands';
+import { hexToLinear, linearToHex } from '../scene/Material';
 import { checkbox, clear, h } from './dom';
 
 /** Brush picker and settings, shown only while Sculpt Mode is active. */
@@ -84,6 +85,44 @@ export class SculptPanel {
     });
     this.root.appendChild(sym);
 
+    if (ed.sculpt.brush === 'color') {
+      this.root.append(
+        h('span', { class: 'sp-head', text: 'Colour' }),
+        this.colorPicker(ed.sculpt.paintColor, (c) => {
+          ed.sculpt.paintColor = c;
+          ed.emit('change');
+        }),
+        h('p', { class: 'sp-hint', text: 'Ctrl paints white. Vertex colour multiplies into the material.' }),
+      );
+    }
+
+    if (ed.sculpt.brush === 'texture') {
+      const mat = ed.scene.materials[ed.sculptObject?.materialSlots[0] ?? 0];
+      const hasMap = !!mat && mat.baseColorTexture !== null;
+      this.root.append(
+        h('span', { class: 'sp-head', text: 'Colour' }),
+        this.colorPicker(ed.paintBrush.color, (c) => {
+          ed.paintBrush.color = c;
+          ed.emit('change');
+        }),
+        this.slider('Softness', ed.paintBrush.softness, 0, 1, 0.01, (v) => {
+          ed.paintBrush.softness = v;
+        }, (v) => v.toFixed(2)),
+      );
+      if (!hasMap) {
+        this.root.append(
+          h('p', {
+            class: 'sp-warn',
+            text: 'This material has no base colour map to paint on.',
+          }),
+          h('button', {
+            class: 'btn', text: 'Create a blank map',
+            on: { click: () => runCommand(ed, 'paint.newTexture') },
+          }),
+        );
+      }
+    }
+
     // The weight brush needs to know which bone it is painting, and that only
     // makes sense once the mesh is actually bound to something.
     if (ed.sculpt.brush === 'weight') {
@@ -146,5 +185,14 @@ export class SculptPanel {
       ed.requestRender();
       ed.emit('change');
     }));
+  }
+
+  /** A colour swatch bound to a linear RGB triple. */
+  private colorPicker(
+    value: [number, number, number], onChange: (c: [number, number, number]) => void,
+  ): HTMLElement {
+    const input = h('input', { type: 'color', class: 'color-input', value: linearToHex(value) });
+    input.addEventListener('input', () => onChange(hexToLinear((input as HTMLInputElement).value)));
+    return input;
   }
 }

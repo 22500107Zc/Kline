@@ -14,7 +14,7 @@ import { MAX_INFLUENCES, resizeSkin, setWeight, weightOf } from '../mesh/skin';
 
 export type SculptBrush =
   | 'draw' | 'smooth' | 'inflate' | 'grab' | 'flatten' | 'scrape' | 'pinch' | 'crease' | 'mask'
-  | 'weight';
+  | 'weight' | 'color' | 'texture';
 
 export const BRUSH_LABELS: Record<SculptBrush, string> = {
   draw: 'Draw',
@@ -27,6 +27,8 @@ export const BRUSH_LABELS: Record<SculptBrush, string> = {
   crease: 'Crease',
   mask: 'Mask',
   weight: 'Weight',
+  color: 'Colour',
+  texture: 'Texture',
 };
 
 export interface SculptSettings {
@@ -54,12 +56,15 @@ export interface SculptSettings {
    * lives here so a stroke carries everything it needs.
    */
   weightBone: number;
+  /** Linear RGB the colour brush paints. */
+  paintColor: [number, number, number];
 }
 
 export function defaultSculpt(): SculptSettings {
   return {
     brush: 'draw', radius: 0.35, strength: 0.5, invert: false,
     symmetry: [false, false, false], autoSmooth: 0.1, spacing: 0.2, weightBone: 0,
+    paintColor: [0.85, 0.25, 0.2],
   };
 }
 
@@ -263,6 +268,26 @@ export class SculptStroke {
   private dabAt(center: Vec3, normal: Vec3, radius: number, s: SculptSettings): number {
     const verts = this.grid.query(center, radius);
     if (verts.length === 0) return 0;
+
+    // The colour brush paints vertex colour rather than the surface.
+    if (s.brush === 'color') {
+      const colors = this.mesh.ensureColors();
+      // Inverted paints white, which is the eraser people reach for.
+      const target = s.invert ? [1, 1, 1] : s.paintColor;
+      let n = 0;
+      for (const i of verts) {
+        const w = brushFalloff(this.mesh.positions[i].distanceTo(center) / radius)
+          * (1 - this.mesh.maskAt(i));
+        if (w <= 0) continue;
+        const k = clamp(s.strength * w, 0, 1);
+        for (let c = 0; c < 3; c++) {
+          colors[i * 3 + c] += (target[c] - colors[i * 3 + c]) * k;
+        }
+        this.touched.add(i);
+        n++;
+      }
+      return n;
+    }
 
     // The weight brush paints bone influence rather than the surface.
     if (s.brush === 'weight') {

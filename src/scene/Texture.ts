@@ -76,3 +76,22 @@ export function generateCheckerTexture(size = 512, squares = 8): SceneTexture {
   }
   return createTexture('UV Checker', canvas.toDataURL('image/png'), size, size);
 }
+
+/**
+ * A blank white map to paint on.
+ *
+ * White rather than transparent: the map multiplies into the base colour, so
+ * white is the value that changes nothing, and a new map should leave the
+ * model looking exactly as it did.
+ */
+export function blankTexture(name: string, size = 1024): SceneTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, size, size);
+  }
+  return createTexture(name, canvas.toDataURL('image/png'), size, size);
+}

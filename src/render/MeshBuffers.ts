@@ -6,7 +6,7 @@ import { Mesh } from '../mesh/Mesh';
  * splitting draws.
  */
 
-export const SURFACE_STRIDE = 10; // pos(3) normal(3) uv(2) flags(1) matId(1)
+export const SURFACE_STRIDE = 13; // pos(3) normal(3) uv(2) flags(1) matId(1) colour(3)
 export const LINE_STRIDE = 6; // pos(3) color(3)
 export const POINT_STRIDE = 4; // pos(3) flags(1)
 
@@ -29,6 +29,7 @@ export function buildSurface(mesh: Mesh, selectedFaces: Set<number> | null): Buf
     const flag = selectedFaces && selectedFaces.has(f) ? 1 : 0;
     const mat = mesh.faceMaterial[f] ?? 0;
     const uv = mesh.uvFor(f);
+    const vc = mesh.colors;
     for (let i = 1; i + 1 < loop.length; i++) {
       for (const corner of [0, i, i + 1]) {
         const v = loop[corner];
@@ -40,6 +41,13 @@ export function buildSurface(mesh: Mesh, selectedFaces: Set<number> | null): Buf
         data[o++] = uv ? uv[corner * 2 + 1] : 0;
         data[o++] = flag;
         data[o++] = mat;
+        // White where nothing has been painted, so an unpainted mesh shades
+        // exactly as it did before vertex colours existed.
+        const ci = v * 3;
+        const painted = vc && ci + 2 < vc.length;
+        data[o++] = painted ? vc[ci] : 1;
+        data[o++] = painted ? vc[ci + 1] : 1;
+        data[o++] = painted ? vc[ci + 2] : 1;
       }
     }
   }

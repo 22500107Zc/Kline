@@ -59,6 +59,7 @@ in vec3 aNormal;
 in vec2 aUV;
 in float aFlags;
 in float aMatId;
+in vec3 aVColor;
 
 uniform mat4 uViewProj;
 uniform mat4 uModel;
@@ -67,6 +68,7 @@ uniform mat4 uNormalMat;
 out vec3 vWorld;
 out vec3 vNormal;
 out vec2 vUV;
+out vec3 vVColor;
 flat out float vFlags;
 flat out int vMat;
 
@@ -75,6 +77,7 @@ void main() {
   vWorld = world.xyz;
   vNormal = normalize((uNormalMat * vec4(aNormal, 0.0)).xyz);
   vUV = aUV;
+  vVColor = aVColor;
   vFlags = aFlags;
   vMat = int(aMatId + 0.5);
   gl_Position = uViewProj * world;
@@ -88,6 +91,7 @@ ${COMMON}
 in vec3 vWorld;
 in vec3 vNormal;
 in vec2 vUV;
+in vec3 vVColor;
 flat in float vFlags;
 flat in int vMat;
 
@@ -158,6 +162,9 @@ void main() {
     vec3 lin = mix(pow((tex.rgb + 0.055) / 1.055, vec3(2.4)), tex.rgb / 12.92, step(tex.rgb, vec3(0.04045)));
     albedo *= lin;
   }
+  // Vertex colour multiplies in, which is what makes an unpainted mesh (all
+  // white) shade exactly as it did before there were vertex colours.
+  albedo *= vVColor;
   if (uUVCheck > 0.5) albedo = uvGrid(vUV);
   float metallic = uMatMR[mi].x;
   float rough = clamp(uMatMR[mi].y, 0.03, 1.0);

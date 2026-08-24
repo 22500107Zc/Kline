@@ -71,6 +71,12 @@ export class Mesh {
    * carry them, and swapping the rig should not throw them away.
    */
   skin: SkinData | null = null;
+  /**
+   * Per-vertex linear RGB, three floats each. Painted directly on the model
+   * and multiplied into the material's base colour, which is the quickest way
+   * to get colour onto something without unwrapping it first.
+   */
+  colors: Float32Array | null = null;
 
   private _topology: Topology | null = null;
   private _revision = 0;
@@ -157,6 +163,22 @@ export class Mesh {
     return this.mask && v < this.mask.length ? this.mask[v] : 0;
   }
 
+  /** Vertex colour at a vertex; white when the mesh has none. */
+  colorAt(v: number): [number, number, number] {
+    if (!this.colors || v * 3 + 2 >= this.colors.length) return [1, 1, 1];
+    return [this.colors[v * 3], this.colors[v * 3 + 1], this.colors[v * 3 + 2]];
+  }
+
+  /** The colour array, grown to the current vertex count. New vertices are white. */
+  ensureColors(): Float32Array {
+    if (!this.colors || this.colors.length !== this.positions.length * 3) {
+      const next = new Float32Array(this.positions.length * 3).fill(1);
+      if (this.colors) next.set(this.colors.subarray(0, Math.min(this.colors.length, next.length)));
+      this.colors = next;
+    }
+    return this.colors;
+  }
+
   /** The mask array, grown to the current vertex count and created if absent. */
   ensureMask(): Float32Array {
     if (!this.mask || this.mask.length !== this.positions.length) {
@@ -214,6 +236,7 @@ export class Mesh {
     m.edgeWeights = this.edgeWeights ? new Map(this.edgeWeights) : null;
     m.mask = this.mask ? this.mask.slice() : null;
     m.skin = this.skin ? { bones: this.skin.bones.slice(), weights: this.skin.weights.slice() } : null;
+    m.colors = this.colors ? this.colors.slice() : null;
     return m;
   }
 
@@ -475,6 +498,7 @@ export class Mesh {
     edgeWeights?: [string, number][] | null;
     mask?: number[] | null;
     skin?: { bones: number[]; weights: number[] } | null;
+    colors?: number[] | null;
   } {
     const positions: number[] = [];
     for (const p of this.positions) positions.push(p.x, p.y, p.z);
@@ -489,6 +513,7 @@ export class Mesh {
       edgeWeights: this.edgeWeights ? [...this.edgeWeights] : null,
       mask: this.mask ? [...this.mask] : null,
       skin: this.skin ? { bones: [...this.skin.bones], weights: [...this.skin.weights] } : null,
+      colors: this.colors ? [...this.colors] : null,
     };
   }
 
@@ -507,6 +532,7 @@ export class Mesh {
     m.skin = d.skin
       ? { bones: Int32Array.from(d.skin.bones), weights: Float32Array.from(d.skin.weights) }
       : null;
+    m.colors = d.colors && d.colors.length ? Float32Array.from(d.colors) : null;
     return m;
   }
 }

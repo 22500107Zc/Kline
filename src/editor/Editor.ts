@@ -22,6 +22,8 @@ import { knifeCut } from '../mesh/knife';
 import { clearPose, createBone, sortBones } from '../anim/armature';
 import { envelopeWeights } from '../mesh/skin';
 import { createModifier } from '../modifiers';
+import { Brush, PaintSurface, defaultBrush, paintTargets, uvScaleAt } from '../paint/texture';
+import { SceneTexture } from '../scene/Texture';
 import { transferUV } from '../uv/transfer';
 import { RenderJob } from '../render/pathtrace/RenderJob';
 import { RenderSettings, defaultRenderSettings } from '../render/pathtrace/types';
@@ -1128,6 +1130,70 @@ export class Editor {
     return { local, normal, radius: this.sculpt.radius / avg };
   }
 
+  // --------------------------------------------------------- texture paint
+
+  /** The live pixel surface for the texture being painted, if any. */
+  private paintSurface: PaintSurface | null = null;
+  paintBrush: Brush = defaultBrush();
+
+  /** The texture the active object's material paints onto, or null. */
+  private paintTexture(): SceneTexture | null {
+    const obj = this.sculptObject;
+    if (!obj) return null;
+    const slot = obj.materialSlots[0] ?? 0;
+    const mat = this.scene.materials[slot];
+    if (!mat || mat.baseColorTexture === null) return null;
+    return this.scene.textures.find((t) => t.id === mat.baseColorTexture) ?? null;
+  }
+
+  /**
+   * Ready a surface to paint on.
+   *
+   * The texture's own pixels are drawn in first, so painting over an imported
+   * map edits it rather than starting from blank — and the decode is
+   * asynchronous, so the first dab of a stroke may land before it finishes.
+   * That is a cosmetic race on the first stroke only, and waiting for it would
+   * mean dropping the click.
+   */
+  private ensurePaintSurface(): PaintSurface | null {
+    const tex = this.paintTexture();
+    if (!tex) return null;
+    if (this.paintSurface?.texture === tex) return this.paintSurface;
+    this.paintSurface = new PaintSurface(tex);
+    void this.paintSurface.adoptExisting();
+    return this.paintSurface;
+  }
+
+  /** Stamp the texture brush wherever the cursor is over the model. */
+  private paintTextureAt(local: Vec3, radius: number): boolean {
+    const surface = this.ensurePaintSurface();
+    const mesh = this.sculptObject?.mesh;
+    if (!surface || !mesh) return false;
+    const targets = paintTargets(mesh, local, radius);
+    if (targets.length === 0) return false;
+    // Radius is in world units; the brush works in texture pixels, and the
+    // ratio between them is whatever the unwrap decided.
+    const scale = uvScaleAt(mesh, targets[0].face);
+    const brush: Brush = {
+      ...this.paintBrush,
+      radius: Math.max(1, radius * scale * surface.width),
+      strength: this.paintBrush.strength,
+      color: this.sculpt.invert ? [1, 1, 1] : this.paintBrush.color,
+    };
+    for (const target of targets) surface.stamp(brush, target.uv[0], target.uv[1], target.outline);
+    return true;
+  }
+
+  /** Write painted pixels back into the scene texture. */
+  private commitPaint(): void {
+    if (!this.paintSurface?.hasUncommittedPaint) return;
+    if (this.paintSurface.commit()) {
+      this.renderer.invalidateTextures();
+      this.dirtySinceSave = true;
+      this.changed();
+    }
+  }
+
   private beginStroke(x: number, y: number, invert: boolean): boolean {
     const obj = this.sculptObject;
     const mesh = obj?.mesh;
@@ -1136,6 +1202,16 @@ export class Editor {
     if (!hit) return false;
     this.beginUndo(`Sculpt ${this.sculpt.brush}`);
     this.sculpt.invert = invert;
+    if (this.sculpt.brush === 'texture') {
+      if (!this.paintTextureAt(hit.local, hit.radius)) {
+        this.setStatus('Give this object a material with a base colour map to paint on');
+        return false;
+      }
+      this.strokeStart = hit.local;
+      this.stroke = new SculptStroke(mesh, this.sculpt, hit.radius);
+      this.stroke.begin(hit.local, hit.radius);
+      return true;
+    }
     this.stroke = new SculptStroke(mesh, this.sculpt, hit.radius);
     this.strokeStart = hit.local;
     this.stroke.begin(hit.local, hit.radius);
@@ -1168,6 +1244,14 @@ export class Editor {
     }
     const hit = this.sculptHit(x, y);
     if (!hit) return;
+    if (this.sculpt.brush === 'texture') {
+      this.paintTextureAt(hit.local, hit.radius);
+      // Painting shows immediately; the encode back to the texture waits for
+      // the stroke to end, because a PNG per dab would make this unusable.
+      this.renderer.uploadPaintPreview(this.paintSurface?.canvas ?? null, this.paintTexture()?.id ?? -1);
+      this.requestRender();
+      return;
+    }
     // `stroke` lays down as many dabs as the distance covered calls for, so
     // the result does not depend on how fast the pointer was moving.
     if (this.stroke.stroke(hit.local, hit.normal, hit.radius, new Vec3()) > 0) {
@@ -1177,6 +1261,7 @@ export class Editor {
 
   private endStroke(): void {
     if (!this.stroke) return;
+    this.commitPaint();
     this.stroke = null;
     this.strokeStart = null;
     this.sculpt.invert = false;

@@ -37,6 +37,12 @@ export interface TraceScene {
   normals: Float32Array;
   /** 6 floats per triangle, or empty when the mesh has no coordinates. */
   uvs: Float32Array;
+  /**
+   * 9 floats per triangle of vertex colour, or empty when nothing is painted.
+   * Multiplied into the base colour the same way the viewport does it, so a
+   * render matches what was on screen.
+   */
+  colors: Float32Array;
   /** One material index per triangle. */
   material: Int32Array;
   materials: Float32Array;

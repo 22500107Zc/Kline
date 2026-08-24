@@ -646,9 +646,17 @@ function radiance(
     }
 
     const mi = scene.material[tri] * MATERIAL_STRIDE;
-    const albR = scene.materials[mi];
-    const albG = scene.materials[mi + 1];
-    const albB = scene.materials[mi + 2];
+    let albR = scene.materials[mi];
+    let albG = scene.materials[mi + 1];
+    let albB = scene.materials[mi + 2];
+    if (scene.colors.length > 0) {
+      // Painted colour multiplies in, interpolated across the triangle exactly
+      // as the viewport shades it.
+      const co = tri * 9;
+      albR *= scene.colors[co] * w + scene.colors[co + 3] * u + scene.colors[co + 6] * v;
+      albG *= scene.colors[co + 1] * w + scene.colors[co + 4] * u + scene.colors[co + 7] * v;
+      albB *= scene.colors[co + 2] * w + scene.colors[co + 5] * u + scene.colors[co + 8] * v;
+    }
     const metallic = scene.materials[mi + 3];
     const rough = Math.max(0.015, scene.materials[mi + 4]);
     const emitStrength = scene.materials[mi + 8];

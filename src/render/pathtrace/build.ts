@@ -8,7 +8,9 @@ export function buildTraceScene(scene: Scene, camera: TraceCamera, skyStrength =
   const posList: number[] = [];
   const nrmList: number[] = [];
   const uvList: number[] = [];
+  const colList: number[] = [];
   const matList: number[] = [];
+  let anyColor = false;
 
   for (const obj of scene.objects.values()) {
     if (!obj.visible || obj.type !== 'mesh') continue;
@@ -30,6 +32,8 @@ export function buildTraceScene(scene: Scene, camera: TraceCamera, skyStrength =
       const slot = mesh.faceMaterial[f] ?? 0;
       const matIndex = slots[Math.min(slot, slots.length - 1)] ?? 0;
       const uv = mesh.uvFor(f);
+      const vc = mesh.colors;
+      if (vc) anyColor = true;
       for (let i = 1; i + 1 < loop.length; i++) {
         for (const corner of [0, i, i + 1]) {
           const v = loop[corner];
@@ -38,6 +42,12 @@ export function buildTraceScene(scene: Scene, camera: TraceCamera, skyStrength =
           posList.push(p.x, p.y, p.z);
           nrmList.push(n.x, n.y, n.z);
           uvList.push(uv ? uv[corner * 2] : 0, uv ? uv[corner * 2 + 1] : 0);
+          const painted = vc && v * 3 + 2 < vc.length;
+          colList.push(
+            painted ? vc[v * 3] : 1,
+            painted ? vc[v * 3 + 1] : 1,
+            painted ? vc[v * 3 + 2] : 1,
+          );
         }
         matList.push(matIndex);
       }
@@ -124,6 +134,9 @@ export function buildTraceScene(scene: Scene, camera: TraceCamera, skyStrength =
     positions,
     normals: new Float32Array(nrmList),
     uvs: new Float32Array(uvList),
+    // Left empty when nothing is painted, so the tracer can skip the lookup
+    // rather than multiplying by white a few million times.
+    colors: anyColor ? new Float32Array(colList) : new Float32Array(0),
     material,
     materials,
     emissive: new Int32Array(emissiveList),

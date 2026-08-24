@@ -294,7 +294,7 @@ export class Renderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, entry.surface.buffer);
     setupAttribs(gl, p, [
       { name: 'aPos', size: 3 }, { name: 'aNormal', size: 3 }, { name: 'aUV', size: 2 },
-      { name: 'aFlags', size: 1 }, { name: 'aMatId', size: 1 },
+      { name: 'aFlags', size: 1 }, { name: 'aMatId', size: 1 }, { name: 'aVColor', size: 3 },
     ]);
     gl.drawArrays(gl.TRIANGLES, 0, entry.surface.count);
     this.lastDrawCalls++;
@@ -381,7 +381,7 @@ export class Renderer {
       gl.bindBuffer(gl.ARRAY_BUFFER, entry.surface.buffer);
       setupAttribs(gl, p, [
         { name: 'aPos', size: 3 }, { name: 'aNormal', size: 3 },
-        { name: 'aFlags', size: 1 }, { name: 'aMatId', size: 1 },
+        { name: 'aFlags', size: 1 }, { name: 'aMatId', size: 1 }, { name: 'aVColor', size: 3 },
       ]);
       gl.drawArrays(gl.TRIANGLES, 0, entry.surface.count);
       this.lastDrawCalls++;
@@ -639,6 +639,38 @@ export class Renderer {
       };
       img.src = tex.url;
     });
+  }
+
+  /**
+   * Force the texture array to be rebuilt on the next frame.
+   *
+   * The signature check keys on the data URL, so a texture whose pixels
+   * changed but whose URL happens to be the same length would otherwise be
+   * missed.
+   */
+  invalidateTextures(): void {
+    this.textureSignature = '';
+  }
+
+  /**
+   * Push a paint canvas straight into its texture layer, skipping the encode.
+   *
+   * Painting has to show up on the model as the brush moves, and going through
+   * a PNG for that would be far too slow. The proper upload still happens when
+   * the stroke ends; this just keeps the viewport honest in between.
+   */
+  uploadPaintPreview(canvas: HTMLCanvasElement | null, textureId: number): void {
+    if (!canvas || !this.textureArray) return;
+    const layer = this.textureLayers.get(textureId);
+    if (layer === undefined) return;
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textureArray);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texSubImage3D(
+      gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, TEXTURE_SIZE, TEXTURE_SIZE, 1,
+      gl.RGBA, gl.UNSIGNED_BYTE, canvas,
+    );
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   }
 
   private bindTextures(p: Program): void {
