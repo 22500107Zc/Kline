@@ -1,6 +1,9 @@
 import { Mat4, Vec3 } from '../core/math';
 import { Mesh } from '../mesh/Mesh';
 import { catmullClark, mergeByDistance, smoothVertices, triangulateFaces } from '../mesh/ops';
+import { BooleanOp, meshBoolean } from '../mesh/boolean';
+import { decimate } from '../mesh/decimate';
+import { bevelEdges } from '../mesh/bevel';
 
 /**
  * Non-destructive modifier stack. Modifiers are pure functions from mesh to
@@ -9,7 +12,8 @@ import { catmullClark, mergeByDistance, smoothVertices, triangulateFaces } from 
  */
 
 export type ModifierType =
-  | 'subsurf' | 'mirror' | 'array' | 'solidify' | 'weld' | 'triangulate' | 'smooth';
+  | 'subsurf' | 'mirror' | 'array' | 'solidify' | 'weld' | 'triangulate' | 'smooth'
+  | 'boolean' | 'decimate' | 'bevel';
 
 interface ModifierBase {
   id: number;
@@ -63,9 +67,40 @@ export interface SmoothModifier extends ModifierBase {
   iterations: number;
 }
 
+export interface BooleanModifier extends ModifierBase {
+  type: 'boolean';
+  operation: BooleanOp;
+  /** Scene object id of the cutter. Resolved by the caller, not here. */
+  objectId: number | null;
+}
+
+export interface DecimateModifier extends ModifierBase {
+  type: 'decimate';
+  /** Fraction of the original triangle count to keep. */
+  ratio: number;
+  preserveBorder: boolean;
+}
+
+export interface BevelModifier extends ModifierBase {
+  type: 'bevel';
+  width: number;
+  segments: number;
+  profile: number;
+  /** Only bevel edges sharper than this many degrees. */
+  angleLimit: number;
+}
+
 export type Modifier =
   | SubsurfModifier | MirrorModifier | ArrayModifier | SolidifyModifier
-  | WeldModifier | TriangulateModifier | SmoothModifier;
+  | WeldModifier | TriangulateModifier | SmoothModifier
+  | BooleanModifier | DecimateModifier | BevelModifier;
+
+/**
+ * Resolves a modifier's reference to another object into evaluated geometry
+ * already transformed into the owning object's space. Supplied by the scene,
+ * which is the only thing that can see other objects.
+ */
+export type ObjectResolver = (id: number) => Mesh | null;
 
 let modifierCounter = 0;
 
@@ -92,6 +127,12 @@ export function createModifier(type: ModifierType): Modifier {
       return { ...base, type, name: 'Triangulate' };
     case 'smooth':
       return { ...base, type, name: 'Smooth', factor: 0.5, iterations: 1 };
+    case 'boolean':
+      return { ...base, type, name: 'Boolean', operation: 'difference', objectId: null };
+    case 'decimate':
+      return { ...base, type, name: 'Decimate', ratio: 0.5, preserveBorder: true };
+    case 'bevel':
+      return { ...base, type, name: 'Bevel', width: 0.02, segments: 2, profile: 0.5, angleLimit: 30 };
   }
 }
 
@@ -103,6 +144,9 @@ export const MODIFIER_LABELS: Record<ModifierType, string> = {
   weld: 'Weld',
   triangulate: 'Triangulate',
   smooth: 'Smooth',
+  boolean: 'Boolean',
+  decimate: 'Decimate',
+  bevel: 'Bevel',
 };
 
 function applyMirror(mesh: Mesh, mod: MirrorModifier): Mesh {
@@ -192,8 +236,24 @@ function applySolidify(mesh: Mesh, mod: SolidifyModifier): Mesh {
   return out;
 }
 
+/** Bevel every edge sharper than the angle limit. */
+function applyBevelModifier(mesh: Mesh, mod: BevelModifier): Mesh {
+  const out = mesh.clone();
+  const t = out.topology();
+  const cosLimit = Math.cos(mod.angleLimit * Math.PI / 180);
+  const edges: number[] = [];
+  for (let ei = 0; ei < t.edges.length; ei++) {
+    const e = t.edges[ei];
+    if (e.faces.length !== 2) continue;
+    if (t.faceNormals[e.faces[0]].dot(t.faceNormals[e.faces[1]]) < cosLimit) edges.push(ei);
+  }
+  if (edges.length === 0) return mesh;
+  bevelEdges(out, edges, mod.width, Math.max(1, Math.round(mod.segments)), mod.profile);
+  return out;
+}
+
 /** Run one modifier, returning a new mesh (the input is never mutated). */
-export function applyModifier(mesh: Mesh, mod: Modifier): Mesh {
+export function applyModifier(mesh: Mesh, mod: Modifier, resolve?: ObjectResolver): Mesh {
   switch (mod.type) {
     case 'subsurf':
       return mod.levels > 0 ? catmullClark(mesh, Math.min(4, mod.levels)) : mesh;
@@ -218,6 +278,17 @@ export function applyModifier(mesh: Mesh, mod: Modifier): Mesh {
       smoothVertices(out, null, mod.factor, Math.min(20, Math.max(1, mod.iterations)));
       return out;
     }
+    case 'boolean': {
+      if (mod.objectId === null || !resolve) return mesh;
+      const other = resolve(mod.objectId);
+      // No cutter means the modifier is simply inert, not an error.
+      if (!other || other.faceCount === 0) return mesh;
+      return meshBoolean(mesh, other, mod.operation);
+    }
+    case 'decimate':
+      return mod.ratio >= 0.999 ? mesh : decimate(mesh, mod.ratio, mod.preserveBorder);
+    case 'bevel':
+      return mod.width > 0 ? applyBevelModifier(mesh, mod) : mesh;
   }
 }
 
@@ -225,12 +296,14 @@ export function applyModifier(mesh: Mesh, mod: Modifier): Mesh {
  * Evaluate a whole stack. In edit mode only modifiers flagged `showInEdit`
  * run, matching Blender's cage behaviour.
  */
-export function evaluateStack(mesh: Mesh, modifiers: Modifier[], editMode = false): Mesh {
+export function evaluateStack(
+  mesh: Mesh, modifiers: Modifier[], editMode = false, resolve?: ObjectResolver,
+): Mesh {
   let cur = mesh;
   for (const mod of modifiers) {
     if (!mod.enabled) continue;
     if (editMode && !mod.showInEdit) continue;
-    cur = applyModifier(cur, mod);
+    cur = applyModifier(cur, mod, resolve);
   }
   return cur;
 }

@@ -1,4 +1,5 @@
 import { App } from './ui/App';
+import { COMMANDS, runCommand } from './editor/commands';
 import './style.css';
 
 // Registering the worker is what lets browsers install Kiln as a desktop app,
@@ -19,8 +20,14 @@ if (!mount) throw new Error('Kiln could not find its mount point (#app).');
 try {
   const app = new App(mount);
   // Scripting handle: `kiln.editor` in the browser console reaches the live
-  // scene, the command registry and every mesh operator.
-  (window as unknown as { kiln: unknown }).kiln = { app, editor: app.editor };
+  // scene, and `kiln.run('mesh.bevel')` fires any command in the registry.
+  // The same handle is what the end-to-end tests drive the app through.
+  (window as unknown as { kiln: unknown }).kiln = {
+    app,
+    editor: app.editor,
+    commands: COMMANDS,
+    run: (id: string) => runCommand(app.editor, id),
+  };
 } catch (err) {
   mount.innerHTML = '';
   const message = err instanceof Error ? err.message : String(err);

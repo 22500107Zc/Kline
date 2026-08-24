@@ -1,10 +1,12 @@
 # Kiln
 
 **A 3D modelling application for your desktop — and your browser.** Kiln is an
-open source alternative to Blender's modelling workflow: mesh editing, a
-non-destructive modifier stack, PBR materials and glTF export, in dependency-free
-TypeScript. Drop in a photo or a video and it builds geometry from it. No
-account, no server; nothing you open ever leaves your machine.
+open source alternative to Blender's modelling workflow: mesh editing with
+bevel and booleans, sculpting, UV unwrapping, keyframe animation, a
+non-destructive modifier stack, PBR materials, a path-traced renderer and glTF
+export — in dependency-free TypeScript. Drop in a photo or a video and it
+builds geometry from it. No account, no server; nothing you open ever leaves
+your machine.
 
 ![Kiln editing a subdivided form](docs/screenshot.png)
 
@@ -129,7 +131,9 @@ keep going.
 | | |
 |---|---|
 | `Cmd/Ctrl + K` | Search every command — the fastest way to find anything |
-| `Cmd/Ctrl + B` | Jump to the Build box |
+| `Cmd/Ctrl + Shift + B` | Jump to the Build box |
+| `Cmd/Ctrl + U` | UV editor |
+| `F12` | Render the image |
 | `?` | The full keyboard sheet |
 
 The palette lists commands from the other mode too, marked, so you can discover
@@ -198,9 +202,9 @@ a shape, check a silhouette, clean up a scanned mesh, or convert an OBJ to
 glTF. Kiln opens in a tab, uses Blender's keymap so your hands already know it,
 and everything you make stays on your machine — there is no server.
 
-The whole application is about 7,000 lines of dependency-free TypeScript: the
-mesh kernel, the renderer, the modifiers and the UI are all in this repository
-and all readable in an afternoon.
+The whole application is dependency-free TypeScript: the mesh kernel, the
+renderer, the path tracer, the sculpt brushes, the unwrapper, the modifiers and
+the UI are all in this repository, and each piece is readable on its own.
 
 ## What works today
 
@@ -219,13 +223,55 @@ and all readable in an afternoon.
 **Modelling**
 - Vertex, edge and face select modes with box select, edge-ring select and
   x-ray selection
+- **Bevel** (`Ctrl+B`) with drag-to-width, scroll-to-segments and a profile
+  control — rounds edges and face regions, and stays watertight doing it
+- **Booleans** — union, difference and intersect, destructively or as a live
+  modifier pointed at another object
 - Extrude region (constrained to the face normal), inset with live preview,
   loop cut with a scroll-adjustable cut count and on-canvas preview
+- Bisect with a cap, spin/revolve, bridge edge loops, symmetrize, poke,
+  limited dissolve, T-junction repair
+- **Decimate** by quadric error metrics — cut a scan or a subdivided mesh to a
+  tenth of its triangles with the silhouette intact
 - Subdivide, dissolve, merge (at centre and by distance), make face, delete,
   duplicate, triangulate, smooth, flip and recalculate normals
+- **Proportional editing** (`O`) with six falloff curves, straight-line or
+  measured along the surface, radius on the scroll wheel
+- **Snapping** (`Shift+Tab`) to increment, absolute grid, vertex, edge or face
 - Modal transforms exactly as you expect: `G`/`R`/`S`, `X`/`Y`/`Z` to constrain,
-  `Shift`+axis for a plane, typed numeric input, `Ctrl` to snap, `Shift` for
-  precision, `Esc` to cancel
+  `Shift`+axis for a plane, typed numeric input, `Ctrl` to invert snapping,
+  `Shift` for precision, `Esc` to cancel
+
+**Sculpting**
+- Eight brushes: draw, smooth, inflate, grab, flatten, scrape, pinch, crease
+- Radius, strength and auto-smooth; `Ctrl` inverts, `[` and `]` resize
+- X/Y/Z symmetry, and a brush ring drawn on the surface so you can see the
+  falloff before you commit to it
+
+**UVs and texturing**
+- **Unwrap** (`U`) with least-squares conformal maps, cut along seams you mark
+  or where the surface folds past an angle limit
+- Smart, cube, cylinder, sphere and planar projection
+- Islands packed at a shared texel density, so one texture resolves the whole
+  model evenly
+- A UV editor (`Cmd/Ctrl+U`) that shades every face by stretch, because a
+  wireframe layout cannot show the thing that actually ruins a texture
+- Image textures with tiling and offset, plus a generated UV checker
+
+**Animation**
+- Keyframes on location, rotation and scale, with constant, linear and
+  auto-eased bezier interpolation
+- A timeline with a scrubbable playhead, keyframe markers, frame range, fps
+  and looping playback
+- Exported into glTF as real animation samplers
+
+**Rendering**
+- A **path-traced renderer**: BVH-accelerated, metallic-roughness GGX, soft
+  shadows from sized lights, emissive surfaces, a sky dome and global
+  illumination
+- Progressive — the image refines pass by pass, across every core the machine
+  has, and you can re-grade the exposure without restarting
+- Save the result as a PNG
 
 **Scene**
 - Object hierarchy with parenting, per-object visibility and locking
@@ -233,8 +279,8 @@ and all readable in an afternoon.
 - PBR materials (base colour, metallic, roughness, emission, alpha) with
   per-face material slots
 - Non-destructive modifiers: Subdivision Surface (Catmull–Clark), Mirror,
-  Array, Solidify, Weld, Triangulate and Smooth — reorderable, toggleable,
-  applyable
+  Array, Solidify, Weld, Triangulate, Smooth, **Boolean**, **Decimate** and
+  **Bevel** — reorderable, toggleable, applyable
 
 **Viewport**
 - Solid (studio-lit), Material (scene-lit PBR) and Wireframe shading
@@ -247,6 +293,7 @@ and all readable in an afternoon.
 - Import OBJ; export OBJ + MTL, binary STL, and glTF 2.0 with
   `KHR_lights_punctual`
 - Snapshot undo/redo across every operation, including modifier edits
+- Crash-recovery autosave, offered rather than restored silently on next launch
 
 ## Keyboard
 
@@ -255,7 +302,12 @@ and all readable in an afternoon.
 | `Tab` | Object Mode ⇄ Edit Mode |
 | `1` `2` `3` | Vertex / edge / face select |
 | `G` `R` `S` | Move, rotate, scale — then `X`/`Y`/`Z`, or type a number |
-| `E` `I` `Ctrl+R` | Extrude, inset, loop cut |
+| `E` `I` `Ctrl+R` `Ctrl+B` | Extrude, inset, loop cut, bevel |
+| `U` | Unwrap the selection |
+| `O` `Shift+Tab` | Proportional editing, snapping |
+| `I` `Alt+I` | Insert / delete keyframe (Object Mode) |
+| `Space` `←` `→` | Play, step a frame |
+| `F12` | Render the image |
 | `M` `F` `X` `Ctrl+X` | Merge, make face, delete, dissolve |
 | `A` `Alt+A` `Ctrl+I` | Select all / none / invert |
 | `Shift+D` `Ctrl+J` `Ctrl+A` | Duplicate, join, apply transform |
@@ -297,9 +349,17 @@ src/
     llm.ts              Ollama / OpenAI-compatible code generation
     recipes.ts          Procedural subjects, for when no model is connected
     interpreter.ts      Offline prompt -> plan
+    bevel.ts            Fan-based bevel: sectors, profiles, corner caps
+    boolean.ts          BSP constructive solid geometry + T-junction repair
+    modeling.ts         Bisect, spin, bridge, symmetrize, poke
+    decimate.ts         Quadric error metric simplification
+  uv/unwrap.ts        Islands, LSCM flattening, projections, packing
+  sculpt/sculpt.ts    Brushes, falloff and the hash grid they query
+  anim/animation.ts   Channels, interpolation, sampling
   modifiers/          Non-destructive stack; each modifier is mesh -> mesh
   scene/              Scene graph, materials, lights, the orbit camera
   render/             WebGL2 forward renderer, GLSL, buffer builders
+    pathtrace/          BVH, GGX path tracer, worker pool, progressive job
   editor/             Modes, selection, CPU picking, modal transforms, undo,
                       the command registry and keymap
     selection.ts        Mode-authoritative selection derivation
@@ -339,7 +399,8 @@ an extrude rolls back the extrusion *and* the move.
 ```bash
 npm run dev         # Vite dev server with HMR
 npm run typecheck   # tsc --noEmit, strict
-npm test            # 56 unit tests over the kernel, scene, selection, modifiers and IO
+npm test            # 187 unit tests over the kernel, operators, UVs, sculpting,
+                    # animation, the path tracer, the scene and IO
 npm run build       # typecheck + production bundle into dist/
 npm run app         # run the desktop shell against the built bundle
 npm run dist        # package installers for the current OS into release/
@@ -355,16 +416,28 @@ genuine topology regressions.
 
 ## Not there yet
 
-Honest list of what Blender has that Kiln does not: bevel, knife and
-poly-build tools, UV unwrapping and texturing, sculpting, rendering beyond the
-viewport, animation and rigging, physics, geometry nodes, and Python scripting.
-Reference images cannot yet be pinned in the viewport to model against, and
-photogrammetry from a video's many frames is not implemented — the video path
-uses one frame at a time.
-Meshes above roughly a million triangles will also make the viewport
-uncomfortable — surfaces are uploaded unindexed today.
+Honest list of what Blender has that Kiln does not:
 
-Bevel, UV unwrapping, viewport reference planes and a knife tool are next.
+- **Rigging and skinning.** Animation here keyframes object transforms; there
+  are no armatures, no weights and no shape keys.
+- **Physics and simulation.** No rigid bodies, cloth, fluid or particles.
+- **Geometry nodes** and **Python scripting.** The Build box writes JavaScript
+  against a sandboxed geometry API instead, and `kiln.editor` in the browser
+  console reaches the live scene.
+- **Knife and poly-build.** Bisect cuts with a plane; there is no freehand cut.
+- **Texture painting.** Textures can be loaded and mapped, not painted.
+- **Dynamic topology while sculpting.** The brushes move the vertices that are
+  there, so detail needs a Subdivision modifier or a subdivide first.
+- **UDIMs, multiple UV maps, and vertex colours.**
+
+Also true, and worth knowing before you rely on it: the path tracer runs on the
+CPU, so a large image at a high sample count is minutes rather than seconds;
+reference images cannot be pinned in the viewport to model against;
+photogrammetry from a video's many frames is not implemented; and meshes above
+roughly a million triangles make the viewport uncomfortable, because surfaces
+are uploaded unindexed.
+
+Rigging, texture painting and a knife tool are next.
 
 ## Contributing
 

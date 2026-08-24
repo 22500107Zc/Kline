@@ -107,22 +107,28 @@ export class Header {
     const ed = this.editor;
     clear(this.modeArea);
 
-    const modeButton = h('button', {
-      class: `mode-switch ${ed.mode}`,
-      title: 'Tab — switch between Object and Edit mode',
-      on: { click: () => ed.toggleEditMode() },
-    }, [
-      h('span', { class: 'mode-dot' }),
-      h('span', { text: ed.mode === 'edit' ? 'Edit Mode' : 'Object Mode' }),
-    ]);
-    this.modeArea.appendChild(modeButton);
+    const editorModes: { id: 'object' | 'edit' | 'sculpt'; label: string }[] = [
+      { id: 'object', label: 'Object' },
+      { id: 'edit', label: 'Edit' },
+      { id: 'sculpt', label: 'Sculpt' },
+    ];
+    const modeGroup = h('div', { class: `mode-switch ${ed.mode}` });
+    for (const m of editorModes) {
+      modeGroup.appendChild(h('button', {
+        class: `mode-opt${ed.mode === m.id ? ' active' : ''}`,
+        text: m.label,
+        title: m.id === 'edit' ? 'Edit Mode (Tab)' : `${m.label} Mode`,
+        on: { click: () => ed.setMode(m.id) },
+      }));
+    }
+    this.modeArea.appendChild(modeGroup);
 
     if (ed.mode === 'edit') {
       const group = h('div', { class: 'seg-group' });
-      const modes: { id: 'vertex' | 'edge' | 'face'; key: string }[] = [
+      const selectModes: { id: 'vertex' | 'edge' | 'face'; key: string }[] = [
         { id: 'vertex', key: '1' }, { id: 'edge', key: '2' }, { id: 'face', key: '3' },
       ];
-      for (const m of modes) {
+      for (const m of selectModes) {
         group.appendChild(h('button', {
           class: `seg${ed.selectMode === m.id ? ' active' : ''}`,
           title: `${m.id[0].toUpperCase()}${m.id.slice(1)} select (${m.key})`,
@@ -133,12 +139,12 @@ export class Header {
     }
 
     const shading = h('div', { class: 'seg-group' });
-    const modes: { id: ShadingMode; label: string }[] = [
+    const shadingModes: { id: ShadingMode; label: string }[] = [
       { id: 'solid', label: 'Solid' },
       { id: 'material', label: 'Material' },
       { id: 'wireframe', label: 'Wireframe' },
     ];
-    for (const m of modes) {
+    for (const m of shadingModes) {
       shading.appendChild(h('button', {
         class: `seg${ed.options.shading === m.id ? ' active' : ''}`,
         title: `${m.label} shading (Z cycles)`,
@@ -156,6 +162,31 @@ export class Header {
         },
       },
     }, [icon('xray')]));
+    shading.appendChild(h('button', {
+      class: `seg${ed.options.uvCheck ? ' active' : ''}`,
+      title: 'UV checker — shade every surface with a test grid',
+      on: { click: () => runCommand(ed, 'view.uvCheck') },
+    }, [icon('uv')]));
     this.modeArea.appendChild(shading);
+
+    // Modifier toggles that change what a drag does, so they belong on screen
+    // rather than buried in a menu.
+    const toggles = h('div', { class: 'seg-group' });
+    toggles.appendChild(h('button', {
+      class: `seg${ed.proportional.enabled ? ' active' : ''}`,
+      title: `Proportional editing (O) — ${ed.proportional.falloff} falloff, radius ${ed.proportional.radius.toFixed(2)}`,
+      on: { click: () => ed.toggleProportional() },
+    }, [icon('proportional')]));
+    toggles.appendChild(h('button', {
+      class: `seg${ed.snap.enabled ? ' active' : ''}`,
+      title: `Snapping (Shift+Tab) — target: ${ed.snap.mode}`,
+      on: { click: () => runCommand(ed, 'transform.snap') },
+    }, [icon('snap')]));
+    toggles.appendChild(h('button', {
+      class: 'seg',
+      title: 'Render image (F12)',
+      on: { click: () => runCommand(ed, 'render.image') },
+    }, [icon('render')]));
+    this.modeArea.appendChild(toggles);
   }
 }

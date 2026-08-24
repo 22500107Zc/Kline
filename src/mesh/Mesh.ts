@@ -40,6 +40,18 @@ export class Mesh {
   /** Per-object smooth shading flag; per-face override lives in `faceSmooth`. */
   shadeSmooth = false;
   faceSmooth: boolean[] | null = null;
+  /**
+   * Texture coordinates, stored per face corner as a flat [u0,v0,u1,v1,…] run.
+   * A face with no coordinates holds null. Corner storage rather than per
+   * vertex is what lets a seam carry two different UVs at the same point.
+   */
+  faceUV: (number[] | null)[] | null = null;
+  /**
+   * UV seams, keyed by vertex pair. Unwrapping cuts the surface along these.
+   * Keyed by index pair rather than edge index because edge indices are
+   * derived and renumber on every topology change.
+   */
+  seams: Set<string> | null = null;
 
   private _topology: Topology | null = null;
   private _revision = 0;
@@ -76,6 +88,57 @@ export class Mesh {
   markDirty(): void {
     this._topology = null;
     this._revision++;
+    if (this.faceUV) {
+      // Operators append and trim faces freely; keep the parallel array the
+      // same length so indices never drift, and drop coordinates for any face
+      // whose corner count no longer matches.
+      while (this.faceUV.length < this.faces.length) this.faceUV.push(null);
+      if (this.faceUV.length > this.faces.length) this.faceUV.length = this.faces.length;
+      for (let f = 0; f < this.faces.length; f++) {
+        const uv = this.faceUV[f];
+        if (uv && uv.length !== this.faces[f].length * 2) this.faceUV[f] = null;
+      }
+    }
+  }
+
+  get hasUV(): boolean {
+    if (!this.faceUV) return false;
+    for (const uv of this.faceUV) if (uv) return true;
+    return false;
+  }
+
+  /** Corner coordinates for a face, or null when it has none. */
+  uvFor(f: number): number[] | null {
+    const uv = this.faceUV?.[f];
+    return uv && uv.length === this.faces[f].length * 2 ? uv : null;
+  }
+
+  setUV(f: number, uv: number[] | null): void {
+    if (!this.faceUV) this.faceUV = new Array(this.faces.length).fill(null);
+    this.faceUV[f] = uv;
+  }
+
+  clearUV(): void {
+    this.faceUV = null;
+    this.markDirty();
+  }
+
+  static seamKey(a: number, b: number): string {
+    return a < b ? `${a}:${b}` : `${b}:${a}`;
+  }
+
+  isSeam(a: number, b: number): boolean {
+    return this.seams ? this.seams.has(Mesh.seamKey(a, b)) : false;
+  }
+
+  setSeam(a: number, b: number, on: boolean): void {
+    if (!this.seams) {
+      if (!on) return;
+      this.seams = new Set();
+    }
+    const k = Mesh.seamKey(a, b);
+    if (on) this.seams.add(k);
+    else this.seams.delete(k);
   }
 
   clone(): Mesh {
@@ -86,6 +149,8 @@ export class Mesh {
     );
     m.shadeSmooth = this.shadeSmooth;
     m.faceSmooth = this.faceSmooth ? this.faceSmooth.slice() : null;
+    m.faceUV = this.faceUV ? this.faceUV.map((u) => (u ? u.slice() : null)) : null;
+    m.seams = this.seams ? new Set(this.seams) : null;
     return m;
   }
 
@@ -267,23 +332,34 @@ export class Mesh {
     const faces: number[][] = [];
     const mats: number[] = [];
     const smooth: boolean[] = [];
+    const uvs: (number[] | null)[] = [];
     for (let f = 0; f < this.faces.length; f++) {
       const loop: number[] = [];
       const src = this.faces[f];
+      const srcUV = this.uvFor(f);
+      const uv: number[] = [];
       for (let i = 0; i < src.length; i++) {
         const v = src[i];
-        if (loop.length === 0 || loop[loop.length - 1] !== v) loop.push(v);
+        if (loop.length === 0 || loop[loop.length - 1] !== v) {
+          loop.push(v);
+          if (srcUV) uv.push(srcUV[i * 2], srcUV[i * 2 + 1]);
+        }
       }
-      while (loop.length > 1 && loop[0] === loop[loop.length - 1]) loop.pop();
+      while (loop.length > 1 && loop[0] === loop[loop.length - 1]) {
+        loop.pop();
+        uv.length = Math.max(0, uv.length - 2);
+      }
       if (loop.length >= 3) {
         faces.push(loop);
         mats.push(this.faceMaterial[f] ?? 0);
         smooth.push(this.isFaceSmooth(f));
+        uvs.push(srcUV && uv.length === loop.length * 2 ? uv : null);
       }
     }
     this.faces = faces;
     this.faceMaterial = mats;
     if (this.faceSmooth) this.faceSmooth = smooth;
+    if (this.faceUV) this.faceUV = uvs;
     this.markDirty();
   }
 
@@ -317,11 +393,23 @@ export class Mesh {
       for (let f = 0; f < other.faces.length; f++) mine.push(other.isFaceSmooth(f));
       this.faceSmooth = mine;
     }
+    if (this.faceUV || other.faceUV) {
+      const mine = this.faceUV ?? new Array(faceOff).fill(null);
+      for (let f = 0; f < other.faces.length; f++) {
+        const uv = other.uvFor(f);
+        mine.push(uv ? uv.slice() : null);
+      }
+      this.faceUV = mine;
+    }
     this.markDirty();
     return off;
   }
 
-  toJSON(): { positions: number[]; faces: number[][]; faceMaterial: number[]; shadeSmooth: boolean; faceSmooth: boolean[] | null } {
+  toJSON(): {
+    positions: number[]; faces: number[][]; faceMaterial: number[];
+    shadeSmooth: boolean; faceSmooth: boolean[] | null;
+    faceUV?: (number[] | null)[] | null; seams?: string[] | null;
+  } {
     const positions: number[] = [];
     for (const p of this.positions) positions.push(p.x, p.y, p.z);
     return {
@@ -330,6 +418,8 @@ export class Mesh {
       faceMaterial: this.faceMaterial.slice(),
       shadeSmooth: this.shadeSmooth,
       faceSmooth: this.faceSmooth ? this.faceSmooth.slice() : null,
+      faceUV: this.faceUV ? this.faceUV.map((u) => (u ? u.slice() : null)) : null,
+      seams: this.seams ? [...this.seams] : null,
     };
   }
 
@@ -341,6 +431,8 @@ export class Mesh {
     const m = new Mesh(positions, d.faces.map((f) => f.slice()), d.faceMaterial?.slice());
     m.shadeSmooth = !!d.shadeSmooth;
     m.faceSmooth = d.faceSmooth ? d.faceSmooth.slice() : null;
+    m.faceUV = d.faceUV ? d.faceUV.map((u) => (u ? u.slice() : null)) : null;
+    m.seams = d.seams && d.seams.length ? new Set(d.seams) : null;
     return m;
   }
 }

@@ -8,6 +8,11 @@ export interface Material {
   emissionStrength: number;
   /** 0 = fully transparent, 1 = opaque. Alpha-blended in the viewport. */
   alpha: number;
+  /** Scene texture id multiplied into the base colour, or null for a flat colour. */
+  baseColorTexture: number | null;
+  /** Tiling and offset applied to the mesh's coordinates before sampling. */
+  uvScale: [number, number];
+  uvOffset: [number, number];
 }
 
 let materialCounter = 0;
@@ -22,6 +27,9 @@ export function createMaterial(partial: Partial<Material> = {}): Material {
     emission: partial.emission ?? [0, 0, 0],
     emissionStrength: partial.emissionStrength ?? 0,
     alpha: partial.alpha ?? 1,
+    baseColorTexture: partial.baseColorTexture ?? null,
+    uvScale: partial.uvScale ?? [1, 1],
+    uvOffset: partial.uvOffset ?? [0, 0],
   };
 }
 
@@ -30,6 +38,8 @@ export function cloneMaterial(m: Material): Material {
     ...m,
     color: [...m.color] as [number, number, number],
     emission: [...m.emission] as [number, number, number],
+    uvScale: [...m.uvScale] as [number, number],
+    uvOffset: [...m.uvOffset] as [number, number],
   };
 }
 

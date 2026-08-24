@@ -7,11 +7,23 @@ import {
   recalculateNormals, smoothVertices, subdivideFaces, triangulateFaces,
 } from '../mesh/ops';
 import { Scene } from '../scene/Scene';
+import { bevelVertices } from '../mesh/bevel';
+import { BooleanOp, dissolveCoplanar, meshBoolean, stitchTJunctions } from '../mesh/boolean';
+import { bisect, bridgeLoops, pokeFaces, spinEdges, symmetrize } from '../mesh/modeling';
+import { decimate } from '../mesh/decimate';
+import {
+  cubeProject, cylinderProject, markSeams, planarProject, smartProject, sphereProject, unwrap,
+} from '../uv/unwrap';
+import { generateCheckerTexture, loadTextureFile } from '../scene/Texture';
+import { FALLOFF_LABELS, FalloffType } from './proportional';
+import { SNAP_LABELS, SnapMode } from './snapping';
+import { BRUSH_LABELS, SculptBrush } from '../sculpt/sculpt';
+import { pickFile } from '../io/files';
 import { downloadBinary, downloadText, openTextFile } from '../io/files';
 import { exportMTL, exportOBJ, importOBJ } from '../io/obj';
 import { exportSTL } from '../io/stl';
 import { exportGLTF } from '../io/gltf';
-import { Editor } from './Editor';
+import { Editor, EditorMode } from './Editor';
 import { pruneSelection } from './selection';
 
 export interface Command {
@@ -19,8 +31,8 @@ export interface Command {
   label: string;
   category: 'File' | 'Edit' | 'Add' | 'Object' | 'Mesh' | 'Select' | 'View';
   shortcut?: string;
-  /** Which mode the command applies to; omitted means both. */
-  mode?: 'object' | 'edit';
+  /** Which mode the command applies to; omitted means every mode. */
+  mode?: EditorMode;
   /** Return value is ignored; commands may return anything convenient. */
   run: (editor: Editor) => unknown;
   enabled?: (editor: Editor) => boolean;
@@ -569,7 +581,411 @@ export const COMMANDS: Command[] = [
       ed.emit('change');
     },
   },
+
+  // ------------------------------------------------------- Mesh: hard surface
+  {
+    id: 'mesh.bevel', label: 'Bevel', category: 'Mesh', shortcut: 'Ctrl+B', mode: 'edit',
+    run: (ed) => ed.startBevel(),
+    enabled: (ed) => ed.mode === 'edit' && (ed.selection.edges.size > 0 || ed.selection.faces.size > 0),
+  },
+  {
+    id: 'mesh.bevelVertices', label: 'Bevel Vertices', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      const verts = [...ed.selection.verts];
+      editOp(ed, 'Bevel vertices', (mesh) => {
+        bevelVertices(mesh, verts, 0.08);
+      });
+    },
+    enabled: hasEditSelection,
+  },
+  {
+    id: 'mesh.bisect', label: 'Bisect at 3D Cursor (view aligned)', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      const obj = ed.editObject;
+      if (!obj) return;
+      // The cut plane faces the camera and passes through the 3D cursor, which
+      // is the one plane the user can position without a gizmo.
+      const inv = obj.worldMatrix(ed.scene).inverse();
+      const normal = inv.transformDirection(ed.camera.forward()).normalized();
+      const point = inv.transformPoint(ed.scene.cursor);
+      editOp(ed, 'Bisect', (mesh) => {
+        bisect(mesh, normal, normal.dot(point), { fill: true });
+      });
+    },
+  },
+  {
+    id: 'mesh.bisectCut', label: 'Bisect and Remove Front Half', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      const obj = ed.editObject;
+      if (!obj) return;
+      const inv = obj.worldMatrix(ed.scene).inverse();
+      const normal = inv.transformDirection(ed.camera.forward()).normalized();
+      const point = inv.transformPoint(ed.scene.cursor);
+      editOp(ed, 'Bisect (cut)', (mesh) => {
+        bisect(mesh, normal, normal.dot(point), { fill: true, clearBack: true });
+      });
+    },
+  },
+  {
+    id: 'mesh.spin', label: 'Spin Selected Edges Around Z', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      const obj = ed.editObject;
+      if (!obj) return;
+      const edges = [...ed.selection.edges];
+      if (edges.length === 0) {
+        ed.setStatus('Spin needs an edge selection');
+        return;
+      }
+      const inv = obj.worldMatrix(ed.scene).inverse();
+      const center = inv.transformPoint(ed.scene.cursor);
+      editOp(ed, 'Spin', (mesh) => {
+        spinEdges(mesh, edges, new Vec3(0, 0, 1), center, Math.PI * 2, 16);
+      });
+    },
+  },
+  {
+    id: 'mesh.bridge', label: 'Bridge Edge Loops', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      const edges = [...ed.selection.edges];
+      let problem: string | undefined;
+      editOp(ed, 'Bridge loops', (mesh) => {
+        problem = bridgeLoops(mesh, edges).error;
+      });
+      if (problem) ed.setStatus(problem);
+    },
+    enabled: (ed) => ed.mode === 'edit' && ed.selection.edges.size > 0,
+  },
+  {
+    id: 'mesh.poke', label: 'Poke Faces', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      const faces = [...ed.selection.faces];
+      editOp(ed, 'Poke faces', (mesh) => {
+        pokeFaces(mesh, faces, 0);
+      });
+    },
+    enabled: (ed) => ed.mode === 'edit' && ed.selection.faces.size > 0,
+  },
+  {
+    id: 'mesh.symmetrizeX', label: 'Symmetrize +X to -X', category: 'Mesh', mode: 'edit',
+    run: (ed) => editOp(ed, 'Symmetrize', (mesh) => symmetrize(mesh, 0, true)),
+  },
+  {
+    id: 'mesh.limitedDissolve', label: 'Limited Dissolve (merge coplanar)', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      let merged = 0;
+      editOp(ed, 'Limited dissolve', (mesh) => {
+        merged = dissolveCoplanar(mesh, 1.5);
+      });
+      ed.setStatus(`Limited dissolve: ${merged} face${merged === 1 ? '' : 's'} merged`);
+    },
+  },
+  {
+    id: 'mesh.stitch', label: 'Fix T-Junctions', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      let n = 0;
+      editOp(ed, 'Fix T-junctions', (mesh) => {
+        const scale = Math.max(1e-6, mesh.bounds().radius());
+        n = stitchTJunctions(mesh, 1e-4 * scale);
+      });
+      ed.setStatus(n ? `Stitched ${n} vertices into their neighbours' edges` : 'No T-junctions found');
+    },
+  },
+
+  // ------------------------------------------------------------------- UV
+  {
+    id: 'uv.unwrap', label: 'Unwrap (conformal, respects seams)', category: 'Mesh', shortcut: 'U', mode: 'edit',
+    run: (ed) => {
+      let islands = 0;
+      editOp(ed, 'Unwrap', (mesh) => {
+        islands = unwrap(mesh, { useSeams: true, angleLimit: 66, margin: 0.01 });
+      });
+      ed.setStatus(`Unwrapped into ${islands} island${islands === 1 ? '' : 's'}`);
+    },
+  },
+  {
+    id: 'uv.smart', label: 'Smart UV Project', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      let islands = 0;
+      editOp(ed, 'Smart UV project', (mesh) => {
+        islands = smartProject(mesh, 66, 0.01);
+      });
+      ed.setStatus(`Projected ${islands} island${islands === 1 ? '' : 's'}`);
+    },
+  },
+  {
+    id: 'uv.cube', label: 'Cube Project', category: 'Mesh', mode: 'edit',
+    run: (ed) => editOp(ed, 'Cube project', (mesh) => cubeProject(mesh, Math.max(0.001, mesh.bounds().radius()))),
+  },
+  {
+    id: 'uv.cylinder', label: 'Cylinder Project', category: 'Mesh', mode: 'edit',
+    run: (ed) => editOp(ed, 'Cylinder project', (mesh) => cylinderProject(mesh)),
+  },
+  {
+    id: 'uv.sphere', label: 'Sphere Project', category: 'Mesh', mode: 'edit',
+    run: (ed) => editOp(ed, 'Sphere project', (mesh) => sphereProject(mesh)),
+  },
+  {
+    id: 'uv.planar', label: 'Planar Project (top)', category: 'Mesh', mode: 'edit',
+    run: (ed) => editOp(ed, 'Planar project', (mesh) => planarProject(mesh, 2)),
+  },
+  {
+    id: 'uv.markSeam', label: 'Mark Seam', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      const edges = [...ed.selection.edges];
+      editOp(ed, 'Mark seam', (mesh) => {
+        markSeams(mesh, edges, true);
+      });
+      ed.setStatus(`Marked ${edges.length} seam edge${edges.length === 1 ? '' : 's'}`);
+    },
+    enabled: (ed) => ed.mode === 'edit' && ed.selection.edges.size > 0,
+  },
+  {
+    id: 'uv.clearSeam', label: 'Clear Seam', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      const edges = [...ed.selection.edges];
+      editOp(ed, 'Clear seam', (mesh) => {
+        markSeams(mesh, edges, false);
+      });
+    },
+    enabled: (ed) => ed.mode === 'edit' && ed.selection.edges.size > 0,
+  },
+  {
+    id: 'view.uvCheck', label: 'Toggle UV Checker', category: 'View',
+    run: (ed) => {
+      ed.options.uvCheck = !ed.options.uvCheck;
+      ed.setStatus(`UV checker ${ed.options.uvCheck ? 'on' : 'off'}`);
+      ed.emit('change');
+      ed.requestRender();
+    },
+  },
+
+  // -------------------------------------------------------------- Booleans
+  {
+    id: 'object.booleanDifference', label: 'Boolean Difference', category: 'Object', mode: 'object',
+    run: (ed) => runBoolean(ed, 'difference'),
+    enabled: (ed) => ed.scene.selection.size >= 2,
+  },
+  {
+    id: 'object.booleanUnion', label: 'Boolean Union', category: 'Object', mode: 'object',
+    run: (ed) => runBoolean(ed, 'union'),
+    enabled: (ed) => ed.scene.selection.size >= 2,
+  },
+  {
+    id: 'object.booleanIntersect', label: 'Boolean Intersect', category: 'Object', mode: 'object',
+    run: (ed) => runBoolean(ed, 'intersect'),
+    enabled: (ed) => ed.scene.selection.size >= 2,
+  },
+  {
+    id: 'object.decimate', label: 'Decimate to Half', category: 'Object', mode: 'object',
+    run: (ed) => {
+      const objs = ed.scene.selectedObjects().filter((o) => o.mesh);
+      if (objs.length === 0) return;
+      objectOp(ed, 'Decimate', () => {
+        for (const o of objs) if (o.mesh) o.mesh = decimate(o.mesh, 0.5);
+      });
+      const total = objs.reduce((n, o) => n + (o.mesh?.triCount ?? 0), 0);
+      ed.setStatus(`Decimated to ${total} triangles`);
+    },
+    enabled: hasObjectSelection,
+  },
+
+  // -------------------------------------------------------------- Textures
+  {
+    id: 'material.checker', label: 'Add UV Checker Texture', category: 'Object',
+    run: (ed) => {
+      const obj = ed.scene.activeObject;
+      const slot = obj?.materialSlots[0] ?? 0;
+      const mat = ed.scene.materials[slot];
+      if (!mat) {
+        ed.setStatus('No material to texture');
+        return;
+      }
+      objectOp(ed, 'Add checker texture', (scene) => {
+        const tex = generateCheckerTexture(512, 8);
+        scene.textures.push(tex);
+        mat.baseColorTexture = tex.id;
+      });
+      ed.setStatus(`Checker texture on ${mat.name}`);
+    },
+  },
+  {
+    id: 'material.loadTexture', label: 'Load Image Texture', category: 'Object',
+    run: async (ed) => {
+      const file = await pickFile('image/*');
+      if (!file) return;
+      const tex = await loadTextureFile(file);
+      const obj = ed.scene.activeObject;
+      const slot = obj?.materialSlots[0] ?? 0;
+      const mat = ed.scene.materials[slot];
+      objectOp(ed, 'Load texture', (scene) => {
+        scene.textures.push(tex);
+        if (mat) mat.baseColorTexture = tex.id;
+      });
+      ed.setStatus(`Loaded ${tex.name} (${tex.width}×${tex.height})`);
+    },
+  },
+
+  // ------------------------------------------------------------- Animation
+  {
+    id: 'anim.insertKey', label: 'Insert Keyframe', category: 'Object', shortcut: 'I', mode: 'object',
+    run: (ed) => ed.insertKeyframe('all'),
+    enabled: hasObjectSelection,
+  },
+  {
+    id: 'anim.insertLocKey', label: 'Insert Location Keyframe', category: 'Object', mode: 'object',
+    run: (ed) => ed.insertKeyframe('position'),
+    enabled: hasObjectSelection,
+  },
+  {
+    id: 'anim.deleteKey', label: 'Delete Keyframe', category: 'Object', shortcut: 'Alt+I', mode: 'object',
+    run: (ed) => ed.deleteKeyframe(),
+    enabled: hasObjectSelection,
+  },
+  {
+    id: 'anim.play', label: 'Play / Pause Animation', category: 'View', shortcut: 'Space',
+    run: (ed) => ed.togglePlayback(),
+  },
+  {
+    id: 'anim.nextFrame', label: 'Next Frame', category: 'View', shortcut: 'Right',
+    run: (ed) => ed.stepFrame(1),
+  },
+  {
+    id: 'anim.prevFrame', label: 'Previous Frame', category: 'View', shortcut: 'Left',
+    run: (ed) => ed.stepFrame(-1),
+  },
+  {
+    id: 'anim.jumpStart', label: 'Jump to Start', category: 'View', shortcut: 'Shift+Left',
+    run: (ed) => ed.setFrame(ed.scene.timeline.start),
+  },
+  {
+    id: 'anim.jumpEnd', label: 'Jump to End', category: 'View', shortcut: 'Shift+Right',
+    run: (ed) => ed.setFrame(ed.scene.timeline.end),
+  },
+
+  // ---------------------------------------------------------------- Render
+  {
+    id: 'render.image', label: 'Render Image', category: 'View', shortcut: 'F12',
+    run: (ed) => ed.startRender(true),
+  },
+  {
+    id: 'render.viewport', label: 'Render Current View', category: 'View',
+    run: (ed) => ed.startRender(false),
+  },
+  {
+    id: 'render.cancel', label: 'Cancel Render', category: 'View',
+    run: (ed) => ed.cancelRender(),
+    enabled: (ed) => ed.activeRender !== null && !ed.activeRender.finished,
+  },
+
+  // ----------------------------------------------------------------- Modes
+  {
+    id: 'mode.object', label: 'Object Mode', category: 'Edit',
+    run: (ed) => ed.setMode('object'),
+  },
+  {
+    id: 'mode.edit', label: 'Edit Mode', category: 'Edit',
+    run: (ed) => ed.setMode('edit'),
+  },
+  {
+    id: 'mode.sculpt', label: 'Sculpt Mode', category: 'Edit',
+    run: (ed) => ed.setMode('sculpt'),
+  },
+
+  // ------------------------------------------------------- Sculpt & options
+  {
+    id: 'sculpt.cycleBrush', label: 'Next Sculpt Brush', category: 'Edit', mode: 'sculpt',
+    run: (ed) => {
+      const order = Object.keys(BRUSH_LABELS) as SculptBrush[];
+      const next = order[(order.indexOf(ed.sculpt.brush) + 1) % order.length];
+      ed.setSculptBrush(next);
+    },
+  },
+  {
+    id: 'sculpt.radiusUp', label: 'Larger Brush', category: 'Edit', shortcut: ']', mode: 'sculpt',
+    run: (ed) => ed.adjustBrushRadius(1.15),
+  },
+  {
+    id: 'sculpt.radiusDown', label: 'Smaller Brush', category: 'Edit', shortcut: '[', mode: 'sculpt',
+    run: (ed) => ed.adjustBrushRadius(1 / 1.15),
+  },
+  {
+    id: 'sculpt.symmetryX', label: 'Toggle X Symmetry', category: 'Edit', mode: 'sculpt',
+    run: (ed) => {
+      ed.sculpt.symmetry[0] = !ed.sculpt.symmetry[0];
+      ed.setStatus(`X symmetry ${ed.sculpt.symmetry[0] ? 'on' : 'off'}`);
+      ed.emit('change');
+    },
+  },
+  {
+    id: 'transform.proportional', label: 'Toggle Proportional Editing', category: 'Edit', shortcut: 'O', mode: 'edit',
+    run: (ed) => ed.toggleProportional(),
+  },
+  {
+    id: 'transform.falloff', label: 'Next Proportional Falloff', category: 'Edit', mode: 'edit',
+    run: (ed) => {
+      const order = Object.keys(FALLOFF_LABELS) as FalloffType[];
+      const next = order[(order.indexOf(ed.proportional.falloff) + 1) % order.length];
+      ed.proportional.falloff = next;
+      ed.setStatus(`Falloff: ${FALLOFF_LABELS[next]}`);
+      ed.emit('change');
+    },
+  },
+  {
+    id: 'transform.snap', label: 'Toggle Snapping', category: 'Edit', shortcut: 'Shift+Tab',
+    run: (ed) => {
+      ed.snap.enabled = !ed.snap.enabled;
+      ed.setStatus(`Snapping ${ed.snap.enabled ? `on (${SNAP_LABELS[ed.snap.mode]})` : 'off'}`);
+      ed.emit('change');
+    },
+  },
+  {
+    id: 'transform.snapMode', label: 'Next Snap Target', category: 'Edit',
+    run: (ed) => {
+      const order = Object.keys(SNAP_LABELS) as SnapMode[];
+      const next = order[(order.indexOf(ed.snap.mode) + 1) % order.length];
+      ed.snap.mode = next;
+      ed.setStatus(`Snap to ${SNAP_LABELS[next]}`);
+      ed.emit('change');
+    },
+  },
+  {
+    id: 'file.autosave', label: 'Save Recovery Copy Now', category: 'File',
+    run: (ed) => ed.autosaveNow(true),
+  },
 ];
+
+/**
+ * Boolean between the active object and everything else selected. The active
+ * object keeps its name and modifiers; the cutters are consumed.
+ */
+function runBoolean(ed: Editor, op: BooleanOp): void {
+  const scene = ed.scene;
+  const target = scene.activeObject;
+  if (!target || !target.mesh) {
+    ed.setStatus('Boolean needs an active mesh object');
+    return;
+  }
+  const cutters = scene.selectedObjects().filter((o) => o !== target && o.type === 'mesh' && o.mesh);
+  if (cutters.length === 0) {
+    ed.setStatus('Select a second object to use as the cutter');
+    return;
+  }
+  objectOp(ed, `Boolean ${op}`, () => {
+    const toLocal = target.worldMatrix(scene).inverse();
+    let result = target.mesh!;
+    for (const cutter of cutters) {
+      const other = (cutter.evaluated(false) ?? cutter.mesh!).clone();
+      other.transform(toLocal.multiply(cutter.worldMatrix(scene)));
+      result = meshBoolean(result, other, op);
+    }
+    target.mesh = result;
+    for (const c of cutters) scene.remove(c.id);
+    scene.selection = new Set([target.id]);
+    scene.active = target.id;
+  });
+  ed.setStatus(`Boolean ${op}: ${target.mesh.faceCount} faces`);
+}
+
 
 export const COMMANDS_BY_ID = new Map(COMMANDS.map((c) => [c.id, c]));
 
@@ -592,6 +1008,10 @@ export function keyChord(e: KeyboardEvent): string {
   // Lowercase everything so named keys ("Tab", "Home") match the keymap too.
   let key = e.key.toLowerCase();
   if (e.code.startsWith('Numpad') && e.code !== 'NumpadEnter') key = e.code.toLowerCase();
+  // Give the keys whose `key` value reads badly in a shortcut label a short
+  // name, so the keymap and the sheet can use the same spelling.
+  if (key === ' ') key = 'space';
+  else if (key.startsWith('arrow')) key = key.slice(5);
   parts.push(key);
   return parts.join('+');
 }
@@ -599,7 +1019,7 @@ export function keyChord(e: KeyboardEvent): string {
 interface KeyBinding {
   chord: string;
   command: string;
-  mode?: 'object' | 'edit';
+  mode?: EditorMode;
 }
 
 export const KEYMAP: KeyBinding[] = [
@@ -650,10 +1070,25 @@ export const KEYMAP: KeyBinding[] = [
   { chord: 'numpad5', command: 'view.ortho' },
   { chord: 'numpad0', command: 'view.camera' },
   { chord: 'shift+c', command: 'view.cursorToOrigin' },
+  { chord: 'ctrl+b', command: 'mesh.bevel', mode: 'edit' },
+  { chord: 'u', command: 'uv.unwrap', mode: 'edit' },
+  { chord: 'o', command: 'transform.proportional', mode: 'edit' },
+  { chord: 'shift+tab', command: 'transform.snap' },
+  { chord: 'i', command: 'anim.insertKey', mode: 'object' },
+  { chord: 'alt+i', command: 'anim.deleteKey', mode: 'object' },
+  { chord: 'space', command: 'anim.play' },
+  { chord: 'right', command: 'anim.nextFrame' },
+  { chord: 'left', command: 'anim.prevFrame' },
+  { chord: 'shift+left', command: 'anim.jumpStart' },
+  { chord: 'shift+right', command: 'anim.jumpEnd' },
+  { chord: 'f12', command: 'render.image' },
+  { chord: ']', command: 'sculpt.radiusUp', mode: 'sculpt' },
+  { chord: '[', command: 'sculpt.radiusDown', mode: 'sculpt' },
+  { chord: 'b', command: 'sculpt.cycleBrush', mode: 'sculpt' },
 ];
 
 /** Resolve a key event to a command id, honouring the current mode. */
-export function lookupKey(chord: string, mode: 'object' | 'edit'): string | null {
+export function lookupKey(chord: string, mode: EditorMode): string | null {
   const exact = KEYMAP.find((k) => k.chord === chord && k.mode === mode);
   if (exact) return exact.command;
   const generic = KEYMAP.find((k) => k.chord === chord && !k.mode);

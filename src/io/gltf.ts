@@ -1,5 +1,6 @@
 import { Vec3 } from '../core/math';
 import { Scene, SceneObject } from '../scene/Scene';
+import { Channel, sampleChannel } from '../anim/animation';
 
 /**
  * glTF 2.0 export (.gltf with an embedded base64 buffer).
@@ -108,18 +109,25 @@ export function exportGLTF(scene: Scene, selectionOnly = false): string {
         for (const [slot, faces] of bySlot) {
           const positions: number[] = [];
           const normals: number[] = [];
+          const texcoords: number[] = [];
           const indices: number[] = [];
+          let anyUV = false;
           const min = [Infinity, Infinity, Infinity];
           const max = [-Infinity, -Infinity, -Infinity];
           for (const f of faces) {
             const loop = mesh.faces[f];
             const smooth = mesh.isFaceSmooth(f);
             const base = positions.length / 3;
-            for (const v of loop) {
+            const uv = mesh.uvFor(f);
+            if (uv) anyUV = true;
+            for (let corner = 0; corner < loop.length; corner++) {
+              const v = loop[corner];
               const p = mesh.positions[v];
               const n = smooth ? t.vertNormals[v] : t.faceNormals[f];
               positions.push(p.x, p.y, p.z);
               normals.push(n.x, n.y, n.z);
+              // glTF's V axis runs the other way.
+              texcoords.push(uv ? uv[corner * 2] : 0, uv ? 1 - uv[corner * 2 + 1] : 0);
               for (let k = 0; k < 3; k++) {
                 const c = [p.x, p.y, p.z][k];
                 min[k] = Math.min(min[k], c);
@@ -144,6 +152,16 @@ export function exportGLTF(scene: Scene, selectionOnly = false): string {
           });
           const nrmAccessor = accessors.length - 1;
 
+          let uvAccessor: number | undefined;
+          if (anyUV) {
+            const uvView = pushView(new Float32Array(texcoords), TARGET_ARRAY_BUFFER);
+            accessors.push({
+              bufferView: uvView, componentType: COMPONENT_FLOAT,
+              count: texcoords.length / 2, type: 'VEC2',
+            });
+            uvAccessor = accessors.length - 1;
+          }
+
           const idxView = pushView(new Uint32Array(indices), TARGET_ELEMENT_ARRAY_BUFFER);
           accessors.push({
             bufferView: idxView, componentType: COMPONENT_UINT,
@@ -151,8 +169,10 @@ export function exportGLTF(scene: Scene, selectionOnly = false): string {
           });
           const idxAccessor = accessors.length - 1;
 
+          const attributes: Record<string, number> = { POSITION: posAccessor, NORMAL: nrmAccessor };
+          if (uvAccessor !== undefined) attributes.TEXCOORD_0 = uvAccessor;
           primitives.push({
-            attributes: { POSITION: posAccessor, NORMAL: nrmAccessor },
+            attributes,
             indices: idxAccessor,
             material: obj.materialSlots[slot] ?? 0,
             mode: 4,
@@ -210,6 +230,61 @@ export function exportGLTF(scene: Scene, selectionOnly = false): string {
       }]
     : undefined;
 
+  // ---- animation: one sampler per animated node, baked at the scene's fps
+  const animChannels: Record<string, unknown>[] = [];
+  const animSamplers: Record<string, unknown>[] = [];
+  const tl = scene.timeline;
+  for (const obj of included) {
+    if (obj.animation.length === 0) continue;
+    const nodeIndex = nodeIndexById.get(obj.id);
+    if (nodeIndex === undefined) continue;
+    const frames: number[] = [];
+    for (let f = tl.start; f <= tl.end; f++) frames.push(f);
+    if (frames.length < 2) continue;
+    const times = new Float32Array(frames.map((f) => (f - tl.start) / Math.max(1, tl.fps)));
+    const timeView = pushView(times, TARGET_ARRAY_BUFFER);
+    accessors.push({
+      bufferView: timeView, componentType: COMPONENT_FLOAT, count: times.length,
+      type: 'SCALAR', min: [times[0]], max: [times[times.length - 1]],
+    });
+    const timeAccessor = accessors.length - 1;
+
+    const paths: { path: 'translation' | 'rotation' | 'scale'; key: 'position' | 'rotation' | 'scale' }[] = [
+      { path: 'translation', key: 'position' },
+      { path: 'rotation', key: 'rotation' },
+      { path: 'scale', key: 'scale' },
+    ];
+    for (const { path, key } of paths) {
+      const chans = obj.animation.filter((c: Channel) => c.path === key);
+      if (chans.length === 0) continue;
+      const base = key === 'position' ? obj.position : key === 'rotation' ? obj.rotation : obj.scale;
+      const comps = path === 'rotation' ? 4 : 3;
+      const values = new Float32Array(frames.length * comps);
+      frames.forEach((frame, i) => {
+        const v = base.clone();
+        for (const c of chans) {
+          const sampled = sampleChannel(c, frame);
+          if (sampled === null) continue;
+          if (c.index === 0) v.x = sampled;
+          else if (c.index === 1) v.y = sampled;
+          else v.z = sampled;
+        }
+        if (path === 'rotation') values.set(eulerToQuaternion(v), i * 4);
+        else values.set([v.x, v.y, v.z], i * 3);
+      });
+      const valueView = pushView(values, TARGET_ARRAY_BUFFER);
+      accessors.push({
+        bufferView: valueView, componentType: COMPONENT_FLOAT,
+        count: frames.length, type: path === 'rotation' ? 'VEC4' : 'VEC3',
+      });
+      animSamplers.push({ input: timeAccessor, output: accessors.length - 1, interpolation: 'LINEAR' });
+      animChannels.push({
+        sampler: animSamplers.length - 1,
+        target: { node: nodeIndex, path },
+      });
+    }
+  }
+
   const totalBytes = new Uint8Array(byteLength);
   let o = 0;
   for (const c of chunks) {
@@ -227,6 +302,9 @@ export function exportGLTF(scene: Scene, selectionOnly = false): string {
     accessors,
     bufferViews,
     buffers: [{ byteLength, uri: `data:application/octet-stream;base64,${base64(totalBytes)}` }],
+    animations: animChannels.length
+      ? [{ name: 'KilnAction', channels: animChannels, samplers: animSamplers }]
+      : undefined,
     cameras,
   };
   if (lights.length) {

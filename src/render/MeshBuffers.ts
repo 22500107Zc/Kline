@@ -6,7 +6,7 @@ import { Mesh } from '../mesh/Mesh';
  * splitting draws.
  */
 
-export const SURFACE_STRIDE = 8; // pos(3) normal(3) flags(1) matId(1)
+export const SURFACE_STRIDE = 10; // pos(3) normal(3) uv(2) flags(1) matId(1)
 export const LINE_STRIDE = 6; // pos(3) color(3)
 export const POINT_STRIDE = 4; // pos(3) flags(1)
 
@@ -28,12 +28,16 @@ export function buildSurface(mesh: Mesh, selectedFaces: Set<number> | null): Buf
     const fn = t.faceNormals[f];
     const flag = selectedFaces && selectedFaces.has(f) ? 1 : 0;
     const mat = mesh.faceMaterial[f] ?? 0;
+    const uv = mesh.uvFor(f);
     for (let i = 1; i + 1 < loop.length; i++) {
-      for (const v of [loop[0], loop[i], loop[i + 1]]) {
+      for (const corner of [0, i, i + 1]) {
+        const v = loop[corner];
         const p = mesh.positions[v];
         const n = smooth ? t.vertNormals[v] : fn;
         data[o++] = p.x; data[o++] = p.y; data[o++] = p.z;
         data[o++] = n.x; data[o++] = n.y; data[o++] = n.z;
+        data[o++] = uv ? uv[corner * 2] : 0;
+        data[o++] = uv ? uv[corner * 2 + 1] : 0;
         data[o++] = flag;
         data[o++] = mat;
       }

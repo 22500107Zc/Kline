@@ -20,6 +20,7 @@ export function exportOBJ(scene: Scene, selectionOnly = false): string {
   const lines: string[] = ['# Exported from Kiln', `# ${new Date().toISOString()}`];
   const matLines: string[] = [];
   let vertexOffset = 1;
+  let uvOffset = 1;
   const seenMaterials = new Set<number>();
 
   for (const obj of scene.objects.values()) {
@@ -39,6 +40,23 @@ export function exportOBJ(scene: Scene, selectionOnly = false): string {
     for (const n of t.vertNormals) {
       const w = toObjAxes(normalMat.transformDirection(n)).normalized();
       lines.push(`vn ${w.x.toFixed(6)} ${w.y.toFixed(6)} ${w.z.toFixed(6)}`);
+    }
+    // Texture coordinates are per corner, so they get their own index space.
+    const uvIndex: number[][] = [];
+    let uvCount = 0;
+    for (let f = 0; f < mesh.faces.length; f++) {
+      const uv = mesh.uvFor(f);
+      if (!uv) {
+        uvIndex.push([]);
+        continue;
+      }
+      const row: number[] = [];
+      for (let i = 0; i < mesh.faces[f].length; i++) {
+        lines.push(`vt ${uv[i * 2].toFixed(6)} ${uv[i * 2 + 1].toFixed(6)}`);
+        row.push(uvOffset + uvCount);
+        uvCount++;
+      }
+      uvIndex.push(row);
     }
 
     let lastSlot = -1;
@@ -66,10 +84,16 @@ export function exportOBJ(scene: Scene, selectionOnly = false): string {
         lastSlot = slot;
       }
       lines.push(`s ${mesh.isFaceSmooth(f) ? 1 : 'off'}`);
-      const corners = mesh.faces[f].map((v) => `${v + vertexOffset}//${v + vertexOffset}`);
+      const uvRow = uvIndex[f];
+      const corners = mesh.faces[f].map((v, i) => (
+        uvRow.length
+          ? `${v + vertexOffset}/${uvRow[i]}/${v + vertexOffset}`
+          : `${v + vertexOffset}//${v + vertexOffset}`
+      ));
       lines.push(`f ${corners.join(' ')}`);
     }
     vertexOffset += mesh.positions.length;
+    uvOffset += uvCount;
   }
   return lines.join('\n') + '\n';
 }

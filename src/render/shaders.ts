@@ -50,9 +50,13 @@ vec3 shadePBR(vec3 n, vec3 v, vec3 l, vec3 radiance, vec3 albedo, float metallic
 }
 `;
 
+export const MAX_TEXTURES = 8;
+export const TEXTURE_SIZE = 1024;
+
 export const SURFACE_VERT = `#version 300 es
 in vec3 aPos;
 in vec3 aNormal;
+in vec2 aUV;
 in float aFlags;
 in float aMatId;
 
@@ -62,6 +66,7 @@ uniform mat4 uNormalMat;
 
 out vec3 vWorld;
 out vec3 vNormal;
+out vec2 vUV;
 flat out float vFlags;
 flat out int vMat;
 
@@ -69,6 +74,7 @@ void main() {
   vec4 world = uModel * vec4(aPos, 1.0);
   vWorld = world.xyz;
   vNormal = normalize((uNormalMat * vec4(aNormal, 0.0)).xyz);
+  vUV = aUV;
   vFlags = aFlags;
   vMat = int(aMatId + 0.5);
   gl_Position = uViewProj * world;
@@ -81,6 +87,7 @@ ${COMMON}
 
 in vec3 vWorld;
 in vec3 vNormal;
+in vec2 vUV;
 flat in float vFlags;
 flat in int vMat;
 
@@ -97,6 +104,11 @@ uniform vec3 uMatColor[${MAX_MATERIALS}];
 uniform vec2 uMatMR[${MAX_MATERIALS}];
 uniform vec4 uMatEmit[${MAX_MATERIALS}];
 uniform float uMatAlpha[${MAX_MATERIALS}];
+// Layer in the texture array, or -1 for an untextured material.
+uniform float uMatTexLayer[${MAX_MATERIALS}];
+uniform vec4 uMatUV[${MAX_MATERIALS}];   // xy = scale, zw = offset
+uniform mediump sampler2DArray uTextures;
+uniform float uUVCheck;                  // 1 = draw the procedural UV grid
 
 uniform vec3 uAmbient;
 uniform int uShadingMode;      // 0 = studio solid, 1 = material/rendered
@@ -121,9 +133,32 @@ vec3 studio(vec3 n, vec3 v, vec3 albedo, float rough) {
   return c;
 }
 
+// Procedural checker for judging an unwrap without loading an image.
+vec3 uvGrid(vec2 uv) {
+  vec2 cell = floor(uv * 8.0);
+  float odd = mod(cell.x + cell.y, 2.0);
+  vec3 base = mix(vec3(0.055, 0.062, 0.075), vec3(0.72, 0.70, 0.66), odd);
+  vec2 g = abs(fract(uv * 8.0) - 0.5);
+  float line = 1.0 - smoothstep(0.44, 0.5, max(g.x, g.y));
+  base = mix(base * 0.55, base, line);
+  // Tint the axes so flips and rotations are visible.
+  base = mix(base, vec3(0.62, 0.13, 0.2), step(uv.x, 0.125) * step(uv.y, 0.125));
+  base = mix(base, vec3(0.1, 0.5, 0.42), step(0.875, uv.x) * step(0.875, uv.y));
+  return base;
+}
+
 void main() {
   int mi = clamp(vMat, 0, ${MAX_MATERIALS - 1});
   vec3 albedo = uMatColor[mi];
+  vec2 uv = vUV * uMatUV[mi].xy + uMatUV[mi].zw;
+  float layer = uMatTexLayer[mi];
+  if (layer >= 0.0) {
+    vec4 tex = texture(uTextures, vec3(fract(uv), layer));
+    // Textures are authored in sRGB; shading happens in linear.
+    vec3 lin = mix(pow((tex.rgb + 0.055) / 1.055, vec3(2.4)), tex.rgb / 12.92, step(tex.rgb, vec3(0.04045)));
+    albedo *= lin;
+  }
+  if (uUVCheck > 0.5) albedo = uvGrid(vUV);
   float metallic = uMatMR[mi].x;
   float rough = clamp(uMatMR[mi].y, 0.03, 1.0);
   vec3 n = normalize(vNormal);

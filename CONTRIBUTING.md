@@ -36,6 +36,10 @@ fallback. One bundle ships to both targets.
 | Area | Path | Notes |
 |---|---|---|
 | Geometry kernel | `src/mesh` | Pure, DOM-free, fully unit tested |
+| UV unwrapping | `src/uv` | Pure; islands, LSCM, projections, packing |
+| Sculpt brushes | `src/sculpt` | Pure; brushes take local-space coordinates |
+| Animation | `src/anim` | Pure; channels, interpolation, sampling |
+| Path tracer | `src/render/pathtrace` | Pure typed arrays; runs on a worker or the main thread |
 | Modifiers | `src/modifiers` | Each one is a pure `Mesh -> Mesh` function |
 | Scene graph | `src/scene` | Objects, materials, lights, orbit camera |
 | Build prompt | `src/build` | Planner, sandbox and recipes; unit tested |
@@ -48,11 +52,24 @@ fallback. One bundle ships to both targets.
 
 ## House rules
 
-**Anything in `src/mesh`, `src/imaging` or `src/build` needs a test.** Assert an invariant, not a number:
-"the mesh is still a closed manifold", "the volume is unchanged", "every face
-is a quad". `tests/mesh.test.ts` has helpers for closedness and signed volume, and
+**Anything in `src/mesh`, `src/uv`, `src/sculpt`, `src/anim`, `src/imaging` or
+`src/build` needs a test.** Assert an invariant, not a number: "the mesh is
+still a closed manifold", "the volume is unchanged", "every face is a quad".
+`tests/mesh.test.ts` has helpers for closedness and signed volume;
 `tests/imaging.test.ts` builds synthetic bitmaps from a paint callback so the
-generators can be checked without any image files.
+generators can be checked without any image files; `tests/boolean.test.ts`
+leans on exact analytic volumes, which is what makes a CSG regression obvious
+rather than merely suspicious.
+
+**A destructive operator has to leave the mesh watertight if it found it that
+way.** Bevel, boolean, bisect and decimate all assert this. A boundary edge
+that appears out of nowhere is a bug even when the render looks fine, because
+every adjacency query downstream then quietly does the wrong thing.
+
+**The path tracer stays free of the DOM.** `src/render/pathtrace/tracer.ts` is
+imported by both the worker and the main-thread fallback, so it may not touch
+`window`, `document` or any class instance that will not survive a structured
+clone. Keep the hot loops on typed arrays and monomorphic.
 
 **Operators mutate in place and report what moved.** Follow the shape of the
 existing ones: take the mesh plus a selection, keep existing face indices stable

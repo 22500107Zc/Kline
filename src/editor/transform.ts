@@ -31,6 +31,10 @@ export class TransformSession {
   /** Free-form constraint direction (e.g. a face normal for extrude). */
   custom: { vec: Vec3; label: string } | null = null;
   numeric = '';
+  /** Geometry snap target; when set, translation lands the pivot exactly here. */
+  snapPoint: Vec3 | null = null;
+  /** Absolute-grid step; 0 disables. */
+  gridStep = 0;
   private modifiers: TransformModifiers = { precision: false, snap: false };
   private lastMatrix = Mat4.identity();
   private value = new Vec3();
@@ -151,6 +155,24 @@ export class TransformSession {
 
     const typed = this.numericValue();
     const constraint = this.constraint();
+    if (this.snapPoint && typed === null) {
+      // Land the pivot on the snap target, still respecting any axis lock.
+      const want = this.snapPoint.sub(this.pivot);
+      delta = constraint ? constraint.scale(want.dot(constraint)) : want;
+      this.value = delta;
+      return Mat4.translation(delta);
+    }
+    if (this.gridStep > 0 && typed === null) {
+      const s = this.gridStep;
+      const target = this.pivot.add(delta);
+      const snapped = new Vec3(
+        Math.round(target.x / s) * s, Math.round(target.y / s) * s, Math.round(target.z / s) * s,
+      );
+      delta = snapped.sub(this.pivot);
+      if (constraint) delta = constraint.scale(delta.dot(constraint));
+      this.value = delta;
+      return Mat4.translation(delta);
+    }
     if (constraint) {
       delta = constraint.scale(typed !== null ? typed : delta.dot(constraint));
     } else if (typed !== null) {

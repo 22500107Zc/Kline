@@ -5,8 +5,8 @@ import { ViewportCamera } from '../scene/ViewportCamera';
 import { DynamicBuffer, Program, setupAttribs } from './gl';
 import { buildPoints, buildSurface, buildWire } from './MeshBuffers';
 import {
-  GRID_FRAG, GRID_VERT, LINE_FRAG, LINE_VERT, MAX_LIGHTS, MAX_MATERIALS,
-  OUTLINE_FRAG, OUTLINE_VERT, POINT_FRAG, POINT_VERT, SURFACE_FRAG, SURFACE_VERT,
+  GRID_FRAG, GRID_VERT, LINE_FRAG, LINE_VERT, MAX_LIGHTS, MAX_MATERIALS, MAX_TEXTURES,
+  OUTLINE_FRAG, OUTLINE_VERT, POINT_FRAG, POINT_VERT, SURFACE_FRAG, SURFACE_VERT, TEXTURE_SIZE,
 } from './shaders';
 
 export type ShadingMode = 'solid' | 'material' | 'wireframe';
@@ -30,6 +30,8 @@ export interface ViewportOptions {
   showOrigins: boolean;
   xray: boolean;
   backfaceCulling: boolean;
+  /** Replace base colours with a procedural checker, for judging an unwrap. */
+  uvCheck?: boolean;
 }
 
 export interface LineSegment {
@@ -81,6 +83,11 @@ export class Renderer {
   private gridQuad: WebGLBuffer;
   private lineScratch: DynamicBuffer;
   private cache = new Map<number, GeometryEntry>();
+  private textureArray: WebGLTexture | null = null;
+  private textureLayers = new Map<number, number>();
+  private textureSignature = '';
+  /** Called when an image finishes decoding, so the host can redraw. */
+  onTexturesReady: (() => void) | null = null;
   width = 1;
   height = 1;
   pixelRatio = 1;
@@ -182,6 +189,7 @@ export class Renderer {
     const { scene, camera, options, edit } = state;
     this.resize();
     this.pruneCache(scene);
+    this.syncTextures(scene);
     this.lastDrawCalls = 0;
 
     const aspect = this.canvas.width / Math.max(1, this.canvas.height);
@@ -275,12 +283,14 @@ export class Renderer {
 
     const amb = scene.world.ambient;
     p.setVec3('uAmbient', amb, amb, amb);
+    p.setFloat('uUVCheck', options.uvCheck ? 1 : 0);
     this.uploadLights(p, scene);
     this.uploadMaterials(p, scene, obj);
+    this.bindTextures(p);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, entry.surface.buffer);
     setupAttribs(gl, p, [
-      { name: 'aPos', size: 3 }, { name: 'aNormal', size: 3 },
+      { name: 'aPos', size: 3 }, { name: 'aNormal', size: 3 }, { name: 'aUV', size: 2 },
       { name: 'aFlags', size: 1 }, { name: 'aMatId', size: 1 },
     ]);
     gl.drawArrays(gl.TRIANGLES, 0, entry.surface.count);
@@ -318,6 +328,8 @@ export class Renderer {
     const mr = new Float32Array(MAX_MATERIALS * 2);
     const emit = new Float32Array(MAX_MATERIALS * 4);
     const alpha = new Float32Array(MAX_MATERIALS);
+    const texLayer = new Float32Array(MAX_MATERIALS).fill(-1);
+    const uvXform = new Float32Array(MAX_MATERIALS * 4);
     const slots = obj.materialSlots.length ? obj.materialSlots : [0];
     for (let i = 0; i < MAX_MATERIALS; i++) {
       const m = scene.materials[slots[Math.min(i, slots.length - 1)] ?? 0];
@@ -326,7 +338,15 @@ export class Renderer {
       mr.set([m?.metallic ?? 0, m?.roughness ?? 0.5], i * 2);
       emit.set([...(m?.emission ?? [0, 0, 0]), m?.emissionStrength ?? 0], i * 4);
       alpha[i] = m?.alpha ?? 1;
+      const layer = m?.baseColorTexture != null ? this.textureLayers.get(m.baseColorTexture) : undefined;
+      texLayer[i] = layer === undefined ? -1 : layer;
+      uvXform.set([
+        m?.uvScale?.[0] ?? 1, m?.uvScale?.[1] ?? 1,
+        m?.uvOffset?.[0] ?? 0, m?.uvOffset?.[1] ?? 0,
+      ], i * 4);
     }
+    p.setFloatArray('uMatTexLayer', texLayer);
+    p.setVec4Array('uMatUV', uvXform);
     p.setVec3Array('uMatColor', color);
     p.setVec2Array('uMatMR', mr);
     p.setVec4Array('uMatEmit', emit);
@@ -560,6 +580,58 @@ export class Renderer {
     if (!depthTest) gl.disable(gl.DEPTH_TEST);
     this.drawLineBuffer(this.lineScratch, Mat4.identity(), viewProj, 0.0002, 1);
     if (!depthTest) gl.enable(gl.DEPTH_TEST);
+  }
+
+  /**
+   * Keep a texture array in step with the scene. Images decode asynchronously,
+   * so layers appear a frame or two after the scene references them.
+   */
+  private syncTextures(scene: Scene): void {
+    const list = scene.textures.slice(0, MAX_TEXTURES);
+    const signature = list.map((t) => `${t.id}:${t.url.length}`).join('|');
+    if (signature === this.textureSignature) return;
+    this.textureSignature = signature;
+
+    const gl = this.gl;
+    if (!this.textureArray) {
+      this.textureArray = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textureArray);
+      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RGBA8, TEXTURE_SIZE, TEXTURE_SIZE, MAX_TEXTURES);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.REPEAT);
+    }
+
+    this.textureLayers.clear();
+    list.forEach((tex, layer) => {
+      this.textureLayers.set(tex.id, layer);
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = TEXTURE_SIZE;
+        canvas.height = TEXTURE_SIZE;
+        const ctx = canvas.getContext('2d');
+        if (!ctx || !this.textureArray) return;
+        ctx.drawImage(img, 0, 0, TEXTURE_SIZE, TEXTURE_SIZE);
+        gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textureArray);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.texSubImage3D(
+          gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, TEXTURE_SIZE, TEXTURE_SIZE, 1,
+          gl.RGBA, gl.UNSIGNED_BYTE, canvas,
+        );
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        this.onTexturesReady?.();
+      };
+      img.src = tex.url;
+    });
+  }
+
+  private bindTextures(p: Program): void {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0);
+    if (this.textureArray) gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textureArray);
+    p.setInt('uTextures', 0);
   }
 
   dispose(): void {

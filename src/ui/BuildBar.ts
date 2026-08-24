@@ -36,7 +36,7 @@ export class BuildBar {
   constructor(private editor: Editor) {
     this.input.addEventListener('keydown', (e) => {
       // Typing must not reach the viewport keymap, but the app-wide chords
-      // (Cmd+K, Cmd+B) still have to work from inside the field.
+      // (Cmd+K, Cmd+Shift+B) still have to work from inside the field.
       if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
       if (e.key === 'Enter') void this.run();
       if (e.key === 'Escape') this.input.blur();

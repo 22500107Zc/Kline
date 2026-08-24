@@ -1,7 +1,11 @@
 import { AABB, Mat4, Vec3 } from '../core/math';
 import { Mesh } from '../mesh/Mesh';
-import { Modifier, evaluateStack, stackKey } from '../modifiers';
+import { Modifier, ObjectResolver, evaluateStack, stackKey } from '../modifiers';
 import { Material, cloneMaterial, createMaterial } from './Material';
+import { SceneTexture, reserveTextureId } from './Texture';
+import {
+  Channel, TimelineSettings, cloneChannels, completeTransform, defaultTimeline, sampleChannels,
+} from '../anim/animation';
 
 export type ObjectType = 'mesh' | 'light' | 'camera' | 'empty';
 export type LightType = 'point' | 'sun' | 'spot' | 'area';
@@ -60,6 +64,16 @@ export class SceneObject {
 
   private evalCache: { key: string; revision: number; mesh: Mesh } | null = null;
 
+  /** Keyframe channels driving this object's transform. */
+  animation: Channel[] = [];
+  /**
+   * Back-reference to the owning scene. Modifiers that point at another object
+   * (boolean, above all) cannot be evaluated without it.
+   */
+  owner: Scene | null = null;
+  /** Re-entrancy guard: a boolean chain that loops back would never return. */
+  private evaluating = false;
+
   constructor(id: number, name: string, type: ObjectType) {
     this.id = id;
     this.name = name;
@@ -86,17 +100,52 @@ export class SceneObject {
   evaluated(editMode = false): Mesh | null {
     if (!this.mesh) return null;
     if (this.modifiers.length === 0) return this.mesh;
-    const key = stackKey(this.modifiers, editMode);
+    if (this.evaluating) return this.mesh;
+    const scene = this.owner;
+    // References to other objects have to be part of the cache key, or editing
+    // a boolean's cutter would leave the result stale.
+    let refs = '';
+    if (scene) {
+      for (const mod of this.modifiers) {
+        if (mod.type !== 'boolean' || mod.objectId === null) continue;
+        const other = scene.get(mod.objectId);
+        refs += `|${mod.objectId}:${other?.mesh?.revision ?? -1}`;
+      }
+    }
+    const key = stackKey(this.modifiers, editMode) + refs;
     if (this.evalCache && this.evalCache.key === key && this.evalCache.revision === this.mesh.revision) {
       return this.evalCache.mesh;
     }
-    const result = evaluateStack(this.mesh, this.modifiers, editMode);
+    const resolve: ObjectResolver | undefined = scene
+      ? (id) => {
+        const other = scene.get(id);
+        if (!other || other === this) return null;
+        const geo = other.evaluated(false);
+        if (!geo) return null;
+        // Bring the cutter into this object's local space.
+        const into = this.worldMatrix(scene).inverse().multiply(other.worldMatrix(scene));
+        const copy = geo.clone();
+        copy.transform(into);
+        return copy;
+      }
+      : undefined;
+    this.evaluating = true;
+    let result: Mesh;
+    try {
+      result = evaluateStack(this.mesh, this.modifiers, editMode, resolve);
+    } finally {
+      this.evaluating = false;
+    }
     this.evalCache = { key, revision: this.mesh.revision, mesh: result };
     return result;
   }
 
   invalidate(): void {
     this.evalCache = null;
+  }
+
+  get animated(): boolean {
+    return this.animation.length > 0;
   }
 
   /**
@@ -127,6 +176,12 @@ export interface WorldSettings {
   ambient: number;
   showGrid: boolean;
   gridSize: number;
+  /**
+   * Strength of the sky dome in a path-traced render. It both lights the
+   * scene and is what a ray that escapes sees, so raising it brightens the
+   * shadows and the backdrop together.
+   */
+  sky: number;
 }
 
 export class Scene {
@@ -134,14 +189,18 @@ export class Scene {
   /** Top-level display order in the outliner. */
   order: number[] = [];
   materials: Material[] = [];
+  /** Images referenced by materials, embedded so a saved scene is portable. */
+  textures: SceneTexture[] = [];
   world: WorldSettings = {
     background: [0.05, 0.05, 0.06],
     ambient: 0.12,
     showGrid: true,
     gridSize: 1,
+    sky: 0.35,
   };
   selection = new Set<number>();
   active: number | null = null;
+  timeline: TimelineSettings = defaultTimeline();
   /** 3D cursor — the pivot/spawn point, as in Blender. */
   cursor = new Vec3();
 
@@ -166,6 +225,7 @@ export class Scene {
 
   add(type: ObjectType, name: string, mesh: Mesh | null = null): SceneObject {
     const obj = new SceneObject(this.nextId++, this.uniqueName(name), type);
+    obj.owner = this;
     obj.mesh = mesh;
     if (type === 'light') obj.light = createLightData();
     if (type === 'camera') obj.camera = createCameraData();
@@ -277,6 +337,32 @@ export class Scene {
     return { objects: this.objects.size, verts, edges, faces, tris };
   }
 
+  /** Any object in the scene carrying keyframes. */
+  animatedObjects(): SceneObject[] {
+    return [...this.objects.values()].filter((o) => o.animation.length > 0);
+  }
+
+  get hasAnimation(): boolean {
+    for (const o of this.objects.values()) if (o.animation.length > 0) return true;
+    return false;
+  }
+
+  /** Drive every animated object's transform to the given frame. */
+  setFrame(frame: number): boolean {
+    this.timeline.current = frame;
+    let changed = false;
+    for (const obj of this.objects.values()) {
+      if (obj.animation.length === 0) continue;
+      const sampled = sampleChannels(obj.animation, frame);
+      const next = completeTransform(sampled, obj, obj.animation);
+      obj.position = next.position;
+      obj.rotation = next.rotation;
+      obj.scale = next.scale;
+      changed = true;
+    }
+    return changed;
+  }
+
   toJSON(): SerializedScene {
     return {
       format: 'kiln-scene',
@@ -285,6 +371,8 @@ export class Scene {
       world: { ...this.world, background: [...this.world.background] as [number, number, number] },
       cursor: this.cursor.toArray(),
       materials: this.materials.map(cloneMaterial),
+      textures: this.textures.map((t) => ({ ...t })),
+      timeline: { ...this.timeline, playing: false },
       active: this.active,
       selection: [...this.selection],
       order: [...this.order],
@@ -304,6 +392,7 @@ export class Scene {
         materialSlots: [...o.materialSlots],
         light: o.light ? { ...o.light, color: [...o.light.color] as [number, number, number] } : null,
         camera: o.camera ? { ...o.camera } : null,
+        animation: cloneChannels(o.animation),
       })),
     };
   }
@@ -314,9 +403,13 @@ export class Scene {
     s.world = { ...s.world, ...data.world };
     s.cursor = Vec3.fromArray(data.cursor ?? [0, 0, 0]);
     s.materials = (data.materials ?? []).map(cloneMaterial);
+    s.textures = (data.textures ?? []).map((t) => ({ ...t }));
+    s.timeline = { ...defaultTimeline(), ...(data.timeline ?? {}), playing: false };
+    for (const t of s.textures) reserveTextureId(t.id);
     s.order = [...(data.order ?? [])];
     for (const od of data.objects ?? []) {
       const o = new SceneObject(od.id, od.name, od.type);
+      o.owner = s;
       o.position = Vec3.fromArray(od.position);
       o.rotation = Vec3.fromArray(od.rotation);
       o.scale = Vec3.fromArray(od.scale);
@@ -329,6 +422,7 @@ export class Scene {
       o.materialSlots = od.materialSlots ?? [];
       o.light = od.light ?? null;
       o.camera = od.camera ?? null;
+      o.animation = cloneChannels(od.animation ?? []);
       s.objects.set(o.id, o);
       s.nextId = Math.max(s.nextId, o.id + 1);
     }
@@ -355,6 +449,7 @@ export interface SerializedObject {
   materialSlots: number[];
   light: LightData | null;
   camera: CameraData | null;
+  animation?: Channel[];
 }
 
 export interface SerializedScene {
@@ -364,6 +459,8 @@ export interface SerializedScene {
   world: WorldSettings;
   cursor: [number, number, number];
   materials: Material[];
+  textures?: SceneTexture[];
+  timeline?: TimelineSettings;
   active: number | null;
   selection: number[];
   order: number[];

@@ -4,7 +4,7 @@ import { SelectMode } from '../render/Renderer';
 export interface EditorSnapshot {
   label: string;
   scene: SerializedScene;
-  mode: 'object' | 'edit';
+  mode: 'object' | 'edit' | 'sculpt';
   editObject: number | null;
   selectMode: SelectMode;
   verts: number[];

@@ -55,3 +55,17 @@ export function openTextFile(accept: string): Promise<{ name: string; text: stri
     input.click();
   });
 }
+
+/** Open a native file picker and hand back the raw File. */
+export function pickFile(accept: string): Promise<File | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = accept;
+    input.onchange = () => resolve(input.files?.[0] ?? null);
+    // A cancelled picker fires nothing at all in some browsers, so the promise
+    // is also settled when focus comes back to the window.
+    window.addEventListener('focus', () => setTimeout(() => resolve(input.files?.[0] ?? null), 300), { once: true });
+    input.click();
+  });
+}

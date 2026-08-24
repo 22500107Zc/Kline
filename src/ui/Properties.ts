@@ -1,5 +1,6 @@
 import { RAD2DEG, DEG2RAD, Vec3 } from '../core/math';
 import { Editor } from '../editor/Editor';
+import { runCommand } from '../editor/commands';
 import { MODIFIER_LABELS, Modifier, ModifierType, createModifier } from '../modifiers';
 import { createMaterial, hexToLinear, linearToHex } from '../scene/Material';
 import { LightType, SceneObject } from '../scene/Scene';
@@ -395,6 +396,65 @@ export class Properties {
       case 'triangulate':
         body.appendChild(h('p', { class: 'dim small', text: 'Converts every n-gon to triangles at render time.' }));
         break;
+      case 'boolean': {
+        const others = [...ed.scene.objects.values()]
+          .filter((o) => o.type === 'mesh' && o.id !== obj.id)
+          .map((o) => ({ value: String(o.id), label: o.name }));
+        body.appendChild(row('Operation', select(
+          [
+            { value: 'difference', label: 'Difference' },
+            { value: 'union', label: 'Union' },
+            { value: 'intersect', label: 'Intersect' },
+          ],
+          mod.operation,
+          (v) => {
+            update('Set boolean operation');
+            mod.operation = v as typeof mod.operation;
+            ed.markGeometryDirty(obj);
+          },
+        )));
+        body.appendChild(row('Cutter', select(
+          [{ value: '', label: '— none —' }, ...others],
+          mod.objectId === null ? '' : String(mod.objectId),
+          (v) => {
+            update('Set boolean cutter');
+            mod.objectId = v === '' ? null : Number(v);
+            ed.markGeometryDirty(obj);
+          },
+        )));
+        if (others.length === 0) {
+          body.appendChild(h('p', { class: 'dim small', text: 'Add another mesh object to cut with.' }));
+        }
+        break;
+      }
+      case 'decimate': {
+        body.appendChild(num('Ratio', mod.ratio, 0.02, (v) => {
+          mod.ratio = Math.max(0.01, Math.min(1, v));
+        }, { min: 0.01, max: 1 }));
+        body.appendChild(checkbox('Keep open borders', mod.preserveBorder, (v) => {
+          update('Toggle border preservation');
+          mod.preserveBorder = v;
+          ed.markGeometryDirty(obj);
+        }));
+        const evaluated = obj.evaluated(false);
+        body.appendChild(h('p', {
+          class: 'dim small',
+          text: `${obj.mesh?.triCount ?? 0} → ${evaluated?.triCount ?? 0} triangles`,
+        }));
+        break;
+      }
+      case 'bevel':
+        body.appendChild(num('Width', mod.width, 0.005, (v) => { mod.width = Math.max(0, v); }, { min: 0, precision: 4 }));
+        body.appendChild(num('Segments', mod.segments, 1, (v) => {
+          mod.segments = Math.max(1, Math.min(16, Math.round(v)));
+        }, { min: 1, max: 16, precision: 0 }));
+        body.appendChild(num('Profile', mod.profile, 0.05, (v) => {
+          mod.profile = Math.max(0, Math.min(1, v));
+        }, { min: 0, max: 1 }));
+        body.appendChild(num('Angle limit', mod.angleLimit, 1, (v) => {
+          mod.angleLimit = Math.max(0, Math.min(180, v));
+        }, { min: 0, max: 180, precision: 0 }));
+        break;
     }
 
     body.appendChild(h('div', { class: 'btn-row' }, [
@@ -489,6 +549,42 @@ export class Properties {
       })),
       h('p', { class: 'dim small', text: 'Material shading shows in the Material and Rendered viewport modes (press Z).' }),
     ]));
+
+    const textureOptions = [
+      { value: '', label: '— none —' },
+      ...scene.textures.map((t) => ({ value: String(t.id), label: t.name })),
+    ];
+    const preview = scene.textures.find((t) => t.id === mat.baseColorTexture);
+    this.body.appendChild(this.section('Texture', [
+      row('Base colour map', select(textureOptions, mat.baseColorTexture === null ? '' : String(mat.baseColorTexture), (v) => {
+        ed.beginUndo('Set texture');
+        mat.baseColorTexture = v === '' ? null : Number(v);
+        ed.requestRender();
+        ed.emit('change');
+      })),
+      preview ? h('img', { class: 'tex-preview', value: '' , title: preview.name }) as HTMLElement : null,
+      row('Tiling', h('div', { class: 'nf-group' }, (['x', 'y'] as const).map((axis, i) => numberField({
+        label: axis.toUpperCase(), value: mat.uvScale[i], step: 0.05, axis,
+        onLive: (v) => { mat.uvScale[i] = v; live(); },
+        onChange: (v) => { mat.uvScale[i] = v; live(); ed.emit('change'); },
+      })))),
+      row('Offset', h('div', { class: 'nf-group' }, (['x', 'y'] as const).map((axis, i) => numberField({
+        label: axis.toUpperCase(), value: mat.uvOffset[i], step: 0.01, axis,
+        onLive: (v) => { mat.uvOffset[i] = v; live(); },
+        onChange: (v) => { mat.uvOffset[i] = v; live(); ed.emit('change'); },
+      })))),
+      h('div', { class: 'btn-row' }, [
+        button('Add checker', () => runCommand(ed, 'material.checker')),
+        button('Load image…', () => runCommand(ed, 'material.loadTexture')),
+      ]),
+      obj.mesh && !obj.mesh.hasUV
+        ? h('p', { class: 'dim small', text: 'This mesh has no UVs yet — unwrap it in Edit Mode (U) before texturing.' })
+        : null,
+    ].filter(Boolean) as HTMLElement[]));
+    if (preview) {
+      const img = this.body.querySelector('.tex-preview') as HTMLImageElement | null;
+      if (img) img.src = preview.url;
+    }
   }
 
   // ------------------------------------------------------------------- world
@@ -508,6 +604,15 @@ export class Properties {
         onLive: (v) => { world.ambient = v; ed.requestRender(); },
         onChange: (v) => { world.ambient = v; ed.requestRender(); ed.emit('change'); },
       })),
+      row('Sky', numberField({
+        label: '', value: world.sky, step: 0.02, min: 0, max: 4,
+        onLive: (v) => { world.sky = v; },
+        onChange: (v) => { world.sky = v; ed.emit('change'); },
+      })),
+      h('p', { class: 'dim small', text: 'Sky lights a path-traced render and shows behind it. Ambient is the viewport fill.' }),
+      h('div', { class: 'btn-row' }, [
+        button('Render image', () => runCommand(ed, 'render.image')),
+      ]),
     ]));
 
     this.body.appendChild(this.section('Viewport', [

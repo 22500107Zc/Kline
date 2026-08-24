@@ -10,6 +10,11 @@ import { BuildBar } from './BuildBar';
 import { CommandPalette } from './CommandPalette';
 import { COMMANDS as ALL_COMMANDS } from '../editor/commands';
 import { applyDesktopChrome, desktop } from '../desktop';
+import { Timeline } from './Timeline';
+import { RenderWindow } from './RenderWindow';
+import { UVEditor } from './UVEditor';
+import { SculptPanel } from './SculptPanel';
+import { clearAutosave, formatAge, readAutosave } from '../editor/persistence';
 
 /** Assembles the shell around the viewport and routes keyboard input. */
 export class App {
@@ -25,6 +30,9 @@ export class App {
   private properties!: Properties;
   private palette!: CommandPalette;
   private buildBar!: BuildBar;
+  private renderWindow!: RenderWindow;
+  private uvEditor!: UVEditor;
+  private recoveryBar = h('div', { class: 'recovery-bar hidden' });
 
   constructor(private mount: HTMLElement) {
     this.canvas = h('canvas', { class: 'viewport-canvas' });
@@ -39,16 +47,23 @@ export class App {
 
     this.buildBar = new BuildBar(this.editor);
     this.palette = new CommandPalette(this.editor);
+    this.renderWindow = new RenderWindow(this.editor);
+    this.uvEditor = new UVEditor(this.editor);
+    const sculptPanel = new SculptPanel(this.editor);
+    const timeline = new Timeline(this.editor);
     const viewport = h('main', { class: 'viewport' }, [
       this.canvas, this.buildBar.root, this.boxSelect, this.viewportHint,
-      this.dropVeil, this.shortcuts, this.palette.root,
+      sculptPanel.root, this.uvEditor.root, this.dropVeil, this.shortcuts,
+      this.renderWindow.root, this.palette.root,
     ]);
     const right = h('div', { class: 'sidebar' }, [outliner.root, properties.root]);
 
     mount.append(
       header.root,
       this.heatBar,
+      this.recoveryBar,
       h('div', { class: 'workspace' }, [toolbar.root, viewport, right]),
+      timeline.root,
       status.root,
     );
 
@@ -56,6 +71,10 @@ export class App {
     this.wireKeyboard();
     this.wireDesktopShell();
     this.wireFileDrop();
+    this.editor.loadStoredPreferences();
+    this.offerRecovery();
+    this.editor.renderer.onTexturesReady = () => this.editor.requestRender();
+    window.addEventListener('beforeunload', () => this.editor.autosaveNow(false));
     this.editor.on('modal', () => this.syncModalChrome());
     this.editor.on('change', () => this.syncModalChrome());
     this.syncModalChrome();
@@ -91,7 +110,9 @@ export class App {
         this.palette.toggle();
         return;
       }
-      if (meta && e.key.toLowerCase() === 'b') {
+      // Ctrl/Cmd+B belongs to Bevel, the way it does in every modeller;
+      // the Build prompt takes the Shift variant.
+      if (meta && e.shiftKey && e.key.toLowerCase() === 'b') {
         e.preventDefault();
         this.buildBar.focus();
         return;
@@ -109,6 +130,23 @@ export class App {
         e.preventDefault();
         this.toggleShortcuts();
         return;
+      }
+      if (meta && e.key.toLowerCase() === 'u') {
+        e.preventDefault();
+        this.uvEditor.toggle();
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (this.renderWindow.visible) {
+          this.renderWindow.hide();
+          e.preventDefault();
+          return;
+        }
+        if (this.uvEditor.visible) {
+          this.uvEditor.hide();
+          e.preventDefault();
+          return;
+        }
       }
       if (this.editor.handleKey(e)) {
         e.preventDefault();
@@ -183,6 +221,47 @@ export class App {
     });
   }
 
+  /**
+   * If the last session left an autosave behind, offer it rather than
+   * restoring silently — the user may well have wanted the blank scene.
+   */
+  private offerRecovery(): void {
+    const rec = readAutosave();
+    if (!rec) return;
+    const objectCount = rec.scene.objects?.length ?? 0;
+    if (objectCount === 0) return;
+    clear(this.recoveryBar);
+    this.recoveryBar.append(
+      h('span', {
+        text: `Recovered a scene from ${formatAge(Date.now() - rec.savedAt)} (${objectCount} objects).`,
+      }),
+      h('button', {
+        class: 'btn primary', text: 'Restore',
+        on: {
+          click: () => {
+            try {
+              this.editor.loadSceneJSON(rec.scene);
+              this.editor.setStatus('Restored the recovered scene');
+            } catch (err) {
+              this.editor.setStatus(`Could not restore: ${(err as Error).message}`);
+            }
+            this.recoveryBar.classList.add('hidden');
+          },
+        },
+      }),
+      h('button', {
+        class: 'btn', text: 'Discard',
+        on: {
+          click: () => {
+            clearAutosave();
+            this.recoveryBar.classList.add('hidden');
+          },
+        },
+      }),
+    );
+    this.recoveryBar.classList.remove('hidden');
+  }
+
   private toggleShortcuts(): void {
     this.shortcuts.classList.toggle('hidden');
   }
@@ -219,8 +298,34 @@ export class App {
       h('h3', { text: 'Quick keys' }),
       ...[
         ['Cmd/Ctrl + K', 'Search every command'],
-        ['Cmd/Ctrl + B', 'Jump to the Build prompt'],
+        ['Cmd/Ctrl + Shift + B', 'Jump to the Build prompt'],
+        ['Cmd/Ctrl + U', 'UV editor'],
         ['?', 'This sheet'],
+      ].map(([k, v]) => h('div', { class: 'shortcut-row' }, [h('kbd', { text: k }), h('span', { text: v })])),
+    ]));
+
+    grid.appendChild(h('div', { class: 'shortcut-group' }, [
+      h('h3', { text: 'Sculpt Mode' }),
+      ...[
+        ['Drag', 'Apply the brush'],
+        ['Ctrl + drag', 'Invert the brush'],
+        ['[  ]', 'Smaller / larger brush'],
+        ['Ctrl + scroll', 'Resize the brush'],
+        ['B', 'Next brush'],
+      ].map(([k, v]) => h('div', { class: 'shortcut-row' }, [h('kbd', { text: k }), h('span', { text: v })])),
+    ]));
+
+    grid.appendChild(h('div', { class: 'shortcut-group' }, [
+      h('h3', { text: 'Modal operators' }),
+      ...[
+        ['X / Y / Z', 'Constrain to an axis'],
+        ['Shift + axis', 'Constrain to a plane'],
+        ['Type a number', 'Enter an exact value'],
+        ['Scroll', 'Loop cut count · bevel segments'],
+        ['P', 'Cycle the bevel profile'],
+        ['Shift', 'Precision drag'],
+        ['Ctrl', 'Invert the snap setting'],
+        ['Right click / Esc', 'Cancel'],
       ].map(([k, v]) => h('div', { class: 'shortcut-row' }, [h('kbd', { text: k }), h('span', { text: v })])),
     ]));
 
