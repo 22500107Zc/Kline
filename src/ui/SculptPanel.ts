@@ -1,5 +1,6 @@
 import { Editor } from '../editor/Editor';
 import { BRUSH_LABELS, SculptBrush } from '../sculpt/sculpt';
+import { runCommand } from '../editor/commands';
 import { checkbox, clear, h } from './dom';
 
 /** Brush picker and settings, shown only while Sculpt Mode is active. */
@@ -63,6 +64,9 @@ export class SculptPanel {
       this.slider('Auto-smooth', ed.sculpt.autoSmooth, 0, 1, 0.01, (v) => {
         ed.sculpt.autoSmooth = v;
       }, (v) => v.toFixed(2)),
+      this.slider('Spacing', ed.sculpt.spacing, 0.02, 1, 0.01, (v) => {
+        ed.sculpt.spacing = v;
+      }, (v) => `${Math.round(v * 100)}%`),
     );
 
     const sym = h('div', { class: 'sp-sym' }, [h('span', { class: 'sp-head', text: 'Symmetry' })]);
@@ -79,6 +83,25 @@ export class SculptPanel {
       }));
     });
     this.root.appendChild(sym);
+
+    this.root.appendChild(h('span', { class: 'sp-head', text: 'Topology' }));
+    const tools = h('div', { class: 'sp-topology' });
+    tools.append(
+      h('button', {
+        class: 'sp-axis wide', text: 'Remesh',
+        title: 'Rebuild the mesh at an even density. Resets UVs.',
+        on: { click: () => runCommand(ed, 'sculpt.remesh') },
+      }),
+      h('button', {
+        class: 'sp-axis wide', text: 'Clear mask',
+        on: { click: () => runCommand(ed, 'sculpt.clearMask') },
+      }),
+      h('button', {
+        class: 'sp-axis wide', text: 'Invert mask',
+        on: { click: () => runCommand(ed, 'sculpt.invertMask') },
+      }),
+    );
+    this.root.appendChild(tools);
 
     this.root.appendChild(h('p', { class: 'sp-hint', text: 'Hold Ctrl to invert · [ and ] resize · Ctrl+scroll resizes' }));
 

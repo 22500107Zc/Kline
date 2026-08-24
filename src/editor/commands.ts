@@ -8,6 +8,7 @@ import {
 } from '../mesh/ops';
 import { Scene } from '../scene/Scene';
 import { bevelVertices, markBevelWeight } from '../mesh/bevel';
+import { voxelRemesh, voxelSizeForTarget } from '../mesh/remesh';
 import { BooleanOp, dissolveCoplanar, isSolid, meshBoolean, stitchTJunctions } from '../mesh/boolean';
 import { bisect, bridgeLoops, pokeFaces, spinEdges, symmetrize } from '../mesh/modeling';
 import { decimate } from '../mesh/decimate';
@@ -955,6 +956,64 @@ export const COMMANDS: Command[] = [
       ed.sculpt.symmetry[0] = !ed.sculpt.symmetry[0];
       ed.setStatus(`X symmetry ${ed.sculpt.symmetry[0] ? 'on' : 'off'}`);
       ed.emit('change');
+    },
+  },
+  {
+    id: 'sculpt.remesh', label: 'Voxel Remesh', category: 'Edit', mode: 'sculpt',
+    run: (ed) => {
+      const obj = ed.editObject ?? ed.scene.get(ed.scene.active ?? -1);
+      const mesh = obj?.mesh;
+      if (!obj || !mesh || mesh.faceCount === 0) {
+        ed.setStatus('Nothing to remesh');
+        return;
+      }
+      const before = mesh.faceCount;
+      const t0 = Date.now();
+      ed.beginUndo('Voxel remesh');
+      // Aim for a similar triangle count to what is already there, with a
+      // floor: remeshing a cube is pointless at six faces' worth of detail.
+      const target = Math.max(20000, Math.min(400000, mesh.triCount));
+      const rebuilt = voxelRemesh(mesh, { voxelSize: voxelSizeForTarget(mesh, target) });
+      if (rebuilt.faceCount === 0) {
+        ed.setStatus('Remesh produced nothing — the mesh may not enclose a volume');
+        return;
+      }
+      obj.mesh = rebuilt;
+      ed.markGeometryDirty(obj);
+      ed.setStatus(
+        `Remeshed ${before} faces into ${rebuilt.faceCount} in ${Date.now() - t0}ms — UVs were reset`,
+      );
+      ed.emit('change');
+    },
+  },
+  {
+    id: 'sculpt.clearMask', label: 'Clear Sculpt Mask', category: 'Edit', mode: 'sculpt',
+    run: (ed) => {
+      const mesh = (ed.editObject ?? ed.scene.get(ed.scene.active ?? -1))?.mesh;
+      if (!mesh || !mesh.mask) {
+        ed.setStatus('Nothing is masked');
+        return;
+      }
+      ed.beginUndo('Clear mask');
+      mesh.mask = null;
+      mesh.markDirty();
+      ed.setStatus('Mask cleared');
+      ed.emit('change');
+      ed.requestRender();
+    },
+  },
+  {
+    id: 'sculpt.invertMask', label: 'Invert Sculpt Mask', category: 'Edit', mode: 'sculpt',
+    run: (ed) => {
+      const mesh = (ed.editObject ?? ed.scene.get(ed.scene.active ?? -1))?.mesh;
+      if (!mesh) return;
+      ed.beginUndo('Invert mask');
+      const mask = mesh.ensureMask();
+      for (let i = 0; i < mask.length; i++) mask[i] = 1 - mask[i];
+      mesh.markDirty();
+      ed.setStatus('Mask inverted');
+      ed.emit('change');
+      ed.requestRender();
     },
   },
   {

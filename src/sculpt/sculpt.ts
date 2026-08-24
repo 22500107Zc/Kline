@@ -12,7 +12,7 @@ import { Mesh } from '../mesh/Mesh';
  */
 
 export type SculptBrush =
-  | 'draw' | 'smooth' | 'inflate' | 'grab' | 'flatten' | 'scrape' | 'pinch' | 'crease';
+  | 'draw' | 'smooth' | 'inflate' | 'grab' | 'flatten' | 'scrape' | 'pinch' | 'crease' | 'mask';
 
 export const BRUSH_LABELS: Record<SculptBrush, string> = {
   draw: 'Draw',
@@ -23,6 +23,7 @@ export const BRUSH_LABELS: Record<SculptBrush, string> = {
   scrape: 'Scrape',
   pinch: 'Pinch',
   crease: 'Crease',
+  mask: 'Mask',
 };
 
 export interface SculptSettings {
@@ -36,12 +37,21 @@ export interface SculptSettings {
   symmetry: [boolean, boolean, boolean];
   /** Blend a little smoothing into every dab. */
   autoSmooth: number;
+  /**
+   * Distance between dabs, as a fraction of the radius.
+   *
+   * Without this a stroke is one dab per pointer event, so the same gesture
+   * carves a deep trench when drawn slowly and a dotted line when drawn fast —
+   * the result depends on the mouse's report rate rather than on the stroke.
+   * Stepping along the path at a fixed spacing makes the two identical.
+   */
+  spacing: number;
 }
 
 export function defaultSculpt(): SculptSettings {
   return {
     brush: 'draw', radius: 0.35, strength: 0.5, invert: false,
-    symmetry: [false, false, false], autoSmooth: 0.1,
+    symmetry: [false, false, false], autoSmooth: 0.1, spacing: 0.2,
   };
 }
 
@@ -125,6 +135,8 @@ interface Grabbed {
 export class SculptStroke {
   private grid: VertexGrid;
   private grabbed: Grabbed[] | null = null;
+  /** Where the last dab landed, so spacing is measured along the path. */
+  private lastDab: Vec3 | null = null;
   /** Vertices this stroke has moved, for the caller's dirty tracking. */
   readonly touched = new Set<number>();
 
@@ -134,6 +146,10 @@ export class SculptStroke {
 
   /** Capture the vertices a grab stroke will drag. */
   begin(center: Vec3, radius: number): void {
+    // Anchor the path where the stroke was pressed, not wherever the first
+    // pointer report happens to land — otherwise a fast drag starts its dabs
+    // partway along and a slow one does not.
+    this.lastDab = center.clone();
     if (this.settings.brush !== 'grab') return;
     this.grabbed = [];
     const claimed = new Set<number>();
@@ -174,6 +190,41 @@ export class SculptStroke {
   }
 
   /**
+   * Continue the stroke to a new point, laying down as many dabs as the
+   * distance covered calls for.
+   *
+   * The caller reports pointer positions, which arrive at whatever rate the
+   * device and the frame budget allow. Walking the gap in fixed steps is what
+   * makes a stroke depend on the gesture rather than on how fast it was drawn
+   * or how busy the machine was at the time.
+   */
+  stroke(center: Vec3, normal: Vec3, radius: number, delta: Vec3): number {
+    // Grab drags a captured set to an absolute offset; stepping along the path
+    // would apply it repeatedly.
+    if (this.settings.brush === 'grab') return this.dab(center, normal, radius, delta);
+
+    const step = Math.max(1e-4, this.settings.spacing * radius);
+    const last = this.lastDab;
+    if (!last) {
+      this.lastDab = center.clone();
+      return this.dab(center, normal, radius, delta);
+    }
+
+    const travel = center.sub(last);
+    const dist = travel.length();
+    if (dist < step) return 0;
+
+    let moved = 0;
+    const steps = Math.min(64, Math.floor(dist / step));
+    for (let i = 1; i <= steps; i++) {
+      const at = last.add(travel.scale((i * step) / dist));
+      moved += this.dab(at, normal, radius, delta);
+    }
+    this.lastDab = last.add(travel.scale((steps * step) / dist));
+    return moved;
+  }
+
+  /**
    * Apply one dab. `delta` is the total local-space drag since `begin`, used
    * only by the grab brush. Returns how many vertices moved.
    */
@@ -204,6 +255,21 @@ export class SculptStroke {
   private dabAt(center: Vec3, normal: Vec3, radius: number, s: SculptSettings): number {
     const verts = this.grid.query(center, radius);
     if (verts.length === 0) return 0;
+
+    // The mask brush paints the mask rather than the surface.
+    if (s.brush === 'mask') {
+      const mask = this.mesh.ensureMask();
+      const sign = s.invert ? -1 : 1;
+      let n = 0;
+      for (const i of verts) {
+        const w = brushFalloff(this.mesh.positions[i].distanceTo(center) / radius);
+        if (w <= 0) continue;
+        mask[i] = clamp(mask[i] + sign * s.strength * w * 0.5, 0, 1);
+        n++;
+      }
+      return n;
+    }
+
     const t = this.mesh.topology();
     const sign = s.invert ? -1 : 1;
     const amount = s.strength * radius * 0.25;
@@ -220,7 +286,8 @@ export class SculptStroke {
     for (const i of verts) {
       const p = this.mesh.positions[i];
       const d = p.distanceTo(center);
-      const w = brushFalloff(d / radius);
+      // A masked vertex is held in place, in proportion to how masked it is.
+      const w = brushFalloff(d / radius) * (1 - this.mesh.maskAt(i));
       if (w <= 0) continue;
       let target = p;
       switch (s.brush) {

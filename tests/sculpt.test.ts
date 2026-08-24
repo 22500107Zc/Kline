@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildPrimitive } from '../src/mesh/primitives';
-import { catmullClark } from '../src/mesh/ops';
+import { catmullClark, subdivideFaces } from '../src/mesh/ops';
 import { SculptStroke, VertexGrid, brushFalloff, defaultSculpt } from '../src/sculpt/sculpt';
 import { Vec3 } from '../src/core/math';
+import { Mesh } from '../src/mesh/Mesh';
+import { voxelRemesh, voxelSizeForTarget } from '../src/mesh/remesh';
 
 test('the falloff runs from 1 at the centre to 0 at the rim', () => {
   assert.equal(brushFalloff(0), 1);
@@ -120,3 +122,134 @@ test('X symmetry mirrors the stroke', () => {
   }
   assert.ok(right > 0 && left > 0, `symmetry only touched one side (${left}/${right})`);
 });
+
+// ------------------------------------------- spacing, masking and remeshing
+
+test('a stroke is the same however fast it was drawn', () => {
+  // The same path, reported as two long jumps or as many short ones. Without
+  // spacing the fast version would lay down two dabs and the slow one twenty.
+  const run = (steps: number): Mesh => {
+    const m = buildPrimitive('grid');
+    for (let i = 0; i < 3; i++) subdivideFaces(m, m.faces.map((_, f) => f));
+    const s = { ...defaultSculpt(), brush: 'draw' as const, strength: 0.8, radius: 0.35, autoSmooth: 0 };
+    const stroke = new SculptStroke(m, s, s.radius);
+    const from = new Vec3(-0.6, 0, 0);
+    const to = new Vec3(0.6, 0, 0);
+    stroke.begin(from, s.radius);
+    for (let i = 1; i <= steps; i++) {
+      const at = from.lerp(to, i / steps);
+      stroke.stroke(at, new Vec3(0, 0, 1), s.radius, new Vec3());
+    }
+    return m;
+  };
+  const fast = run(2);
+  const slow = run(40);
+  let worst = 0;
+  for (let i = 0; i < fast.positions.length; i++) {
+    worst = Math.max(worst, fast.positions[i].distanceTo(slow.positions[i]));
+  }
+  assert.ok(worst < 0.02, `the two strokes differ by up to ${worst.toFixed(4)}`);
+  // And it actually did something.
+  const raised = fast.positions.filter((p) => p.z > 0.01).length;
+  assert.ok(raised > 5, `only ${raised} vertices moved`);
+});
+
+test('a masked vertex stays put', () => {
+  const m = buildPrimitive('grid');
+  for (let i = 0; i < 3; i++) subdivideFaces(m, m.faces.map((_, f) => f));
+  // Mask the left half completely.
+  const mask = m.ensureMask();
+  for (let i = 0; i < m.positions.length; i++) mask[i] = m.positions[i].x < 0 ? 1 : 0;
+  const before = m.positions.map((p) => p.clone());
+
+  const s = { ...defaultSculpt(), brush: 'draw' as const, strength: 1, radius: 2, autoSmooth: 0 };
+  const stroke = new SculptStroke(m, s, s.radius);
+  stroke.begin(new Vec3(), s.radius);
+  stroke.dab(new Vec3(), new Vec3(0, 0, 1), s.radius, new Vec3());
+
+  let movedMasked = 0;
+  let movedFree = 0;
+  for (let i = 0; i < m.positions.length; i++) {
+    const d = m.positions[i].distanceTo(before[i]);
+    if (mask[i] >= 1) {
+      if (d > 1e-9) movedMasked++;
+    } else if (d > 1e-6) movedFree++;
+  }
+  assert.equal(movedMasked, 0, `${movedMasked} fully masked vertices moved anyway`);
+  assert.ok(movedFree > 0, 'nothing outside the mask moved either');
+});
+
+test('the mask brush paints the mask, not the surface', () => {
+  const m = buildPrimitive('grid');
+  for (let i = 0; i < 2; i++) subdivideFaces(m, m.faces.map((_, f) => f));
+  const before = m.positions.map((p) => p.clone());
+  const s = { ...defaultSculpt(), brush: 'mask' as const, strength: 1, radius: 0.5 };
+  const stroke = new SculptStroke(m, s, s.radius);
+  stroke.begin(new Vec3(), s.radius);
+  for (let i = 0; i < 4; i++) stroke.dab(new Vec3(), new Vec3(0, 0, 1), s.radius, new Vec3());
+
+  for (let i = 0; i < m.positions.length; i++) {
+    assert.ok(m.positions[i].distanceTo(before[i]) < 1e-12, 'the mask brush moved geometry');
+  }
+  assert.ok(m.mask, 'no mask was painted');
+  const painted = [...m.mask!].filter((v) => v > 0.1).length;
+  assert.ok(painted > 0, 'the mask is empty');
+  // And only near the brush.
+  for (let i = 0; i < m.positions.length; i++) {
+    if (m.mask![i] > 0.1) assert.ok(m.positions[i].length() < 0.6);
+  }
+});
+
+test('remeshing keeps the shape and evens out the topology', () => {
+  const sphere = buildPrimitive('uvsphere');
+  const before = volumeOfMesh(sphere);
+  const out = voxelRemesh(sphere, { voxelSize: voxelSizeForTarget(sphere, 8000) });
+
+  assert.ok(out.faceCount > 0, 'remesh produced nothing');
+  assert.ok(out.topology().edges.every((e) => e.faces.length === 2), 'the remesh is not closed');
+  const after = volumeOfMesh(out);
+  assert.ok(
+    Math.abs(after - before) / before < 0.05,
+    `volume moved from ${before.toFixed(4)} to ${after.toFixed(4)}`,
+  );
+
+  // A uv-sphere crowds its poles; the remesh should not.
+  const spread = (m: Mesh): number => {
+    const lengths = m.topology().edges.map((e) => m.positions[e.a].distanceTo(m.positions[e.b]));
+    lengths.sort((a, b) => a - b);
+    return lengths[Math.floor(lengths.length * 0.95)] / Math.max(1e-9, lengths[Math.floor(lengths.length * 0.05)]);
+  };
+  assert.ok(
+    spread(out) < spread(sphere),
+    `edge lengths are no more even: ${spread(out).toFixed(2)} vs ${spread(sphere).toFixed(2)}`,
+  );
+});
+
+test('remeshing a cube keeps its corners roughly where they were', () => {
+  const cube = buildPrimitive('cube');
+  const out = voxelRemesh(cube, { voxelSize: 0.06, smoothPasses: 1 });
+  const b = out.bounds();
+  // Voxelising rounds the corners a little; it must not move the sides.
+  for (const v of [b.min.x, b.min.y, b.min.z]) assert.ok(Math.abs(v + 1) < 0.12, `min at ${v}`);
+  for (const v of [b.max.x, b.max.y, b.max.z]) assert.ok(Math.abs(v - 1) < 0.12, `max at ${v}`);
+  assert.ok(out.topology().edges.every((e) => e.faces.length === 2));
+});
+
+test('a target triangle count lands near the target', () => {
+  const sphere = buildPrimitive('uvsphere');
+  for (const target of [4000, 16000]) {
+    const out = voxelRemesh(sphere, { voxelSize: voxelSizeForTarget(sphere, target) });
+    const ratio = out.triCount / target;
+    assert.ok(ratio > 0.4 && ratio < 2.5, `asked for ${target}, got ${out.triCount}`);
+  }
+});
+
+function volumeOfMesh(m: Mesh): number {
+  let v = 0;
+  for (const loop of m.faces) {
+    for (let i = 1; i + 1 < loop.length; i++) {
+      v += m.positions[loop[0]].dot(m.positions[loop[i]].cross(m.positions[loop[i + 1]])) / 6;
+    }
+  }
+  return Math.abs(v);
+}

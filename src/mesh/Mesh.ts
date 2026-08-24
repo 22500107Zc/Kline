@@ -58,6 +58,12 @@ export class Mesh {
    * corners heavily and its softer ones barely. Absent means 1.
    */
   edgeWeights: Map<string, number> | null = null;
+  /**
+   * Per-vertex sculpt mask, 0..1. A masked vertex is held in place, which is
+   * how you sculpt a face without dragging the ear along with it. Null means
+   * nothing is masked.
+   */
+  mask: Float32Array | null = null;
 
   private _topology: Topology | null = null;
   private _revision = 0;
@@ -139,6 +145,21 @@ export class Mesh {
     this.markDirty();
   }
 
+  /** Sculpt mask at a vertex; 0 when nothing has been masked. */
+  maskAt(v: number): number {
+    return this.mask && v < this.mask.length ? this.mask[v] : 0;
+  }
+
+  /** The mask array, grown to the current vertex count and created if absent. */
+  ensureMask(): Float32Array {
+    if (!this.mask || this.mask.length !== this.positions.length) {
+      const next = new Float32Array(this.positions.length);
+      if (this.mask) next.set(this.mask.subarray(0, Math.min(this.mask.length, next.length)));
+      this.mask = next;
+    }
+    return this.mask;
+  }
+
   static seamKey(a: number, b: number): string {
     return a < b ? `${a}:${b}` : `${b}:${a}`;
   }
@@ -184,6 +205,7 @@ export class Mesh {
     m.faceUV = this.faceUV ? this.faceUV.map((u) => (u ? u.slice() : null)) : null;
     m.seams = this.seams ? new Set(this.seams) : null;
     m.edgeWeights = this.edgeWeights ? new Map(this.edgeWeights) : null;
+    m.mask = this.mask ? this.mask.slice() : null;
     return m;
   }
 
@@ -443,6 +465,7 @@ export class Mesh {
     shadeSmooth: boolean; faceSmooth: boolean[] | null;
     faceUV?: (number[] | null)[] | null; seams?: string[] | null;
     edgeWeights?: [string, number][] | null;
+    mask?: number[] | null;
   } {
     const positions: number[] = [];
     for (const p of this.positions) positions.push(p.x, p.y, p.z);
@@ -455,6 +478,7 @@ export class Mesh {
       faceUV: this.faceUV ? this.faceUV.map((u) => (u ? u.slice() : null)) : null,
       seams: this.seams ? [...this.seams] : null,
       edgeWeights: this.edgeWeights ? [...this.edgeWeights] : null,
+      mask: this.mask ? [...this.mask] : null,
     };
   }
 
@@ -469,6 +493,7 @@ export class Mesh {
     m.faceUV = d.faceUV ? d.faceUV.map((u) => (u ? u.slice() : null)) : null;
     m.seams = d.seams && d.seams.length ? new Set(d.seams) : null;
     m.edgeWeights = d.edgeWeights && d.edgeWeights.length ? new Map(d.edgeWeights) : null;
+    m.mask = d.mask && d.mask.length ? Float32Array.from(d.mask) : null;
     return m;
   }
 }

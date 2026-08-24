@@ -1748,6 +1748,19 @@ button:disabled {
   font-size: 11px;
 }
 
+.sp-axis.wide {
+  width: auto;
+  flex: 1 1 auto;
+  padding: 0 6px;
+  font-family: var(--ui);
+}
+
+.sp-topology {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+}
+
 .sp-axis.active {
   color: var(--ember);
   border-color: var(--ember-deep);

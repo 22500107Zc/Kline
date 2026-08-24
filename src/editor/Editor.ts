@@ -953,8 +953,11 @@ export class Editor {
     }
     const hit = this.sculptHit(x, y);
     if (!hit) return;
-    this.stroke.dab(hit.local, hit.normal, hit.radius, new Vec3());
-    this.markGeometryDirty(obj);
+    // `stroke` lays down as many dabs as the distance covered calls for, so
+    // the result does not depend on how fast the pointer was moving.
+    if (this.stroke.stroke(hit.local, hit.normal, hit.radius, new Vec3()) > 0) {
+      this.markGeometryDirty(obj);
+    }
   }
 
   private endStroke(): void {
