@@ -50,8 +50,35 @@ vec3 shadePBR(vec3 n, vec3 v, vec3 l, vec3 radiance, vec3 albedo, float metallic
 }
 `;
 
-export const MAX_TEXTURES = 8;
+/**
+ * Layers in the texture array. The array is allocated to fit the scene rather
+ * than to this maximum, so a model with three maps does not reserve the memory
+ * for thirty-two.
+ */
+export const MAX_TEXTURES = 32;
 export const TEXTURE_SIZE = 1024;
+/** Side of the shadow map. 2048 is the point where a room stops looking blocky. */
+export const SHADOW_SIZE = 2048;
+
+/** Depth-only pass, rendered from a light's point of view. */
+export const SHADOW_VERT = `#version 300 es
+in vec3 aPos;
+uniform mat4 uLightViewProj;
+uniform mat4 uModel;
+void main() {
+  gl_Position = uLightViewProj * uModel * vec4(aPos, 1.0);
+}
+`;
+
+export const SHADOW_FRAG = `#version 300 es
+precision highp float;
+out vec4 fragColor;
+void main() {
+  // Depth is written by the depth attachment; the colour output is only here
+  // because a fragment shader has to have one.
+  fragColor = vec4(1.0);
+}
+`;
 
 export const SURFACE_VERT = `#version 300 es
 in vec3 aPos;
@@ -114,6 +141,12 @@ uniform vec4 uMatUV[${MAX_MATERIALS}];   // xy = scale, zw = offset
 uniform mediump sampler2DArray uTextures;
 uniform float uUVCheck;                  // 1 = draw the procedural UV grid
 
+uniform mat4 uLightViewProj;
+uniform mediump sampler2DShadow uShadowMap;
+uniform float uShadowStrength;   // 0 disables the lookup entirely
+uniform float uShadowTexel;      // 1 / shadow map size
+uniform int uShadowLight;        // which light index casts, or -1
+
 uniform vec3 uAmbient;
 uniform int uShadingMode;      // 0 = studio solid, 1 = material/rendered
 uniform vec3 uSelectColor;
@@ -149,6 +182,38 @@ vec3 uvGrid(vec2 uv) {
   base = mix(base, vec3(0.62, 0.13, 0.2), step(uv.x, 0.125) * step(uv.y, 0.125));
   base = mix(base, vec3(0.1, 0.5, 0.42), step(0.875, uv.x) * step(0.875, uv.y));
   return base;
+}
+
+/**
+ * How lit this point is by the shadow-casting light, 0 fully shadowed to 1
+ * fully lit.
+ *
+ * Sampled over a small kernel rather than once: a single lookup gives a hard
+ * staircase along every shadow edge, and the depth comparison is done by the
+ * hardware, so a few extra taps are close to free. The bias slopes with the
+ * angle because a surface seen edge-on by the light spans far more depth per
+ * texel, and a constant bias there either leaves acne or lifts the shadow off
+ * its own object.
+ */
+float shadowFactor(vec3 world, vec3 n, vec3 l) {
+  if (uShadowStrength <= 0.0) return 1.0;
+  vec4 lightSpace = uLightViewProj * vec4(world, 1.0);
+  vec3 proj = lightSpace.xyz / lightSpace.w;
+  proj = proj * 0.5 + 0.5;
+  // Outside the map, or behind the light: unshadowed rather than black, since
+  // the alternative is a hard edge where the map runs out.
+  if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) return 1.0;
+  float cosTheta = clamp(dot(n, l), 0.0, 1.0);
+  float bias = clamp(0.0015 * tan(acos(cosTheta)), 0.0005, 0.01);
+  float lit = 0.0;
+  for (int y = -1; y <= 1; y++) {
+    for (int x = -1; x <= 1; x++) {
+      vec2 offset = vec2(float(x), float(y)) * uShadowTexel;
+      lit += texture(uShadowMap, vec3(proj.xy + offset, proj.z - bias));
+    }
+  }
+  lit /= 9.0;
+  return mix(1.0, lit, uShadowStrength);
 }
 
 void main() {
@@ -203,6 +268,8 @@ void main() {
         float facing = max(dot(normalize(-uLightDir[i].xyz), -l), 0.0);
         radiance *= facing / (PI * dist2);
       }
+      // Only one light casts; shadowing them all would need a map each.
+      if (i == uShadowLight) radiance *= shadowFactor(vWorld, n, l);
       color += shadePBR(n, v, l, radiance, albedo, metallic, rough);
     }
     color += uMatEmit[mi].rgb * uMatEmit[mi].w;

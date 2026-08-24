@@ -871,6 +871,19 @@ export const COMMANDS: Command[] = [
     },
   },
   {
+    id: 'view.shadows', label: 'Toggle Shadows', category: 'View',
+    run: (ed) => {
+      ed.options.shadows = ed.options.shadows === false;
+      ed.setStatus(
+        ed.options.shadows
+          ? 'Shadows on — cast by the strongest sun or spot, in Material shading'
+          : 'Shadows off',
+      );
+      ed.emit('change');
+      ed.requestRender();
+    },
+  },
+  {
     id: 'view.uvCheck', label: 'Toggle UV Checker', category: 'View',
     run: (ed) => {
       ed.options.uvCheck = !ed.options.uvCheck;

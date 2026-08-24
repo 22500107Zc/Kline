@@ -1,4 +1,4 @@
-import { Mat4, Vec3 } from '../core/math';
+import { AABB, Mat4, Vec3 } from '../core/math';
 import { Mesh } from '../mesh/Mesh';
 import { Scene, SceneObject } from '../scene/Scene';
 import { ViewportCamera } from '../scene/ViewportCamera';
@@ -7,7 +7,8 @@ import { DynamicBuffer, Program, setupAttribs } from './gl';
 import { buildPoints, buildSurface, buildWire } from './MeshBuffers';
 import {
   GRID_FRAG, GRID_VERT, LINE_FRAG, LINE_VERT, MAX_LIGHTS, MAX_MATERIALS, MAX_TEXTURES,
-  OUTLINE_FRAG, OUTLINE_VERT, POINT_FRAG, POINT_VERT, SURFACE_FRAG, SURFACE_VERT, TEXTURE_SIZE,
+  OUTLINE_FRAG, OUTLINE_VERT, POINT_FRAG, POINT_VERT, SHADOW_FRAG, SHADOW_SIZE, SHADOW_VERT,
+  SURFACE_FRAG, SURFACE_VERT, TEXTURE_SIZE,
 } from './shaders';
 
 export type ShadingMode = 'solid' | 'material' | 'wireframe';
@@ -35,6 +36,8 @@ export interface ViewportOptions {
   uvCheck?: boolean;
   /** Bone the rig tools are working on, drawn highlighted. */
   activeBone?: number;
+  /** Cast a shadow from the strongest directional light. Costs one extra pass. */
+  shadows?: boolean;
 }
 
 export interface LineSegment {
@@ -86,7 +89,15 @@ export class Renderer {
   private gridQuad: WebGLBuffer;
   private lineScratch: DynamicBuffer;
   private cache = new Map<number, GeometryEntry>();
+  private shadowProgram: Program;
+  private shadowFbo: WebGLFramebuffer | null = null;
+  private shadowMap: WebGLTexture | null = null;
+  /** Light-space matrix of whatever cast the current frame's shadows. */
+  private shadowViewProj = new Mat4();
+  private shadowLightIndex = -1;
   private textureArray: WebGLTexture | null = null;
+  /** Layers actually allocated, which grows with the scene rather than being fixed. */
+  private textureCapacity = 0;
   private textureLayers = new Map<number, number>();
   private textureSignature = '';
   /** Called when an image finishes decoding, so the host can redraw. */
@@ -113,6 +124,7 @@ export class Renderer {
     this.lineProgram = new Program(gl, LINE_VERT, LINE_FRAG, 'line');
     this.pointProgram = new Program(gl, POINT_VERT, POINT_FRAG, 'point');
     this.gridProgram = new Program(gl, GRID_VERT, GRID_FRAG, 'grid');
+    this.shadowProgram = new Program(gl, SHADOW_VERT, SHADOW_FRAG, 'shadow');
 
     const quad = gl.createBuffer();
     if (!quad) throw new Error('failed to allocate grid buffer');
@@ -218,6 +230,12 @@ export class Renderer {
       drawables.push({ obj, mesh, model: obj.worldMatrix(scene), transparent });
     }
 
+    // Depth from the light first, so the surface pass can read it.
+    this.renderShadowMap(state, drawables);
+    gl.clearColor(bg[0], bg[1], bg[2], 1);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+
     if (options.shading !== 'wireframe') {
       gl.enable(gl.POLYGON_OFFSET_FILL);
       gl.polygonOffset(1, 1);
@@ -290,6 +308,7 @@ export class Renderer {
     this.uploadLights(p, scene);
     this.uploadMaterials(p, scene, obj);
     this.bindTextures(p);
+    this.bindShadowMap(p);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, entry.surface.buffer);
     setupAttribs(gl, p, [
@@ -607,26 +626,61 @@ export class Renderer {
     this.textureSignature = signature;
 
     const gl = this.gl;
+    // Grow the array in steps rather than reserving the maximum: thirty-two
+    // layers of 1024² RGBA with mipmaps is well over a hundred megabytes, and
+    // most scenes use three.
+    const want = Math.max(4, Math.min(MAX_TEXTURES, Math.ceil(Math.max(1, list.length) / 4) * 4));
+    if (this.textureArray && want > this.textureCapacity) {
+      gl.deleteTexture(this.textureArray);
+      this.textureArray = null;
+    }
     if (!this.textureArray) {
       this.textureArray = gl.createTexture();
+      this.textureCapacity = want;
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textureArray);
-      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RGBA8, TEXTURE_SIZE, TEXTURE_SIZE, MAX_TEXTURES);
-      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      // Mip levels for a square power-of-two texture: log2(size) + 1.
+      const levels = Math.floor(Math.log2(TEXTURE_SIZE)) + 1;
+      gl.texStorage3D(gl.TEXTURE_2D_ARRAY, levels, gl.RGBA8, TEXTURE_SIZE, TEXTURE_SIZE, want);
+      // Mipmapping matters more here than anywhere: without it a textured
+      // floor seen at a glancing angle shimmers with every camera move, which
+      // reads as a broken renderer rather than as an aliasing artefact.
+      gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
       gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.REPEAT);
       gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
+      if (aniso) {
+        const max = gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT) as number;
+        gl.texParameterf(gl.TEXTURE_2D_ARRAY, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, max));
+      }
     }
 
     this.textureLayers.clear();
+    let pending = 0;
     list.forEach((tex, layer) => {
+      if (layer >= this.textureCapacity) return;
       this.textureLayers.set(tex.id, layer);
+      pending++;
       const img = new Image();
+      const done = (): void => {
+        pending--;
+        if (pending === 0 && this.textureArray) {
+          // One mipmap build once everything has landed, rather than one per
+          // image: the call regenerates every layer either way.
+          gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textureArray);
+          gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+        }
+        this.onTexturesReady?.();
+      };
       img.onload = () => {
         const canvas = document.createElement('canvas');
         canvas.width = TEXTURE_SIZE;
         canvas.height = TEXTURE_SIZE;
         const ctx = canvas.getContext('2d');
-        if (!ctx || !this.textureArray) return;
+        if (!ctx || !this.textureArray) {
+          done();
+          return;
+        }
         ctx.drawImage(img, 0, 0, TEXTURE_SIZE, TEXTURE_SIZE);
         gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textureArray);
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
@@ -635,10 +689,154 @@ export class Renderer {
           gl.RGBA, gl.UNSIGNED_BYTE, canvas,
         );
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-        this.onTexturesReady?.();
+        done();
       };
+      img.onerror = () => done();
       img.src = tex.url;
     });
+  }
+
+  // ---------------------------------------------------------------- shadows
+
+  /**
+   * Pick the light worth casting shadows from and render depth from it.
+   *
+   * One light, not all of them: each would need its own map and its own pass,
+   * and a scene lit the way most are — a strong key with a couple of fills —
+   * gets almost all of the benefit from the key alone. The strongest light
+   * wins, which is nearly always the one the eye reads shadows from.
+   */
+  private renderShadowMap(state: FrameState, drawables: { mesh: Mesh; model: Mat4; obj: SceneObject }[]): void {
+    const gl = this.gl;
+    this.shadowLightIndex = -1;
+    if (state.options.shading !== 'material' || drawables.length === 0) return;
+    if (state.options.shadows === false) return;
+
+    let index = -1;
+    let bestEnergy = 0;
+    let n = 0;
+    let caster: SceneObject | null = null;
+    for (const obj of state.scene.objects.values()) {
+      if (n >= MAX_LIGHTS || obj.type !== 'light' || !obj.visible || !obj.light) continue;
+      // A point light casts in every direction and would need a cube map;
+      // suns and spots have a direction, which one matrix can describe.
+      const directional = obj.light.type === 'sun' || obj.light.type === 'spot';
+      if (directional && obj.light.energy > bestEnergy) {
+        bestEnergy = obj.light.energy;
+        index = n;
+        caster = obj;
+      }
+      n++;
+    }
+    if (!caster || !caster.light) return;
+
+    // Fit the map to what is actually in the scene, so its resolution is spent
+    // on the model rather than on empty space around it.
+    const bounds = new AABB();
+    for (const d of drawables) {
+      const b = d.mesh.bounds();
+      if (!b.valid) continue;
+      for (let i = 0; i < 8; i++) {
+        bounds.expand(d.model.transformPoint(new Vec3(
+          i & 1 ? b.max.x : b.min.x,
+          i & 2 ? b.max.y : b.min.y,
+          i & 4 ? b.max.z : b.min.z,
+        )));
+      }
+    }
+    if (!bounds.valid) return;
+    const centre = bounds.center();
+    const radius = Math.max(1e-3, bounds.radius());
+
+    const m = caster.worldMatrix(state.scene);
+    const dir = m.transformDirection(new Vec3(0, 0, -1)).normalized();
+    const eye = centre.sub(dir.scale(radius * 2.5));
+    const up = Math.abs(dir.z) > 0.95 ? new Vec3(0, 1, 0) : new Vec3(0, 0, 1);
+    const view = Mat4.lookAt(eye, centre, up);
+    const proj = Mat4.orthographic(-radius, radius, -radius, radius, 0.01, radius * 5);
+    this.shadowViewProj = proj.multiply(view);
+    this.shadowLightIndex = index;
+
+    if (!this.shadowFbo) this.createShadowTarget();
+    if (!this.shadowFbo) {
+      this.shadowLightIndex = -1;
+      return;
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFbo);
+    gl.viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
+    gl.clearDepth(1);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+    // Draw back faces into the map: the depth recorded is then the far side of
+    // each object, which puts the bias comfortably away from the lit surface
+    // and removes most shadow acne outright.
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.FRONT);
+
+    const p = this.shadowProgram;
+    p.use();
+    p.setMat4('uLightViewProj', this.shadowViewProj.m);
+    for (const d of drawables) {
+      const entry = this.geometryFor(d.obj, d.mesh, state.edit);
+      if (entry.surface.count === 0) continue;
+      p.setMat4('uModel', d.model.m);
+      gl.bindBuffer(gl.ARRAY_BUFFER, entry.surface.buffer);
+      setupAttribs(gl, p, [
+        { name: 'aPos', size: 3 }, { name: 'aNormal', size: 3 }, { name: 'aUV', size: 2 },
+        { name: 'aFlags', size: 1 }, { name: 'aMatId', size: 1 }, { name: 'aVColor', size: 3 },
+      ]);
+      gl.drawArrays(gl.TRIANGLES, 0, entry.surface.count);
+      this.lastDrawCalls++;
+    }
+
+    gl.cullFace(gl.BACK);
+    gl.disable(gl.CULL_FACE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+  }
+
+  private createShadowTarget(): void {
+    const gl = this.gl;
+    const tex = gl.createTexture();
+    const fbo = gl.createFramebuffer();
+    if (!tex || !fbo) return;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT24, SHADOW_SIZE, SHADOW_SIZE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // Hardware depth comparison, which is what makes a filtered lookup give a
+    // smooth edge rather than a stepped one.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, tex, 0);
+    // A depth-only target has no colour buffer to draw into or read from.
+    gl.drawBuffers([gl.NONE]);
+    gl.readBuffer(gl.NONE);
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (!ok) {
+      gl.deleteTexture(tex);
+      gl.deleteFramebuffer(fbo);
+      return;
+    }
+    this.shadowMap = tex;
+    this.shadowFbo = fbo;
+  }
+
+  private bindShadowMap(p: Program): void {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE1);
+    if (this.shadowMap) gl.bindTexture(gl.TEXTURE_2D, this.shadowMap);
+    p.setInt('uShadowMap', 1);
+    p.setMat4('uLightViewProj', this.shadowViewProj.m);
+    p.setInt('uShadowLight', this.shadowLightIndex);
+    p.setFloat('uShadowStrength', this.shadowLightIndex >= 0 && this.shadowMap ? 0.85 : 0);
+    p.setFloat('uShadowTexel', 1 / SHADOW_SIZE);
   }
 
   /**
@@ -671,6 +869,9 @@ export class Renderer {
       gl.RGBA, gl.UNSIGNED_BYTE, canvas,
     );
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    // The lower mip levels are now stale; regenerating keeps a painted surface
+    // from going smooth again the moment the camera pulls back.
+    gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
   }
 
   private bindTextures(p: Program): void {
@@ -692,6 +893,9 @@ export class Renderer {
     this.surfaceProgram.dispose();
     this.outlineProgram.dispose();
     this.lineProgram.dispose();
+    this.shadowProgram.dispose();
+    if (this.shadowMap) this.gl.deleteTexture(this.shadowMap);
+    if (this.shadowFbo) this.gl.deleteFramebuffer(this.shadowFbo);
     this.pointProgram.dispose();
     this.gridProgram.dispose();
   }

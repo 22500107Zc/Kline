@@ -101,6 +101,7 @@ export class Editor {
     showOrigins: true,
     xray: false,
     backfaceCulling: false,
+    shadows: true,
   };
 
   private modal: Modal | null = null;
