@@ -18,6 +18,7 @@ import { SnapSettings, defaultSnap, snapPointUnderCursor } from './snapping';
 import { SculptSettings, SculptStroke, defaultSculpt } from '../sculpt/sculpt';
 import { ChannelPath, removeKey, setKey } from '../anim/animation';
 import { bevelEdges } from '../mesh/bevel';
+import { transferUV } from '../uv/transfer';
 import { RenderJob } from '../render/pathtrace/RenderJob';
 import { RenderSettings, defaultRenderSettings } from '../render/pathtrace/types';
 import { buildTraceScene, cameraFromObject, cameraFromViewport } from '../render/pathtrace/build';
@@ -703,6 +704,7 @@ export class Editor {
     // Re-run the operator from the pristine copy each frame so it stays exact.
     const fresh = m.baseline.clone();
     const r = insetFaces(fresh, m.faces, m.thickness, m.depth);
+    transferUV(m.baseline, fresh);
     obj.mesh = fresh;
     this.selection.verts = new Set(r.movedVerts);
     this.syncSelection('vertex');
@@ -841,6 +843,7 @@ export class Editor {
     // Re-run from the pristine copy so dragging back and forth stays exact.
     const fresh = b.baseline.clone();
     const r = bevelEdges(fresh, b.edges, b.width, b.segments, b.profile);
+    transferUV(b.baseline, fresh);
     obj.mesh = fresh;
     this.selection.verts = new Set(r.newVerts);
     this.selection.edges.clear();

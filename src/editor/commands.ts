@@ -8,7 +8,7 @@ import {
 } from '../mesh/ops';
 import { Scene } from '../scene/Scene';
 import { bevelVertices } from '../mesh/bevel';
-import { BooleanOp, dissolveCoplanar, meshBoolean, stitchTJunctions } from '../mesh/boolean';
+import { BooleanOp, dissolveCoplanar, isSolid, meshBoolean, stitchTJunctions } from '../mesh/boolean';
 import { bisect, bridgeLoops, pokeFaces, spinEdges, symmetrize } from '../mesh/modeling';
 import { decimate } from '../mesh/decimate';
 import {
@@ -19,6 +19,7 @@ import { FALLOFF_LABELS, FalloffType } from './proportional';
 import { SNAP_LABELS, SnapMode } from './snapping';
 import { BRUSH_LABELS, SculptBrush } from '../sculpt/sculpt';
 import { pickFile } from '../io/files';
+import { preserveUV, transferUV } from '../uv/transfer';
 import { downloadBinary, downloadText, openTextFile } from '../io/files';
 import { exportMTL, exportOBJ, importOBJ } from '../io/obj';
 import { exportSTL } from '../io/stl';
@@ -47,7 +48,9 @@ function editOp(ed: Editor, label: string, fn: (mesh: Mesh) => void): void {
   const mesh = ed.editMesh;
   if (!obj || !mesh) return;
   ed.beginUndo(label);
-  fn(mesh);
+  // Anything the operator cannot carry exactly is resampled off the pre-edit
+  // surface, so an unwrapped model survives being modelled on.
+  preserveUV(mesh, () => fn(mesh));
   // Indices shift under most operators; drop anything that no longer exists.
   pruneSelection(mesh, ed.selection);
   ed.syncSelection('vertex');
@@ -781,7 +784,12 @@ export const COMMANDS: Command[] = [
       const objs = ed.scene.selectedObjects().filter((o) => o.mesh);
       if (objs.length === 0) return;
       objectOp(ed, 'Decimate', () => {
-        for (const o of objs) if (o.mesh) o.mesh = decimate(o.mesh, 0.5);
+        for (const o of objs) {
+          if (!o.mesh) continue;
+          const before = o.mesh;
+          o.mesh = decimate(before, 0.5);
+          transferUV(before, o.mesh);
+        }
       });
       const total = objs.reduce((n, o) => n + (o.mesh?.triCount ?? 0), 0);
       ed.setStatus(`Decimated to ${total} triangles`);
@@ -970,13 +978,28 @@ function runBoolean(ed: Editor, op: BooleanOp): void {
     ed.setStatus('Select a second object to use as the cutter');
     return;
   }
+  // An open surface has no inside, so the classification has nothing to go on.
+  // Say so rather than returning something that only looks like a mistake.
+  const open = [target, ...cutters].filter((o) => o.mesh && !isSolid(o.mesh));
+  if (open.length > 0) {
+    ed.setStatus(
+      `${open.map((o) => o.name).join(', ')} ${open.length === 1 ? 'is not a closed solid' : 'are not closed solids'}`
+      + ' — a boolean needs a watertight mesh on both sides.',
+    );
+    return;
+  }
   objectOp(ed, `Boolean ${op}`, () => {
     const toLocal = target.worldMatrix(scene).inverse();
     let result = target.mesh!;
     for (const cutter of cutters) {
       const other = (cutter.evaluated(false) ?? cutter.mesh!).clone();
       other.transform(toLocal.multiply(cutter.worldMatrix(scene)));
-      result = meshBoolean(result, other, op);
+      const before = result;
+      result = meshBoolean(before, other, op);
+      // The cut face is new geometry; sample it off whichever operand it
+      // came from so a textured model survives being carved.
+      transferUV(before, result);
+      transferUV(other, result);
     }
     target.mesh = result;
     for (const c of cutters) scene.remove(c.id);

@@ -4,6 +4,7 @@ import { catmullClark, mergeByDistance, smoothVertices, triangulateFaces } from 
 import { BooleanOp, meshBoolean } from '../mesh/boolean';
 import { decimate } from '../mesh/decimate';
 import { bevelEdges } from '../mesh/bevel';
+import { transferUV } from '../uv/transfer';
 
 /**
  * Non-destructive modifier stack. Modifiers are pure functions from mesh to
@@ -249,6 +250,7 @@ function applyBevelModifier(mesh: Mesh, mod: BevelModifier): Mesh {
   }
   if (edges.length === 0) return mesh;
   bevelEdges(out, edges, mod.width, Math.max(1, Math.round(mod.segments)), mod.profile);
+  transferUV(mesh, out);
   return out;
 }
 
@@ -283,10 +285,17 @@ export function applyModifier(mesh: Mesh, mod: Modifier, resolve?: ObjectResolve
       const other = resolve(mod.objectId);
       // No cutter means the modifier is simply inert, not an error.
       if (!other || other.faceCount === 0) return mesh;
-      return meshBoolean(mesh, other, mod.operation);
+      const cut = meshBoolean(mesh, other, mod.operation);
+      transferUV(mesh, cut);
+      transferUV(other, cut);
+      return cut;
     }
-    case 'decimate':
-      return mod.ratio >= 0.999 ? mesh : decimate(mesh, mod.ratio, mod.preserveBorder);
+    case 'decimate': {
+      if (mod.ratio >= 0.999) return mesh;
+      const smaller = decimate(mesh, mod.ratio, mod.preserveBorder);
+      transferUV(mesh, smaller);
+      return smaller;
+    }
     case 'bevel':
       return mod.width > 0 ? applyBevelModifier(mesh, mod) : mesh;
   }

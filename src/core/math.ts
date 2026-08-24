@@ -396,6 +396,55 @@ export class AABB {
 }
 
 /** Closest point on segment ab to the ray (origin o, unit dir d); returns distance and t. */
+/**
+ * Closest point on a triangle to `p`, with its barycentric coordinates
+ * (Ericson, Real-Time Collision Detection). Used by UV transfer, the boolean
+ * classifier and anything else that needs "how far is this from the surface".
+ */
+export function closestPointOnTriangle(
+  p: Vec3, a: Vec3, b: Vec3, c: Vec3,
+): { point: Vec3; u: number; v: number; w: number } {
+  const ab = b.sub(a);
+  const ac = c.sub(a);
+  const ap = p.sub(a);
+  const d1 = ab.dot(ap);
+  const d2 = ac.dot(ap);
+  if (d1 <= 0 && d2 <= 0) return { point: a, u: 1, v: 0, w: 0 };
+
+  const bp = p.sub(b);
+  const d3 = ab.dot(bp);
+  const d4 = ac.dot(bp);
+  if (d3 >= 0 && d4 <= d3) return { point: b, u: 0, v: 1, w: 0 };
+
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+    const v = d1 / (d1 - d3);
+    return { point: a.add(ab.scale(v)), u: 1 - v, v, w: 0 };
+  }
+
+  const cp = p.sub(c);
+  const d5 = ab.dot(cp);
+  const d6 = ac.dot(cp);
+  if (d6 >= 0 && d5 <= d6) return { point: c, u: 0, v: 0, w: 1 };
+
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+    const w = d2 / (d2 - d6);
+    return { point: a.add(ac.scale(w)), u: 1 - w, v: 0, w };
+  }
+
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+    const w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+    return { point: b.add(c.sub(b).scale(w)), u: 0, v: 1 - w, w };
+  }
+
+  const denom = 1 / (va + vb + vc);
+  const v = vb * denom;
+  const w = vc * denom;
+  return { point: a.add(ab.scale(v)).add(ac.scale(w)), u: 1 - v - w, v, w };
+}
+
 export function raySegmentDistance(
   o: Vec3, d: Vec3, a: Vec3, b: Vec3,
 ): { dist: number; t: number } {

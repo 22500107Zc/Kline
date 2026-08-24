@@ -46,12 +46,40 @@ export function facesToVerts(mesh: Mesh, faces: Iterable<number>): Set<number> {
   return s;
 }
 
-function pushFace(mesh: Mesh, loop: number[], likeFace: number): number {
+function pushFace(mesh: Mesh, loop: number[], likeFace: number, uv?: number[] | null): number {
   const idx = mesh.faces.length;
   mesh.faces.push(loop);
   mesh.faceMaterial.push(mesh.faceMaterial[likeFace] ?? 0);
   if (mesh.faceSmooth) mesh.faceSmooth.push(mesh.isFaceSmooth(likeFace));
+  if (uv !== undefined && mesh.faceUV) mesh.setUV(idx, uv);
   return idx;
+}
+
+/** Straight-line blend between two corners' coordinates. */
+function lerpUV(a: [number, number] | null, b: [number, number] | null, t: number): [number, number] | null {
+  if (!a || !b) return null;
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+}
+
+function averageUV(list: ([number, number] | null)[]): [number, number] | null {
+  let u = 0;
+  let v = 0;
+  for (const p of list) {
+    if (!p) return null;
+    u += p[0];
+    v += p[1];
+  }
+  return list.length ? [u / list.length, v / list.length] : null;
+}
+
+/** Flatten a corner list into the packed run `setUV` expects. */
+function packUV(list: ([number, number] | null)[]): number[] | null {
+  const out: number[] = [];
+  for (const p of list) {
+    if (!p) return null;
+    out.push(p[0], p[1]);
+  }
+  return out;
 }
 
 export interface RegionSplitResult {
@@ -72,6 +100,17 @@ export interface RegionSplitResult {
  */
 export function splitRegion(mesh: Mesh, faceSet: Set<number>): RegionSplitResult {
   const boundary = regionBoundary(mesh, faceSet);
+  // Snapshot the corner lists and coordinates before the region is remapped.
+  const originalLoops = new Map<number, number[]>();
+  const sourceUV = new Map<number, ([number, number] | null)[]>();
+  if (mesh.faceUV) {
+    for (const be of boundary) {
+      if (originalLoops.has(be.face)) continue;
+      const loop = mesh.faces[be.face];
+      originalLoops.set(be.face, loop.slice());
+      sourceUV.set(be.face, loop.map((_, i) => mesh.uvAt(be.face, i)));
+    }
+  }
   const vertMap = new Map<number, number>();
   for (const be of boundary) {
     for (const v of [be.a, be.b]) {
@@ -90,7 +129,19 @@ export function splitRegion(mesh: Mesh, faceSet: Set<number>): RegionSplitResult
   for (const be of boundary) {
     const a2 = vertMap.get(be.a)!;
     const b2 = vertMap.get(be.b)!;
-    walls.push(pushFace(mesh, [b2, a2, be.a, be.b], be.face));
+    // The wall inherits the boundary edge's coordinates on both rows, so a
+    // textured extrusion keeps a seamless join at the base rather than
+    // sampling whatever happens to be nearest.
+    let uv: number[] | null | undefined;
+    if (mesh.faceUV) {
+      const src = originalLoops.get(be.face) ?? mesh.faces[be.face];
+      const ia = src.indexOf(be.a);
+      const ib = src.indexOf(be.b);
+      const uvA = ia >= 0 ? sourceUV.get(be.face)?.[ia] ?? null : null;
+      const uvB = ib >= 0 ? sourceUV.get(be.face)?.[ib] ?? null : null;
+      uv = packUV([uvB, uvA, uvA, uvB]);
+    }
+    walls.push(pushFace(mesh, [b2, a2, be.a, be.b], be.face, uv));
   }
 
   mesh.markDirty();
@@ -272,6 +323,16 @@ export function loopCut(
     params.push(p);
   }
 
+  // Corner lists and coordinates captured before any face is rewritten.
+  const ringLoops = new Map<number, number[]>();
+  const ringUV = new Map<number, ([number, number] | null)[]>();
+  if (mesh.faceUV) {
+    for (const f of ring.faces) {
+      ringLoops.set(f, mesh.faces[f].slice());
+      ringUV.set(f, mesh.faces[f].map((_, i) => mesh.uvAt(f, i)));
+    }
+  }
+
   const edgeVerts = new Map<number, number[]>();
   const newVerts: number[] = [];
   for (const ei of ring.edges) {
@@ -296,7 +357,7 @@ export function loopCut(
     return forward ? list : list.slice().reverse();
   };
 
-  const replaced: { face: number; loops: number[][] }[] = [];
+  const replaced: { face: number; loops: number[][]; uvs: (number[] | null)[] }[] = [];
   for (const f of ring.faces) {
     const fe = t.faceEdges[f];
     let i = -1;
@@ -314,12 +375,30 @@ export function loopCut(
     for (let k = 0; k <= n; k++) {
       loops.push([A[k], A[k + 1], C[n - k], C[n + 1 - k]]);
     }
-    replaced.push({ face: f, loops });
+
+    // The cut runs across the face at the same parameters in UV space.
+    const uvs: (number[] | null)[] = [];
+    const src = ringUV.get(f);
+    if (src) {
+      const uA0 = src[i];
+      const uA1 = src[(i + 1) % 4];
+      const uC0 = src[(i + 2) % 4];
+      const uC1 = src[(i + 3) % 4];
+      const chainA = [uA0, ...params.map((p) => lerpUV(uA0, uA1, p)), uA1];
+      const chainC = [uC0, ...params.map((p) => lerpUV(uC0, uC1, p)), uC1];
+      for (let k = 0; k <= n; k++) {
+        uvs.push(packUV([chainA[k], chainA[k + 1], chainC[n - k], chainC[n + 1 - k]]));
+      }
+    } else {
+      for (let k = 0; k <= n; k++) uvs.push(null);
+    }
+    replaced.push({ face: f, loops, uvs });
   }
 
   for (const r of replaced) {
     mesh.faces[r.face] = r.loops[0];
-    for (let k = 1; k < r.loops.length; k++) pushFace(mesh, r.loops[k], r.face);
+    if (mesh.faceUV) mesh.setUV(r.face, r.uvs[0]);
+    for (let k = 1; k < r.loops.length; k++) pushFace(mesh, r.loops[k], r.face, r.uvs[k]);
   }
   mesh.markDirty();
   return { newVerts };
@@ -331,6 +410,19 @@ export function subdivideFaces(mesh: Mesh, faces: Iterable<number>): { newVerts:
   if (faceSet.size === 0) return { newVerts: [] };
   const t = mesh.topology();
   const newVerts: number[] = [];
+
+  const sourceUV = new Map<number, ([number, number] | null)[]>();
+  if (mesh.faceUV) {
+    for (let f = 0; f < mesh.faces.length; f++) {
+      sourceUV.set(f, mesh.faces[f].map((_, i) => mesh.uvAt(f, i)));
+    }
+  }
+  // An edge midpoint has a different coordinate on each side of a seam, so it
+  // is resolved per face rather than once per edge.
+  const uvAtEdge = (face: number, corner: number, next: number): [number, number] | null => {
+    const src = sourceUV.get(face);
+    return src ? lerpUV(src[corner], src[next], 0.5) : null;
+  };
 
   const edgePoint = new Map<number, number>();
   const touchedEdges = new Set<number>();
@@ -356,6 +448,7 @@ export function subdivideFaces(mesh: Mesh, faces: Iterable<number>): { newVerts:
   }
 
   const additions: number[][] = [];
+  const additionUV: (number[] | null)[] = [];
   for (const f of faceSet) {
     const loop = mesh.faces[f];
     const center = mesh.faceCenter(f);
@@ -363,29 +456,53 @@ export function subdivideFaces(mesh: Mesh, faces: Iterable<number>): { newVerts:
     mesh.positions.push(center);
     newVerts.push(ci);
     const quads: number[][] = [];
+    const quadUV: (number[] | null)[] = [];
+    const src = sourceUV.get(f);
+    const centreUV = src ? averageUV(src) : null;
     for (let i = 0; i < loop.length; i++) {
       const prevE = t.faceEdges[f][(i - 1 + loop.length) % loop.length];
       const nextE = t.faceEdges[f][i];
       quads.push([loop[i], edgePoint.get(nextE)!, ci, edgePoint.get(prevE)!]);
+      quadUV.push(src ? packUV([
+        src[i],
+        uvAtEdge(f, i, (i + 1) % loop.length),
+        centreUV,
+        uvAtEdge(f, (i - 1 + loop.length) % loop.length, i),
+      ]) : null);
     }
     mesh.faces[f] = quads[0];
-    for (let i = 1; i < quads.length; i++) additions.push(quads[i]);
+    if (mesh.faceUV) mesh.setUV(f, quadUV[0]);
+    for (let i = 1; i < quads.length; i++) {
+      additions.push(quads[i]);
+      additionUV.push(quadUV[i]);
+    }
     for (let i = 1; i < quads.length; i++) {
       mesh.faceMaterial.push(mesh.faceMaterial[f] ?? 0);
       if (mesh.faceSmooth) mesh.faceSmooth.push(mesh.isFaceSmooth(f));
     }
   }
-  for (const q of additions) mesh.faces.push(q);
+  for (let i = 0; i < additions.length; i++) {
+    const idx = mesh.faces.length;
+    mesh.faces.push(additions[i]);
+    if (mesh.faceUV) mesh.setUV(idx, additionUV[i]);
+  }
 
   for (const [f, eis] of outside) {
     const loop = mesh.faces[f];
+    const src = sourceUV.get(f);
     const out: number[] = [];
+    const outUV: ([number, number] | null)[] = [];
     for (let i = 0; i < loop.length; i++) {
       out.push(loop[i]);
+      if (src) outUV.push(src[i]);
       const ei = t.faceEdges[f][i];
-      if (eis.includes(ei)) out.push(edgePoint.get(ei)!);
+      if (eis.includes(ei)) {
+        out.push(edgePoint.get(ei)!);
+        if (src) outUV.push(uvAtEdge(f, i, (i + 1) % loop.length));
+      }
     }
     mesh.faces[f] = out;
+    if (mesh.faceUV) mesh.setUV(f, src ? packUV(outUV) : null);
   }
 
   mesh.markDirty();
@@ -462,8 +579,16 @@ function catmullClarkOnce(mesh: Mesh): Mesh {
     positions.push(np);
   }
 
+  // Coordinates subdivide linearly per face, which keeps seams put: a vertex
+  // shared across a seam has a different coordinate in each face, and reading
+  // them per face rather than per vertex is what preserves that.
+  const carryUV = mesh.hasUV;
+  const faceUV: (number[] | null)[] = [];
+
   for (let f = 0; f < mesh.faces.length; f++) {
     const loop = mesh.faces[f];
+    const src = carryUV ? loop.map((_, i) => mesh.uvAt(f, i)) : null;
+    const centre = src ? averageUV(src) : null;
     for (let i = 0; i < loop.length; i++) {
       const prevE = t.faceEdges[f][(i - 1 + loop.length) % loop.length];
       const nextE = t.faceEdges[f][i];
@@ -471,12 +596,23 @@ function catmullClarkOnce(mesh: Mesh): Mesh {
       faces.push([vertPoint[loop[i]], edgePoint[nextE], facePoint[f], edgePoint[prevE]]);
       faceMaterial.push(mesh.faceMaterial[f] ?? 0);
       if (faceSmooth) faceSmooth.push(mesh.isFaceSmooth(f));
+      if (src) {
+        const prev = (i - 1 + loop.length) % loop.length;
+        const next = (i + 1) % loop.length;
+        faceUV.push(packUV([
+          src[i], lerpUV(src[i], src[next], 0.5), centre, lerpUV(src[prev], src[i], 0.5),
+        ]));
+      } else if (carryUV) {
+        faceUV.push(null);
+      }
     }
   }
 
   const out = new Mesh(positions, faces, faceMaterial);
   out.shadeSmooth = mesh.shadeSmooth;
   out.faceSmooth = faceSmooth;
+  if (carryUV) out.faceUV = faceUV;
+  if (mesh.seams) out.seams = new Set(mesh.seams);
   out.removeLooseVertices();
   return out;
 }
@@ -686,6 +822,18 @@ export function makeFace(mesh: Mesh, verts: number[]): number | null {
 }
 
 export function flipNormals(mesh: Mesh, faces?: Iterable<number>): void {
+  // Reversing the corner order has to reverse the coordinates with it.
+  if (mesh.faceUV) {
+    const list = faces ? [...faces] : mesh.faces.map((_, f) => f);
+    for (const f of list) {
+      const uv = mesh.uvFor(f);
+      if (!uv) continue;
+      const pairs: [number, number][] = [];
+      for (let i = 0; i < uv.length; i += 2) pairs.push([uv[i], uv[i + 1]]);
+      pairs.reverse();
+      mesh.setUV(f, packUV(pairs));
+    }
+  }
   const set = faces ? new Set(faces) : null;
   for (let f = 0; f < mesh.faces.length; f++) {
     if (!set || set.has(f)) mesh.faces[f] = mesh.faces[f].slice().reverse();
@@ -776,23 +924,31 @@ export function triangulateFaces(mesh: Mesh, faces?: Iterable<number>): void {
   const out: number[][] = [];
   const mats: number[] = [];
   const smooth: boolean[] = [];
+  const uvs: (number[] | null)[] = [];
+  const carryUV = !!mesh.faceUV;
   for (let f = 0; f < mesh.faces.length; f++) {
     const loop = mesh.faces[f];
+    const src = carryUV ? loop.map((_, i) => mesh.uvAt(f, i)) : null;
     if ((set && !set.has(f)) || loop.length <= 3) {
       out.push(loop);
       mats.push(mesh.faceMaterial[f] ?? 0);
       smooth.push(mesh.isFaceSmooth(f));
+      if (carryUV) uvs.push(src ? packUV(src) : null);
       continue;
     }
+    // The fan matches Mesh.triangulate, so a triangle's coordinates are just
+    // the same three corners.
     for (let i = 1; i + 1 < loop.length; i++) {
       out.push([loop[0], loop[i], loop[i + 1]]);
       mats.push(mesh.faceMaterial[f] ?? 0);
       smooth.push(mesh.isFaceSmooth(f));
+      if (carryUV) uvs.push(src ? packUV([src[0], src[i], src[i + 1]]) : null);
     }
   }
   mesh.faces = out;
   mesh.faceMaterial = mats;
   if (mesh.faceSmooth) mesh.faceSmooth = smooth;
+  if (carryUV) mesh.faceUV = uvs;
   mesh.markDirty();
 }
 
@@ -813,7 +969,10 @@ export function duplicateFaces(
     }
   }
   const newFaces: number[] = [];
-  for (const f of faceSet) newFaces.push(pushFace(mesh, mesh.faces[f].map((v) => map.get(v)!), f));
+  for (const f of faceSet) {
+    const uv = mesh.uvFor(f);
+    newFaces.push(pushFace(mesh, mesh.faces[f].map((v) => map.get(v)!), f, uv ? uv.slice() : null));
+  }
   mesh.markDirty();
   return { faces: newFaces, verts };
 }

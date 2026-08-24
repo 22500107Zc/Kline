@@ -6,12 +6,27 @@ import { Mesh } from './Mesh';
  * revolves, loop bridging, symmetry and decimation.
  */
 
-function pushFace(mesh: Mesh, loop: number[], likeFace: number): number {
+function pushFace(mesh: Mesh, loop: number[], likeFace: number, uv?: number[] | null): number {
   const idx = mesh.faces.length;
   mesh.faces.push(loop);
   mesh.faceMaterial.push(mesh.faceMaterial[likeFace] ?? 0);
   if (mesh.faceSmooth) mesh.faceSmooth.push(mesh.isFaceSmooth(likeFace));
+  if (uv !== undefined && mesh.faceUV) mesh.setUV(idx, uv);
   return idx;
+}
+
+function lerpUV(a: [number, number] | null, b: [number, number] | null, t: number): [number, number] | null {
+  if (!a || !b) return null;
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+}
+
+function packUV(list: ([number, number] | null)[]): number[] | null {
+  const out: number[] = [];
+  for (const p of list) {
+    if (!p) return null;
+    out.push(p[0], p[1]);
+  }
+  return out;
 }
 
 export interface BisectOptions {
@@ -69,16 +84,27 @@ export function bisect(
   const faces: number[][] = [];
   const mats: number[] = [];
   const smooth: boolean[] = [];
+  const uvs: (number[] | null)[] = [];
   const segments: [number, number][] = [];
+  const carryUV = !!mesh.faceUV;
 
-  const emit = (loop: number[], src: number): void => {
+  const emit = (loop: number[], src: number, loopUV: ([number, number] | null)[] | null): void => {
     const dedup: number[] = [];
-    for (const v of loop) if (dedup[dedup.length - 1] !== v) dedup.push(v);
-    while (dedup.length > 1 && dedup[0] === dedup[dedup.length - 1]) dedup.pop();
+    const dedupUV: ([number, number] | null)[] = [];
+    for (let i = 0; i < loop.length; i++) {
+      if (dedup[dedup.length - 1] === loop[i]) continue;
+      dedup.push(loop[i]);
+      if (loopUV) dedupUV.push(loopUV[i]);
+    }
+    while (dedup.length > 1 && dedup[0] === dedup[dedup.length - 1]) {
+      dedup.pop();
+      dedupUV.pop();
+    }
     if (dedup.length < 3) return;
     faces.push(dedup);
     mats.push(mesh.faceMaterial[src] ?? 0);
     smooth.push(mesh.isFaceSmooth(src));
+    if (carryUV) uvs.push(loopUV ? packUV(dedupUV) : null);
   };
 
   for (let f = 0; f < mesh.faces.length; f++) {
@@ -89,38 +115,60 @@ export function bisect(
       if (side[v] > 0) hasFront = true;
       else if (side[v] < 0) hasBack = true;
     }
+    const srcUV = carryUV ? loop.map((_, i) => mesh.uvAt(f, i)) : null;
     if (!hasFront || !hasBack) {
       // Entirely on one side (or lying in the plane): keep or drop as asked.
       if (hasFront && opts.clearFront) continue;
       if (hasBack && opts.clearBack) continue;
       if (!hasFront && !hasBack && (opts.clearFront || opts.clearBack)) continue;
-      emit(loop, f);
+      emit(loop, f, srcUV);
       continue;
     }
     const front: number[] = [];
     const back: number[] = [];
+    const frontUV: ([number, number] | null)[] = [];
+    const backUV: ([number, number] | null)[] = [];
     const touched: number[] = [];
     for (let i = 0; i < loop.length; i++) {
       const a = loop[i];
-      const b = loop[(i + 1) % loop.length];
-      if (side[a] >= 0) front.push(a);
-      if (side[a] <= 0) back.push(a);
+      const j = (i + 1) % loop.length;
+      const b = loop[j];
+      if (side[a] >= 0) {
+        front.push(a);
+        if (srcUV) frontUV.push(srcUV[i]);
+      }
+      if (side[a] <= 0) {
+        back.push(a);
+        if (srcUV) backUV.push(srcUV[i]);
+      }
       if (side[a] === 0) touched.push(a);
       if (side[a] * side[b] < 0) {
         const m = splitPoint(a, b);
+        // Where along the edge the plane fell, in the same parameter the
+        // position used.
+        const pa = mesh.positions[a];
+        const pb = mesh.positions[b];
+        const denom = n.dot(pb.sub(pa));
+        const tt = Math.abs(denom) < 1e-12 ? 0.5 : (offset - n.dot(pa)) / denom;
+        const mid = srcUV ? lerpUV(srcUV[i], srcUV[j], tt) : null;
         front.push(m);
         back.push(m);
+        if (srcUV) {
+          frontUV.push(mid);
+          backUV.push(mid);
+        }
         touched.push(m);
       }
     }
     if (touched.length === 2) segments.push([touched[0], touched[1]]);
-    if (!opts.clearFront) emit(front, f);
-    if (!opts.clearBack) emit(back, f);
+    if (!opts.clearFront) emit(front, f, srcUV ? frontUV : null);
+    if (!opts.clearBack) emit(back, f, srcUV ? backUV : null);
   }
 
   mesh.faces = faces;
   mesh.faceMaterial = mats;
   if (mesh.faceSmooth) mesh.faceSmooth = smooth;
+  if (carryUV) mesh.faceUV = uvs;
   mesh.markDirty();
 
   const newFaces: number[] = [];
@@ -398,22 +446,34 @@ export function pokeFaces(mesh: Mesh, faceSel: Iterable<number>, offset = 0): { 
     const ci = mesh.positions.length;
     mesh.positions.push(c);
     newVerts.push(ci);
+    const src = mesh.faceUV ? loop.map((_, i) => mesh.uvAt(f, i)) : null;
+    let centre: [number, number] | null = null;
+    if (src && src.every(Boolean)) {
+      centre = [
+        src.reduce((a, p) => a + p![0], 0) / src.length,
+        src.reduce((a, p) => a + p![1], 0) / src.length,
+      ];
+    }
     for (let i = 0; i < loop.length; i++) {
-      pushFace(mesh, [loop[i], loop[(i + 1) % loop.length], ci], f);
+      const j = (i + 1) % loop.length;
+      pushFace(mesh, [loop[i], loop[j], ci], f, src ? packUV([src[i], src[j], centre]) : undefined);
     }
   }
   const faces: number[][] = [];
   const mats: number[] = [];
   const smooth: boolean[] = [];
+  const uvs: (number[] | null)[] = [];
   for (let f = 0; f < mesh.faces.length; f++) {
     if (drop.has(f)) continue;
     faces.push(mesh.faces[f]);
     mats.push(mesh.faceMaterial[f] ?? 0);
     smooth.push(mesh.isFaceSmooth(f));
+    uvs.push(mesh.uvFor(f));
   }
   mesh.faces = faces;
   mesh.faceMaterial = mats;
   if (mesh.faceSmooth) mesh.faceSmooth = smooth;
+  if (mesh.faceUV) mesh.faceUV = uvs;
   mesh.markDirty();
   return { newVerts };
 }

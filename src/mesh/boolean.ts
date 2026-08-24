@@ -2,390 +2,15 @@ import { Vec3 } from '../core/math';
 import { Mesh } from './Mesh';
 
 /**
- * Constructive solid geometry.
+ * Post-boolean cleanup.
  *
- * Both operands go into BSP trees; clipping one tree against the other sorts
- * every polygon into "inside the other solid" or "outside it", which is all
- * three boolean operations need. Working on n-gons rather than triangles keeps
- * the untouched parts of each operand as whole faces, so only the polygons the
- * cut actually crosses get fragmented.
+ * The boolean itself lives in `csg.ts`; what is left here is the tidying every
+ * cut mesh needs: merging the fragments a cut leaves behind, and closing the
+ * T-junctions where a split face meets an unsplit neighbour.
  */
 
-export type BooleanOp = 'union' | 'difference' | 'intersect';
-
-interface Poly {
-  v: Vec3[];
-  n: Vec3;
-  w: number;
-  mat: number;
-  smooth: boolean;
-}
-
-const COPLANAR = 0;
-const FRONT = 1;
-const BACK = 2;
-const SPANNING = 3;
-
-function planeFrom(v: Vec3[]): { n: Vec3; w: number } | null {
-  const n = new Vec3();
-  for (let i = 0; i < v.length; i++) {
-    const cur = v[i];
-    const nxt = v[(i + 1) % v.length];
-    n.x += (cur.y - nxt.y) * (cur.z + nxt.z);
-    n.y += (cur.z - nxt.z) * (cur.x + nxt.x);
-    n.z += (cur.x - nxt.x) * (cur.y + nxt.y);
-  }
-  const len = n.length();
-  if (len < 1e-14) return null;
-  const un = n.scale(1 / len);
-  return { n: un, w: un.dot(v[0]) };
-}
-
-function toPolys(mesh: Mesh, matOffset: number): Poly[] {
-  const out: Poly[] = [];
-  for (let f = 0; f < mesh.faces.length; f++) {
-    const loop = mesh.faces[f];
-    if (loop.length < 3) continue;
-    const v = loop.map((i) => mesh.positions[i].clone());
-    const pl = planeFrom(v);
-    if (!pl) continue;
-    out.push({ v, n: pl.n, w: pl.w, mat: (mesh.faceMaterial[f] ?? 0) + matOffset, smooth: mesh.isFaceSmooth(f) });
-  }
-  return out;
-}
-
-function flip(p: Poly): void {
-  p.v.reverse();
-  p.n = p.n.neg();
-  p.w = -p.w;
-}
-
-/** Sort `poly` against a plane, splitting it when it straddles. */
-function splitPoly(
-  pn: Vec3, pw: number, poly: Poly, eps: number,
-  coplanarFront: Poly[], coplanarBack: Poly[], front: Poly[], back: Poly[],
-): void {
-  let type = 0;
-  const types: number[] = [];
-  for (const p of poly.v) {
-    const t = pn.dot(p) - pw;
-    const kind = t < -eps ? BACK : t > eps ? FRONT : COPLANAR;
-    type |= kind;
-    types.push(kind);
-  }
-  switch (type) {
-    case COPLANAR:
-      (pn.dot(poly.n) > 0 ? coplanarFront : coplanarBack).push(poly);
-      return;
-    case FRONT:
-      front.push(poly);
-      return;
-    case BACK:
-      back.push(poly);
-      return;
-    default: {
-      const fv: Vec3[] = [];
-      const bv: Vec3[] = [];
-      for (let i = 0; i < poly.v.length; i++) {
-        const j = (i + 1) % poly.v.length;
-        const ti = types[i];
-        const tj = types[j];
-        const vi = poly.v[i];
-        const vj = poly.v[j];
-        if (ti !== BACK) fv.push(vi);
-        if (ti !== FRONT) bv.push(ti !== BACK ? vi.clone() : vi);
-        if ((ti | tj) === SPANNING) {
-          const t = (pw - pn.dot(vi)) / pn.dot(vj.sub(vi));
-          const mid = vi.lerp(vj, t);
-          fv.push(mid);
-          bv.push(mid.clone());
-        }
-      }
-      if (fv.length >= 3) front.push({ v: fv, n: poly.n, w: poly.w, mat: poly.mat, smooth: poly.smooth });
-      if (bv.length >= 3) back.push({ v: bv, n: poly.n, w: poly.w, mat: poly.mat, smooth: poly.smooth });
-      return;
-    }
-  }
-}
-
-interface Node {
-  n: Vec3 | null;
-  w: number;
-  front: Node | null;
-  back: Node | null;
-  polys: Poly[];
-}
-
-function newNode(): Node {
-  return { n: null, w: 0, front: null, back: null, polys: [] };
-}
-
-/** Iterative build — BSP depth is data-dependent and can outrun the JS stack. */
-function build(root: Node, polys: Poly[], eps: number): void {
-  const stack: { node: Node; polys: Poly[] }[] = [{ node: root, polys }];
-  while (stack.length) {
-    const { node, polys: list } = stack.pop()!;
-    if (list.length === 0) continue;
-    if (!node.n) {
-      node.n = list[0].n;
-      node.w = list[0].w;
-    }
-    const front: Poly[] = [];
-    const back: Poly[] = [];
-    for (const p of list) splitPoly(node.n, node.w, p, eps, node.polys, node.polys, front, back);
-    if (front.length) {
-      node.front = node.front ?? newNode();
-      stack.push({ node: node.front, polys: front });
-    }
-    if (back.length) {
-      node.back = node.back ?? newNode();
-      stack.push({ node: node.back, polys: back });
-    }
-  }
-}
-
-function allNodes(root: Node): Node[] {
-  const out: Node[] = [];
-  const stack = [root];
-  while (stack.length) {
-    const n = stack.pop()!;
-    out.push(n);
-    if (n.front) stack.push(n.front);
-    if (n.back) stack.push(n.back);
-  }
-  return out;
-}
-
-function allPolys(root: Node): Poly[] {
-  const out: Poly[] = [];
-  for (const n of allNodes(root)) for (const p of n.polys) out.push(p);
-  return out;
-}
-
-function invert(root: Node): void {
-  for (const node of allNodes(root)) {
-    for (const p of node.polys) flip(p);
-    if (node.n) {
-      node.n = node.n.neg();
-      node.w = -node.w;
-    }
-    const t = node.front;
-    node.front = node.back;
-    node.back = t;
-  }
-}
-
-/** Drop the parts of `polys` that fall inside the solid `root` describes. */
-function clipPolys(root: Node, polys: Poly[], eps: number): Poly[] {
-  const out: Poly[] = [];
-  const stack: { node: Node; polys: Poly[] }[] = [{ node: root, polys }];
-  while (stack.length) {
-    const { node, polys: list } = stack.pop()!;
-    if (list.length === 0) continue;
-    if (!node.n) {
-      for (const p of list) out.push(p);
-      continue;
-    }
-    const front: Poly[] = [];
-    const back: Poly[] = [];
-    for (const p of list) splitPoly(node.n, node.w, p, eps, front, back, front, back);
-    if (node.front) stack.push({ node: node.front, polys: front });
-    else for (const p of front) out.push(p);
-    // No back child means everything back of this plane is solid: discard it.
-    if (node.back) stack.push({ node: node.back, polys: back });
-  }
-  return out;
-}
-
-function clipTo(target: Node, other: Node, eps: number): void {
-  for (const node of allNodes(target)) node.polys = clipPolys(other, node.polys, eps);
-}
-
-function polysToMesh(polys: Poly[], weld: number): Mesh {
-  const positions: Vec3[] = [];
-  const faces: number[][] = [];
-  const mats: number[] = [];
-  const smooth: boolean[] = [];
-  // Cell size equals the weld radius, so a match is always in one of the 27
-  // cells around the query. Rounding to a single cell would miss pairs that
-  // straddle a cell boundary, which is exactly where split points land.
-  const cells = new Map<string, number[]>();
-  const inv = 1 / weld;
-  const weldSq = weld * weld;
-  const intern = (p: Vec3): number => {
-    const cx = Math.floor(p.x * inv);
-    const cy = Math.floor(p.y * inv);
-    const cz = Math.floor(p.z * inv);
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dz = -1; dz <= 1; dz++) {
-          const bucket = cells.get(`${cx + dx},${cy + dy},${cz + dz}`);
-          if (!bucket) continue;
-          for (const i of bucket) {
-            const q = positions[i];
-            const d = (q.x - p.x) ** 2 + (q.y - p.y) ** 2 + (q.z - p.z) ** 2;
-            if (d <= weldSq) return i;
-          }
-        }
-      }
-    }
-    const idx = positions.length;
-    positions.push(p);
-    const k = `${cx},${cy},${cz}`;
-    const bucket = cells.get(k);
-    if (bucket) bucket.push(idx);
-    else cells.set(k, [idx]);
-    return idx;
-  };
-  for (const poly of polys) {
-    const loop: number[] = [];
-    for (const p of poly.v) {
-      const i = intern(p);
-      if (loop[loop.length - 1] !== i) loop.push(i);
-    }
-    while (loop.length > 1 && loop[0] === loop[loop.length - 1]) loop.pop();
-    if (loop.length < 3) continue;
-    faces.push(loop);
-    mats.push(poly.mat);
-    smooth.push(poly.smooth);
-  }
-  const m = new Mesh(positions, faces, mats);
-  if (smooth.some((s) => s)) m.faceSmooth = smooth;
-  return m;
-}
-
-/**
- * Combine two meshes. Both must already be in the same coordinate space, and
- * both should be closed solids — an open surface has no well-defined inside,
- * so the result there is whatever the clipping happens to produce.
- *
- * `matOffset` shifts B's material slots so a caller can keep the two operands'
- * materials apart in the joined result.
- */
-export function meshBoolean(a: Mesh, b: Mesh, op: BooleanOp, matOffset = 0): Mesh {
-  const box = a.bounds();
-  box.union(b.bounds());
-  const scale = Math.max(1e-3, box.radius());
-  const eps = 1e-7 * scale;
-
-  const A = newNode();
-  const B = newNode();
-  build(A, toPolys(a, 0), eps);
-  build(B, toPolys(b, matOffset), eps);
-
-  switch (op) {
-    case 'union':
-      clipTo(A, B, eps);
-      clipTo(B, A, eps);
-      invert(B);
-      clipTo(B, A, eps);
-      invert(B);
-      build(A, allPolys(B), eps);
-      break;
-    case 'difference':
-      invert(A);
-      clipTo(A, B, eps);
-      clipTo(B, A, eps);
-      invert(B);
-      clipTo(B, A, eps);
-      invert(B);
-      build(A, allPolys(B), eps);
-      invert(A);
-      break;
-    case 'intersect':
-      invert(A);
-      clipTo(B, A, eps);
-      invert(B);
-      clipTo(A, B, eps);
-      clipTo(B, A, eps);
-      build(A, allPolys(B), eps);
-      invert(A);
-      break;
-  }
-
-  const out = polysToMesh(allPolys(A), 1e-5 * scale);
-  out.cleanDegenerate();
-  // Splitting a polygon does not split its unsplit neighbour, so the cut line
-  // is littered with T-junctions. They read as cracks and break every
-  // adjacency query, so close them before handing the mesh back.
-  stitchTJunctions(out, 1e-4 * scale);
-  out.removeLooseVertices();
-  return out;
-}
-
-/**
- * Insert vertices that sit in the middle of another face's edge into that
- * edge, turning T-junctions into shared edges.
- */
-export function stitchTJunctions(mesh: Mesh, eps = 1e-5): number {
-  let inserted = 0;
-  for (let pass = 0; pass < 4; pass++) {
-    const t = mesh.topology();
-    const openEdges: number[] = [];
-    const candidates = new Set<number>();
-    for (let i = 0; i < t.edges.length; i++) {
-      if (t.edges[i].faces.length === 1) {
-        openEdges.push(i);
-        candidates.add(t.edges[i].a);
-        candidates.add(t.edges[i].b);
-      }
-    }
-    if (openEdges.length === 0) break;
-    const cand = [...candidates];
-
-    // edge index -> extra vertices to insert, ordered from a to b
-    const extra = new Map<number, number[]>();
-    const epsSq = eps * eps;
-    for (const ei of openEdges) {
-      const e = t.edges[ei];
-      const a = mesh.positions[e.a];
-      const b = mesh.positions[e.b];
-      const ab = b.sub(a);
-      const lenSq = ab.lengthSq();
-      if (lenSq < epsSq) continue;
-      const lo = new Vec3(Math.min(a.x, b.x) - eps, Math.min(a.y, b.y) - eps, Math.min(a.z, b.z) - eps);
-      const hi = new Vec3(Math.max(a.x, b.x) + eps, Math.max(a.y, b.y) + eps, Math.max(a.z, b.z) + eps);
-      const hits: { v: number; t: number }[] = [];
-      for (const v of cand) {
-        if (v === e.a || v === e.b) continue;
-        const p = mesh.positions[v];
-        if (p.x < lo.x || p.y < lo.y || p.z < lo.z || p.x > hi.x || p.y > hi.y || p.z > hi.z) continue;
-        const ap = p.sub(a);
-        const u = ap.dot(ab) / lenSq;
-        if (u <= 0 || u >= 1) continue;
-        if (ap.sub(ab.scale(u)).lengthSq() > epsSq) continue;
-        hits.push({ v, t: u });
-      }
-      if (hits.length === 0) continue;
-      hits.sort((x, y) => x.t - y.t);
-      const seq: number[] = [];
-      for (const h of hits) if (seq[seq.length - 1] !== h.v) seq.push(h.v);
-      extra.set(ei, seq);
-    }
-    if (extra.size === 0) break;
-
-    for (let f = 0; f < mesh.faces.length; f++) {
-      const loop = mesh.faces[f];
-      const fe = t.faceEdges[f];
-      let changed = false;
-      const out: number[] = [];
-      for (let i = 0; i < loop.length; i++) {
-        out.push(loop[i]);
-        const ei = fe[i];
-        const seq = ei >= 0 ? extra.get(ei) : undefined;
-        if (!seq) continue;
-        const e = t.edges[ei];
-        const forward = loop[i] === e.a;
-        for (const v of forward ? seq : seq.slice().reverse()) out.push(v);
-        changed = true;
-        inserted += seq.length;
-      }
-      if (changed) mesh.faces[f] = out;
-    }
-    mesh.markDirty();
-  }
-  return inserted;
-}
+export { meshBoolean, isSolid } from './csg';
+export type { BooleanOp } from './csg';
 
 /**
  * Merge neighbouring faces that lie in the same plane into single n-gons.
@@ -497,4 +122,249 @@ function groupBoundaryLoops(mesh: Mesh, group: number[]): number[][] {
     }
   }
   return loops;
+}
+
+/**
+ * Insert vertices that sit in the middle of another face's edge into that
+ * edge, turning T-junctions into shared edges.
+ *
+ * Splitting a face does not split its unsplit neighbour, so any operation that
+ * cuts across a surface leaves these behind. They read as hairline cracks and
+ * they break every adjacency query downstream, so nothing that cuts should
+ * return without calling this.
+ */
+export function stitchTJunctions(mesh: Mesh, eps = 1e-5): number {
+  let inserted = 0;
+  for (let pass = 0; pass < 4; pass++) {
+    const t = mesh.topology();
+    const openEdges: number[] = [];
+    const candidates = new Set<number>();
+    for (let i = 0; i < t.edges.length; i++) {
+      if (t.edges[i].faces.length === 1) {
+        openEdges.push(i);
+        candidates.add(t.edges[i].a);
+        candidates.add(t.edges[i].b);
+      }
+    }
+    if (openEdges.length === 0) break;
+    const cand = [...candidates];
+
+    // edge index -> extra vertices to insert, ordered from a to b
+    const extra = new Map<number, number[]>();
+    const epsSq = eps * eps;
+    for (const ei of openEdges) {
+      const e = t.edges[ei];
+      const a = mesh.positions[e.a];
+      const b = mesh.positions[e.b];
+      const ab = b.sub(a);
+      const lenSq = ab.lengthSq();
+      if (lenSq < epsSq) continue;
+      const lo = new Vec3(Math.min(a.x, b.x) - eps, Math.min(a.y, b.y) - eps, Math.min(a.z, b.z) - eps);
+      const hi = new Vec3(Math.max(a.x, b.x) + eps, Math.max(a.y, b.y) + eps, Math.max(a.z, b.z) + eps);
+      const hits: { v: number; t: number }[] = [];
+      for (const v of cand) {
+        if (v === e.a || v === e.b) continue;
+        const p = mesh.positions[v];
+        if (p.x < lo.x || p.y < lo.y || p.z < lo.z || p.x > hi.x || p.y > hi.y || p.z > hi.z) continue;
+        const ap = p.sub(a);
+        const u = ap.dot(ab) / lenSq;
+        if (u <= 0 || u >= 1) continue;
+        if (ap.sub(ab.scale(u)).lengthSq() > epsSq) continue;
+        hits.push({ v, t: u });
+      }
+      if (hits.length === 0) continue;
+      hits.sort((x, y) => x.t - y.t);
+      const seq: number[] = [];
+      for (const h of hits) if (seq[seq.length - 1] !== h.v) seq.push(h.v);
+      extra.set(ei, seq);
+    }
+    if (extra.size === 0) break;
+
+    for (let f = 0; f < mesh.faces.length; f++) {
+      const loop = mesh.faces[f];
+      const fe = t.faceEdges[f];
+      const srcUV = mesh.uvFor(f);
+      // A vertex that is already a corner of this face must not be inserted a
+      // second time: the face is a sliver folded against itself, and adding the
+      // repeat is what turns a hairline crack into a four-face edge.
+      const present = new Set(loop);
+      let changed = false;
+      const out: number[] = [];
+      const outUV: number[] = [];
+      for (let i = 0; i < loop.length; i++) {
+        out.push(loop[i]);
+        if (srcUV) outUV.push(srcUV[i * 2], srcUV[i * 2 + 1]);
+        const ei = fe[i];
+        const seq = ei >= 0 ? extra.get(ei) : undefined;
+        if (!seq) continue;
+        const e = t.edges[ei];
+        const forward = loop[i] === e.a;
+        const ordered = (forward ? seq : seq.slice().reverse()).filter((v) => !present.has(v));
+        if (ordered.length === 0) continue;
+        for (const v of ordered) {
+          out.push(v);
+          present.add(v);
+          if (srcUV) {
+            // The inserted point is on the edge, so its coordinates are too.
+            const a = mesh.positions[loop[i]];
+            const b = mesh.positions[loop[(i + 1) % loop.length]];
+            const ab = b.sub(a);
+            const denom = ab.lengthSq();
+            const u = denom > 1e-20 ? mesh.positions[v].sub(a).dot(ab) / denom : 0;
+            const j = ((i + 1) % loop.length) * 2;
+            outUV.push(
+              srcUV[i * 2] + (srcUV[j] - srcUV[i * 2]) * u,
+              srcUV[i * 2 + 1] + (srcUV[j + 1] - srcUV[i * 2 + 1]) * u,
+            );
+          }
+        }
+        changed = true;
+        inserted += ordered.length;
+      }
+      if (changed) {
+        mesh.faces[f] = out;
+        if (srcUV) mesh.setUV(f, outUV);
+      }
+    }
+    mesh.markDirty();
+  }
+  return inserted;
+}
+
+/** Area of a 3D polygon, via Newell. */
+function polyArea3D(points: Vec3[]): number {
+  const n = new Vec3();
+  for (let i = 0; i < points.length; i++) {
+    const cur = points[i];
+    const nxt = points[(i + 1) % points.length];
+    n.x += (cur.y - nxt.y) * (cur.z + nxt.z);
+    n.y += (cur.z - nxt.z) * (cur.x + nxt.x);
+    n.z += (cur.x - nxt.x) * (cur.y + nxt.y);
+  }
+  return n.length() * 0.5;
+}
+
+/**
+ * Is this loop thinner than `eps`, measured across its longest edge?
+ *
+ * Raw area is the wrong test: a long thin sliver and a small honest triangle
+ * can have the same area. What matters is whether the loop is thinner than the
+ * distance at which two points count as the same — if it is, its far side is
+ * the same edge as its near side, and keeping it means covering that edge
+ * twice.
+ */
+export function isSliver(points: Vec3[], eps: number): boolean {
+  let longest = 0;
+  for (let i = 0; i < points.length; i++) {
+    const d = points[(i + 1) % points.length].sub(points[i]).length();
+    if (d > longest) longest = d;
+  }
+  if (longest <= eps) return true;
+  return (2 * polyArea3D(points)) / longest <= eps;
+}
+
+/** Drop faces that have collapsed to a sliver at the given tolerance. */
+export function dropSlivers(mesh: Mesh, eps: number): number {
+  const faces: number[][] = [];
+  const mats: number[] = [];
+  const smooth: boolean[] = [];
+  const uvs: (number[] | null)[] = [];
+  let dropped = 0;
+  for (let f = 0; f < mesh.faces.length; f++) {
+    const loop = mesh.faces[f];
+    // A loop that visits a vertex twice is a face folded against itself, not a
+    // face with a hole; it has no interior to keep.
+    const folded = new Set(loop).size !== loop.length;
+    if (loop.length < 3 || folded || isSliver(loop.map((v) => mesh.positions[v]), eps)) {
+      dropped++;
+      continue;
+    }
+    faces.push(loop);
+    mats.push(mesh.faceMaterial[f] ?? 0);
+    smooth.push(mesh.isFaceSmooth(f));
+    uvs.push(mesh.uvFor(f));
+  }
+  if (dropped === 0) return 0;
+  mesh.faces = faces;
+  mesh.faceMaterial = mats;
+  if (mesh.faceSmooth) mesh.faceSmooth = smooth;
+  if (mesh.faceUV) mesh.faceUV = uvs;
+  mesh.markDirty();
+  return dropped;
+}
+
+/**
+ * Force a cut mesh back to a closed 2-manifold.
+ *
+ * Any floating-point boolean eventually meets a case where two surfaces cross
+ * so nearly tangentially that the seam comes out a hair off: one face ends up
+ * overlapping its neighbour by a sliver, and the seam between them carries
+ * three faces instead of two. No single tolerance fixes that — tighten it and
+ * the sliver survives, loosen it and honest detail collapses instead. So
+ * rather than tuning, repair: collapse the runt edges the artifact hangs on,
+ * clear out whatever folds up as a result, and repeat until the surface closes
+ * or stops improving.
+ *
+ * Returns true when the mesh came out closed.
+ */
+export function repairManifold(mesh: Mesh, eps: number): boolean {
+  const bad = (m: Mesh): number => {
+    let n = 0;
+    for (const e of m.topology().edges) if (e.faces.length !== 2) n++;
+    return n;
+  };
+
+  // First close what can simply be closed: an open edge whose neighbour never
+  // got the matching split is a T-junction, not damage.
+  stitchTJunctions(mesh, eps);
+
+  let remaining = bad(mesh);
+  for (let pass = 0; pass < 8 && remaining > 0; pass++) {
+    const t = mesh.topology();
+    // A runt edge is one far shorter than the mesh's own scale. Judging against
+    // the median rather than a constant keeps this working on a model of any
+    // size, and keeps it from touching a mesh that is uniformly fine.
+    const lens = t.edges
+      .map((e) => mesh.positions[e.a].sub(mesh.positions[e.b]).length())
+      .sort((x, y) => x - y);
+    if (lens.length === 0) break;
+    const runt = Math.max(eps, lens[lens.length >> 1] * 0.1);
+
+    const parent = new Int32Array(mesh.positions.length);
+    for (let i = 0; i < parent.length; i++) parent[i] = i;
+    const find = (i: number): number => {
+      while (parent[i] !== i) {
+        parent[i] = parent[parent[i]];
+        i = parent[i];
+      }
+      return i;
+    };
+    let collapsed = 0;
+    for (let i = 0; i < t.edges.length; i++) {
+      const e = t.edges[i];
+      if (e.faces.length === 2) continue;
+      if (lens.length && mesh.positions[e.a].sub(mesh.positions[e.b]).length() > runt) continue;
+      const ra = find(e.a);
+      const rb = find(e.b);
+      if (ra === rb) continue;
+      parent[Math.max(ra, rb)] = Math.min(ra, rb);
+      collapsed++;
+    }
+    if (collapsed === 0) break;
+
+    for (const loop of mesh.faces) for (let i = 0; i < loop.length; i++) loop[i] = find(loop[i]);
+    mesh.markDirty();
+    mesh.cleanDegenerate();
+    dropSlivers(mesh, eps);
+    stitchTJunctions(mesh, eps);
+
+    const now = bad(mesh);
+    if (now >= remaining) {
+      remaining = now;
+      break;
+    }
+    remaining = now;
+  }
+  mesh.removeLooseVertices();
+  return remaining === 0;
 }

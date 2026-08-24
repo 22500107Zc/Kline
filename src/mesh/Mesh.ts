@@ -114,8 +114,18 @@ export class Mesh {
   }
 
   setUV(f: number, uv: number[] | null): void {
-    if (!this.faceUV) this.faceUV = new Array(this.faces.length).fill(null);
+    if (!this.faceUV) {
+      if (uv === null) return;
+      this.faceUV = new Array(this.faces.length).fill(null);
+    }
+    while (this.faceUV.length <= f) this.faceUV.push(null);
     this.faceUV[f] = uv;
+  }
+
+  /** Coordinates at one corner of a face, or null when it has none. */
+  uvAt(f: number, corner: number): [number, number] | null {
+    const uv = this.uvFor(f);
+    return uv ? [uv[corner * 2], uv[corner * 2 + 1]] : null;
   }
 
   clearUV(): void {
