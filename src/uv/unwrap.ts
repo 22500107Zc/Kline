@@ -1,4 +1,5 @@
 import { Vec3, clamp } from '../core/math';
+import { packRects } from './pack';
 import { Mesh } from '../mesh/Mesh';
 
 /**
@@ -349,7 +350,12 @@ function orientIsland(layout: IslandLayout): void {
  * unit square and write the result onto the mesh.
  */
 export function packIslands(mesh: Mesh, layouts: IslandLayout[], margin = 0.01): void {
-  const boxes: { l: IslandLayout; w: number; h: number; x: number; y: number; px: number; py: number }[] = [];
+  interface Box {
+    l: IslandLayout;
+    w: number;
+    h: number;
+  }
+  const boxes: Box[] = [];
   for (const layout of layouts) {
     const uvArea = layoutArea(layout);
     // Equal texel density: an island covering twice the surface gets twice the
@@ -376,56 +382,32 @@ export function packIslands(mesh: Mesh, layouts: IslandLayout[], margin = 0.01):
         if (run[i + 1] > h) h = run[i + 1];
       }
     }
-    boxes.push({ l: layout, w, h, x: 0, y: 0, px: 0, py: 0 });
+    boxes.push({ l: layout, w, h });
   }
 
-  boxes.sort((a, b) => b.h - a.h);
-  const total = boxes.reduce((s, b) => s + (b.w + margin) * (b.h + margin), 0);
-  const base = Math.max(1e-6, Math.sqrt(total));
-  // Shelf packing is very sensitive to the row width, and a bad guess wastes
-  // half the texture; trying a spread of widths costs nothing here.
-  let bestExtent = Infinity;
-  for (const mult of [0.7, 0.85, 1, 1.15, 1.3, 1.5, 1.8, 2.2]) {
-    const rowWidth = base * mult;
-    let cx = 0;
-    let cy = 0;
-    let shelf = 0;
-    let usedW = 0;
-    for (const b of boxes) {
-      if (cx > 0 && cx + b.w + margin > rowWidth) {
-        cx = 0;
-        cy += shelf + margin;
-        shelf = 0;
-      }
-      b.x = cx;
-      b.y = cy;
-      cx += b.w + margin;
-      if (cx > usedW) usedW = cx;
-      if (b.h > shelf) shelf = b.h;
-    }
-    const extent = Math.max(usedW, cy + shelf);
-    if (extent < bestExtent - 1e-9) {
-      bestExtent = extent;
-      for (const b of boxes) {
-        b.px = b.x;
-        b.py = b.y;
-      }
-    }
-  }
-  for (const b of boxes) {
-    b.x = b.px;
-    b.y = b.py;
-  }
-  const fit = 1 / Math.max(bestExtent, 1e-6);
+  // The margin is baked into each item's size rather than applied afterwards,
+  // so the packer accounts for it while choosing placements instead of having
+  // islands pushed into each other later.
+  const packed = packRects(
+    boxes.map((b, id) => ({ id, width: b.w + margin, height: b.h + margin })),
+    true,
+  );
+  const extent = Math.max(packed.width, packed.height, 1e-6);
+  const fit = 1 / extent;
 
-  for (const b of boxes) {
+  for (const place of packed.placements) {
+    const b = boxes[place.id];
     for (let i = 0; i < b.l.faces.length; i++) {
       const run = b.l.uv[i];
       const out: number[] = [];
       for (let k = 0; k < run.length; k += 2) {
+        // A rotated island is turned a quarter turn about its own corner, so
+        // its bounding box lands exactly where the packer put it.
+        const lx = place.rotated ? b.h - run[k + 1] : run[k];
+        const ly = place.rotated ? run[k] : run[k + 1];
         out.push(
-          clamp((run[k] + b.x) * fit, 0, 1),
-          clamp((run[k + 1] + b.y) * fit, 0, 1),
+          clamp((lx + place.x + margin * 0.5) * fit, 0, 1),
+          clamp((ly + place.y + margin * 0.5) * fit, 0, 1),
         );
       }
       mesh.setUV(b.l.faces[i], out);
