@@ -52,6 +52,12 @@ export class Mesh {
    * derived and renumber on every topology change.
    */
   seams: Set<string> | null = null;
+  /**
+   * Per-edge bevel weight in 0..1, keyed the same way as seams. A bevel
+   * multiplies its width by this, so one operation can round a model's hard
+   * corners heavily and its softer ones barely. Absent means 1.
+   */
+  edgeWeights: Map<string, number> | null = null;
 
   private _topology: Topology | null = null;
   private _revision = 0;
@@ -141,6 +147,22 @@ export class Mesh {
     return this.seams ? this.seams.has(Mesh.seamKey(a, b)) : false;
   }
 
+  /** Bevel weight for an edge; 1 when none has been set. */
+  bevelWeight(a: number, b: number): number {
+    if (!this.edgeWeights) return 1;
+    return this.edgeWeights.get(Mesh.seamKey(a, b)) ?? 1;
+  }
+
+  setBevelWeight(a: number, b: number, w: number): void {
+    const k = Mesh.seamKey(a, b);
+    if (w >= 1) {
+      this.edgeWeights?.delete(k);
+      return;
+    }
+    if (!this.edgeWeights) this.edgeWeights = new Map();
+    this.edgeWeights.set(k, Math.max(0, w));
+  }
+
   setSeam(a: number, b: number, on: boolean): void {
     if (!this.seams) {
       if (!on) return;
@@ -161,6 +183,7 @@ export class Mesh {
     m.faceSmooth = this.faceSmooth ? this.faceSmooth.slice() : null;
     m.faceUV = this.faceUV ? this.faceUV.map((u) => (u ? u.slice() : null)) : null;
     m.seams = this.seams ? new Set(this.seams) : null;
+    m.edgeWeights = this.edgeWeights ? new Map(this.edgeWeights) : null;
     return m;
   }
 
@@ -419,6 +442,7 @@ export class Mesh {
     positions: number[]; faces: number[][]; faceMaterial: number[];
     shadeSmooth: boolean; faceSmooth: boolean[] | null;
     faceUV?: (number[] | null)[] | null; seams?: string[] | null;
+    edgeWeights?: [string, number][] | null;
   } {
     const positions: number[] = [];
     for (const p of this.positions) positions.push(p.x, p.y, p.z);
@@ -430,6 +454,7 @@ export class Mesh {
       faceSmooth: this.faceSmooth ? this.faceSmooth.slice() : null,
       faceUV: this.faceUV ? this.faceUV.map((u) => (u ? u.slice() : null)) : null,
       seams: this.seams ? [...this.seams] : null,
+      edgeWeights: this.edgeWeights ? [...this.edgeWeights] : null,
     };
   }
 
@@ -443,6 +468,7 @@ export class Mesh {
     m.faceSmooth = d.faceSmooth ? d.faceSmooth.slice() : null;
     m.faceUV = d.faceUV ? d.faceUV.map((u) => (u ? u.slice() : null)) : null;
     m.seams = d.seams && d.seams.length ? new Set(d.seams) : null;
+    m.edgeWeights = d.edgeWeights && d.edgeWeights.length ? new Map(d.edgeWeights) : null;
     return m;
   }
 }

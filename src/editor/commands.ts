@@ -7,7 +7,7 @@ import {
   recalculateNormals, smoothVertices, subdivideFaces, triangulateFaces,
 } from '../mesh/ops';
 import { Scene } from '../scene/Scene';
-import { bevelVertices } from '../mesh/bevel';
+import { bevelVertices, markBevelWeight } from '../mesh/bevel';
 import { BooleanOp, dissolveCoplanar, isSolid, meshBoolean, stitchTJunctions } from '../mesh/boolean';
 import { bisect, bridgeLoops, pokeFaces, spinEdges, symmetrize } from '../mesh/modeling';
 import { decimate } from '../mesh/decimate';
@@ -590,6 +590,39 @@ export const COMMANDS: Command[] = [
     id: 'mesh.bevel', label: 'Bevel', category: 'Mesh', shortcut: 'Ctrl+B', mode: 'edit',
     run: (ed) => ed.startBevel(),
     enabled: (ed) => ed.mode === 'edit' && (ed.selection.edges.size > 0 || ed.selection.faces.size > 0),
+  },
+  {
+    id: 'mesh.bevelWeightFull', label: 'Set Bevel Weight: Full', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      const edges = [...ed.selection.edges];
+      editOp(ed, 'Set bevel weight', (mesh) => {
+        markBevelWeight(mesh, edges, 1);
+      });
+      ed.setStatus(`${edges.length} edge${edges.length === 1 ? '' : 's'} back to full bevel width`);
+    },
+    enabled: (ed) => ed.mode === 'edit' && ed.selection.edges.size > 0,
+  },
+  {
+    id: 'mesh.bevelWeightHalf', label: 'Set Bevel Weight: Half', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      const edges = [...ed.selection.edges];
+      editOp(ed, 'Set bevel weight', (mesh) => {
+        markBevelWeight(mesh, edges, 0.5);
+      });
+      ed.setStatus(`${edges.length} edge${edges.length === 1 ? '' : 's'} set to half bevel width`);
+    },
+    enabled: (ed) => ed.mode === 'edit' && ed.selection.edges.size > 0,
+  },
+  {
+    id: 'mesh.bevelWeightNone', label: 'Set Bevel Weight: None', category: 'Mesh', mode: 'edit',
+    run: (ed) => {
+      const edges = [...ed.selection.edges];
+      editOp(ed, 'Set bevel weight', (mesh) => {
+        markBevelWeight(mesh, edges, 0);
+      });
+      ed.setStatus(`${edges.length} edge${edges.length === 1 ? '' : 's'} excluded from bevels`);
+    },
+    enabled: (ed) => ed.mode === 'edit' && ed.selection.edges.size > 0,
   },
   {
     id: 'mesh.bevelVertices', label: 'Bevel Vertices', category: 'Mesh', mode: 'edit',

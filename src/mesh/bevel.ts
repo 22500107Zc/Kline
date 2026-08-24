@@ -147,9 +147,18 @@ function slidePoint(
   return p.add(dirO.scale(t));
 }
 
-/** Both of the face's edges at this corner are beveled: move along the bisector. */
+/**
+ * Both of the face's edges at this corner are beveled, so the new point has to
+ * stand off from each of them by its own width.
+ *
+ * In the basis of the two edge directions the answer is exact. Writing the
+ * offset as `x·da + y·db`, the distance from the ray along `da` is `y·sinθ`
+ * and from the ray along `db` is `x·sinθ`, so `y = w1/sinθ` and `x = w2/sinθ`.
+ * With equal widths that collapses to the familiar `w / sin(θ/2)` along the
+ * bisector, but it stays correct when the two edges carry different weights.
+ */
 function bisectorPoint(
-  mesh: Mesh, f: number, v: number, e1: number, e2: number, width: number, doClamp: boolean,
+  mesh: Mesh, f: number, v: number, e1: number, e2: number, w1: number, w2: number, doClamp: boolean,
 ): Vec3 {
   const p = mesh.positions[v];
   const a = mesh.positions[otherEnd(mesh, e1, v)].sub(p);
@@ -159,21 +168,70 @@ function bisectorPoint(
   if (la < 1e-12 || lb < 1e-12) return p.clone();
   const da = a.scale(1 / la);
   const db = b.scale(1 / lb);
-  let bis = da.add(db);
-  let sinHalf: number;
-  if (bis.lengthSq() < 1e-12) {
-    // Straight-through corner: step perpendicular, into the face.
+  const sinT = da.cross(db).length();
+  if (sinT < 1e-6) {
+    // Straight-through corner: no wedge to bisect, so step perpendicular into
+    // the face by the average width.
     const inward = mesh.faceCenter(f).sub(p);
     const flat = inward.sub(da.scale(inward.dot(da)));
     if (flat.lengthSq() < 1e-16) return p.clone();
-    bis = flat;
-    sinHalf = 1;
-  } else {
-    sinHalf = Math.max(Math.sin(Math.acos(clamp(da.dot(db), -1, 1)) * 0.5), 0.05);
+    let t = (w1 + w2) * 0.5;
+    if (doClamp) t = Math.min(t, Math.min(la, lb) * 0.49);
+    return p.add(flat.normalized().scale(t));
   }
-  let t = width / sinHalf;
-  if (doClamp) t = Math.min(t, Math.min(la, lb) * 0.49);
-  return p.add(bis.normalized().scale(t));
+  let x = w2 / sinT;
+  let y = w1 / sinT;
+  if (doClamp) {
+    const s = Math.min(1, la * 0.49 / Math.max(x, 1e-12), lb * 0.49 / Math.max(y, 1e-12));
+    x *= s;
+    y *= s;
+  }
+  return p.add(da.scale(x)).add(db.scale(y));
+}
+
+/**
+ * The largest fraction of the requested widths that keeps every bevel inside
+ * the geometry it is cutting into.
+ *
+ * Clamping each corner on its own gives a bevel that is wide in the roomy
+ * places and pinched in the tight ones. Scaling every width by one factor
+ * instead keeps the bevel even, which is what the eye expects and what makes
+ * the width readout mean something.
+ */
+function overlapScale(mesh: Mesh, beveled: Set<number>, widthOf: (ei: number) => number): number {
+  const t = mesh.topology();
+  let scale = 1;
+  for (const ei of beveled) {
+    const e = t.edges[ei];
+    const w = widthOf(ei);
+    if (w <= 1e-12) continue;
+    for (const v of [e.a, e.b]) {
+      const p = mesh.positions[v];
+      const dirB = mesh.positions[otherEnd(mesh, ei, v)].sub(p).normalized();
+      // Only the edges this bevel actually slides along matter: the other edge
+      // of each of its two faces at this corner.
+      for (const f of e.faces) {
+        const loop = mesh.faces[f];
+        const i = loop.indexOf(v);
+        if (i < 0) continue;
+        const L = loop.length;
+        const eIn = t.faceEdges[f][(i - 1 + L) % L];
+        const eOut = t.faceEdges[f][i];
+        const eO = eIn === ei ? eOut : eIn;
+        if (eO < 0 || eO === ei) continue;
+        const q = mesh.positions[otherEnd(mesh, eO, v)];
+        const lenO = q.distanceTo(p);
+        if (lenO < 1e-12) continue;
+        const dirO = q.sub(p).scale(1 / lenO);
+        // The same floor `slidePoint` uses, so this predicts the slide it will
+        // actually make rather than a stricter hypothetical one.
+        const sinT = Math.max(dirB.cross(dirO).length(), 0.05);
+        const allowed = lenO * 0.49 * sinT;
+        if (allowed / w < scale) scale = Math.max(0, allowed / w);
+      }
+    }
+  }
+  return scale;
 }
 
 /**
@@ -213,6 +271,64 @@ export function profilePoints(
   return out;
 }
 
+/**
+ * The point that sits `width` inside every face meeting at `v`.
+ *
+ * This is where a bevel's profile is actually centred. Sweeping the arc about
+ * the original vertex instead — which is the obvious thing to do, and wrong —
+ * bows it inward: on a cube it puts the midpoint of each rounded edge well
+ * under the surface a real fillet would have, and the corners come out visibly
+ * sucked in. Offsetting each incident face plane inward by its own width and
+ * intersecting them gives the centre of the sphere the corner is a patch of,
+ * which is what the profile should curve around.
+ *
+ * Three faces determine the point exactly; more are solved in the least
+ * squares sense, and a degenerate corner falls back to the vertex itself.
+ */
+function offsetCentre(mesh: Mesh, v: number, widthOfFace: (f: number) => number): Vec3 {
+  const t = mesh.topology();
+  const faces = t.vertFaces[v] ?? [];
+  const origin = mesh.positions[v];
+  if (faces.length < 3) return origin;
+
+  // Normal equations for "signed distance to each offset plane is zero".
+  const a = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const rhs = [0, 0, 0];
+  for (const f of faces) {
+    const n = t.faceNormals[f];
+    if (!n || n.lengthSq() < 1e-16) continue;
+    // Normals point out of the solid, so moving inward is the negative side.
+    const d = n.dot(mesh.faceCenter(f)) - widthOfFace(f);
+    const c = [n.x, n.y, n.z];
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) a[i * 3 + j] += c[i] * c[j];
+      rhs[i] += c[i] * d;
+    }
+  }
+
+  const det =
+    a[0] * (a[4] * a[8] - a[5] * a[7]) -
+    a[1] * (a[3] * a[8] - a[5] * a[6]) +
+    a[2] * (a[3] * a[7] - a[4] * a[6]);
+  // A flat or nearly flat fan gives a singular system: the faces do not pin a
+  // point down, so there is nothing better than the vertex.
+  if (Math.abs(det) < 1e-9) return origin;
+  const inv = 1 / det;
+  const x =
+    inv * (rhs[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (rhs[1] * a[8] - a[5] * rhs[2]) + a[2] * (rhs[1] * a[7] - a[4] * rhs[2]));
+  const y =
+    inv * (a[0] * (rhs[1] * a[8] - a[5] * rhs[2]) - rhs[0] * (a[3] * a[8] - a[5] * a[6]) + a[2] * (a[3] * rhs[2] - rhs[1] * a[6]));
+  const z =
+    inv * (a[0] * (a[4] * rhs[2] - rhs[1] * a[7]) - a[1] * (a[3] * rhs[2] - rhs[1] * a[6]) + rhs[0] * (a[3] * a[7] - a[4] * a[6]));
+  const c = new Vec3(x, y, z);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return origin;
+  // A wild answer means the corner was close to singular after all.
+  let span = 0;
+  for (const f of faces) span = Math.max(span, widthOfFace(f));
+  if (c.distanceTo(origin) > span * 8 + 1e-9) return origin;
+  return c;
+}
+
 interface CornerPlan {
   /** face -> (one of its two edges at this vertex) -> the vertex to use there. */
   faceEdgeVert: Map<number, Map<number, number>>;
@@ -220,6 +336,8 @@ interface CornerPlan {
   chains: Map<number, { verts: number[]; fromFace: number }>;
   /** Ring bounding the corner cap, or null when the profiles already close up. */
   cap: number[] | null;
+  /** Centre the cap's own patch curves around. */
+  centre: Vec3;
 }
 
 function frozenPlan(mesh: Mesh, v: number, beveled: Set<number>, segments: number): CornerPlan {
@@ -239,7 +357,7 @@ function frozenPlan(mesh: Mesh, v: number, beveled: Set<number>, segments: numbe
   for (const ei of t.vertEdges[v] ?? []) {
     if (beveled.has(ei)) chains.set(ei, { verts: new Array(segments + 1).fill(v), fromFace: -1 });
   }
-  return { faceEdgeVert, chains, cap: null };
+  return { faceEdgeVert, chains, cap: null, centre: mesh.positions[v] };
 }
 
 /**
@@ -254,7 +372,7 @@ function frozenPlan(mesh: Mesh, v: number, beveled: Set<number>, segments: numbe
  * away instead of dragging unrelated geometry with it.
  */
 function planCorner(
-  mesh: Mesh, v: number, beveled: Set<number>, width: number, segments: number,
+  mesh: Mesh, v: number, beveled: Set<number>, widthOf: (ei: number) => number, segments: number,
   profile: number, doClamp: boolean, addVert: (p: Vec3) => number,
 ): CornerPlan {
   const t = mesh.topology();
@@ -308,9 +426,9 @@ function planCorner(
     if (ms === 1) {
       const f = fi(0);
       let p: Vec3;
-      if (bev0 && bevN) p = bisectorPoint(mesh, f, v, e0, eN, width, doClamp);
-      else if (bev0) p = slidePoint(mesh, v, e0, eN, width, doClamp);
-      else if (bevN) p = slidePoint(mesh, v, eN, e0, width, doClamp);
+      if (bev0 && bevN) p = bisectorPoint(mesh, f, v, e0, eN, widthOf(e0), widthOf(eN), doClamp);
+      else if (bev0) p = slidePoint(mesh, v, e0, eN, widthOf(e0), doClamp);
+      else if (bevN) p = slidePoint(mesh, v, eN, e0, widthOf(eN), doClamp);
       else p = origin.clone();
       const q = bev0 || bevN ? addVert(p) : v;
       nextSide[ci(0)] = q;
@@ -318,8 +436,8 @@ function planCorner(
       continue;
     }
 
-    const pStart = bev0 ? slidePoint(mesh, v, e0, otherEdgeOf(fi(0), e0), width, doClamp) : origin;
-    const pEnd = bevN ? slidePoint(mesh, v, eN, otherEdgeOf(fi(ms - 1), eN), width, doClamp) : origin;
+    const pStart = bev0 ? slidePoint(mesh, v, e0, otherEdgeOf(fi(0), e0), widthOf(e0), doClamp) : origin;
+    const pEnd = bevN ? slidePoint(mesh, v, eN, otherEdgeOf(fi(ms - 1), eN), widthOf(eN), doClamp) : origin;
 
     if (ms === 2) {
       // Both ends land on the same interior crossing; split the difference.
@@ -349,13 +467,28 @@ function planCorner(
   // with the same arc (a bevel running straight through the vertex) share one
   // chain, otherwise the two strips would meet at coincident but unwelded
   // vertices.
+  // Where the profile arcs are centred. Falls back to the vertex when the fan
+  // does not pin a point down, which is what the old code always did.
+  const widthOfFace = (f: number): number => {
+    const loop = mesh.faces[f];
+    const i = loop.indexOf(v);
+    if (i < 0) return 0;
+    const L = loop.length;
+    let w = 0;
+    for (const ei of [t.faceEdges[f][(i - 1 + L) % L], t.faceEdges[f][i]]) {
+      if (ei >= 0 && beveled.has(ei)) w = Math.max(w, widthOf(ei));
+    }
+    return w;
+  };
+  const centre = offsetCentre(mesh, v, widthOfFace);
+
   const chains = new Map<number, { verts: number[]; fromFace: number }>();
   const built: { a: number; b: number; verts: number[] }[] = [];
   for (const i of cuts) {
     const from = fan.cyclic ? fan.faces[(i - 1 + m) % m] : fan.faces[i - 1];
     const v0 = prevSide[i];
     const v1 = nextSide[i];
-    const pts = profilePoints(origin, mesh.positions[v0], mesh.positions[v1], segments, profile);
+    const pts = profilePoints(centre, mesh.positions[v0], mesh.positions[v1], segments, profile);
     let verts: number[] | null = null;
     for (const prior of built) {
       const same = prior.a === v0 && prior.b === v1;
@@ -403,7 +536,9 @@ function planCorner(
       n.y += (cur.z - nxt.z) * (cur.x + nxt.x);
       n.z += (cur.x - nxt.x) * (cur.y + nxt.y);
     }
-    if (n.length() * 0.5 > width * width * 1e-4) cap = dedup;
+    let wMax = 0;
+    for (const i of cuts) wMax = Math.max(wMax, widthOf(fan.edges[i]));
+    if (n.length() * 0.5 > wMax * wMax * 1e-4) cap = dedup;
   }
 
   const faceEdgeVert = new Map<number, Map<number, number>>();
@@ -420,7 +555,7 @@ function planCorner(
     put(before, fan.edges[i], prevSide[i]);
   }
 
-  return { faceEdgeVert, chains, cap };
+  return { faceEdgeVert, chains, cap, centre };
 }
 
 function pushFace(mesh: Mesh, loop: number[], likeFace: number): number {
@@ -444,8 +579,11 @@ export function bevelEdges(
   const beveled = new Set<number>();
   for (const ei of edgeSel) {
     const e = t.edges[ei];
-    // A boundary edge has no second face to open a gap between.
-    if (e && e.faces.length === 2) beveled.add(ei);
+    // A boundary edge has no second face to open a gap between, and an edge
+    // weighted to zero is being asked to stay sharp — neither is beveled at
+    // all, as opposed to beveled by nothing, which would leave a seam of
+    // zero-area faces behind.
+    if (e && e.faces.length === 2 && mesh.bevelWeight(e.a, e.b) > 1e-6) beveled.add(ei);
   }
   const empty: BevelResult = { newFaces: [], newVerts: new Set() };
   if (beveled.size === 0 || width <= 0) return empty;
@@ -464,9 +602,20 @@ export function bevelEdges(
     affected.add(t.edges[ei].b);
   }
 
+  // Per-edge widths: the requested width scaled by the edge's own weight, then
+  // scaled again by whatever keeps the whole bevel from folding over itself.
+  const perEdge = new Map<number, number>();
+  for (const ei of beveled) {
+    const e = t.edges[ei];
+    perEdge.set(ei, width * mesh.bevelWeight(e.a, e.b));
+  }
+  const raw = (ei: number): number => perEdge.get(ei) ?? width;
+  const shrink = doClamp ? overlapScale(mesh, beveled, raw) : 1;
+  const widthOf = (ei: number): number => raw(ei) * shrink;
+
   const plans = new Map<number, CornerPlan>();
   for (const v of affected) {
-    plans.set(v, planCorner(mesh, v, beveled, width, segs, profile, doClamp, addVert));
+    plans.set(v, planCorner(mesh, v, beveled, widthOf, segs, profile, doClamp, addVert));
   }
 
   // Rewrite the original faces onto their new corner vertices. A corner can
@@ -538,7 +687,52 @@ export function bevelEdges(
     const outward = t.vertNormals[v] ?? new Vec3(0, 0, 1);
     const loop = n.dot(outward) < 0 ? ring.slice().reverse() : ring;
     const like = (t.vertFaces[v] ?? [])[0] ?? 0;
-    newFaces.push(pushFace(mesh, loop, like));
+    if (segs === 1 || loop.length <= 3) {
+      newFaces.push(pushFace(mesh, loop, like));
+      continue;
+    }
+    // A flat n-gon across the ring cuts the corner off square. The profiles
+    // bounding it are arcs about the same centre, so the corner is a patch of
+    // that sphere: walk inward from the ring in concentric rounds, each one
+    // pushed back out to the profiles' own radius, and close with a fan at the
+    // pole. A single fan straight to the pole would make a cone instead.
+    const origin = plan.centre;
+    const dirs = loop.map((x) => mesh.positions[x].sub(origin));
+    let radius = 0;
+    const pole = new Vec3();
+    for (const d of dirs) {
+      const len = d.length();
+      radius += len;
+      if (len > 1e-12) pole.addInPlace(d.scale(1 / len));
+    }
+    radius /= loop.length;
+    if (pole.lengthSq() < 1e-16 || radius < 1e-12) {
+      newFaces.push(pushFace(mesh, loop, like));
+      continue;
+    }
+
+    const axis = pole.normalized();
+    const onSphere = (d: Vec3): number => {
+      const len = d.length();
+      return addVert(origin.add(len > 1e-12 ? d.scale(radius / len) : axis.scale(radius)));
+    };
+    let prev = loop;
+    const rounds = Math.max(1, Math.round(segs / 2));
+    for (let r = 1; r < rounds; r++) {
+      const s = r / rounds;
+      const ring2 = dirs.map((d) => onSphere(d.scale(1 - s).add(axis.scale(s * radius))));
+      for (let i = 0; i < prev.length; i++) {
+        const j = (i + 1) % prev.length;
+        const quad: number[] = [];
+        for (const x of [prev[i], prev[j], ring2[j], ring2[i]]) if (!quad.includes(x)) quad.push(x);
+        if (quad.length >= 3) newFaces.push(pushFace(mesh, quad, like));
+      }
+      prev = ring2;
+    }
+    const hub = addVert(origin.add(axis.scale(radius)));
+    for (let i = 0; i < prev.length; i++) {
+      newFaces.push(pushFace(mesh, [prev[i], prev[(i + 1) % prev.length], hub], like));
+    }
   }
 
   mesh.markDirty();
@@ -640,4 +834,17 @@ export function bevelVertices(
   const kept = new Set<number>();
   for (const x of newVerts) if (map[x] >= 0) kept.add(map[x]);
   return { newFaces, newVerts: kept };
+}
+
+/** Set the bevel weight on the given edges. */
+export function markBevelWeight(mesh: Mesh, edges: Iterable<number>, weight: number): number {
+  const t = mesh.topology();
+  let n = 0;
+  for (const ei of edges) {
+    const e = t.edges[ei];
+    if (!e) continue;
+    mesh.setBevelWeight(e.a, e.b, weight);
+    n++;
+  }
+  return n;
 }
