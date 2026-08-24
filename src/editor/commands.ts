@@ -380,6 +380,11 @@ export const COMMANDS: Command[] = [
     run: (ed) => ed.startLoopCut(),
   },
   {
+    id: 'mesh.knife', label: 'Knife', category: 'Mesh', mode: 'edit', shortcut: 'K',
+    run: (ed) => ed.startKnife(),
+    enabled: (ed) => ed.mode === 'edit',
+  },
+  {
     id: 'mesh.subdivide', label: 'Subdivide', category: 'Mesh', mode: 'edit',
     enabled: (ed) => ed.mode === 'edit' && ed.selection.faces.size > 0,
     run: (ed) => {
@@ -1197,6 +1202,7 @@ export const KEYMAP: KeyBinding[] = [
   { chord: 'shift+left', command: 'anim.jumpStart' },
   { chord: 'shift+right', command: 'anim.jumpEnd' },
   { chord: 'f12', command: 'render.image' },
+  { chord: 'k', command: 'mesh.knife', mode: 'edit' },
   { chord: ']', command: 'sculpt.radiusUp', mode: 'sculpt' },
   { chord: '[', command: 'sculpt.radiusDown', mode: 'sculpt' },
   { chord: 'b', command: 'sculpt.cycleBrush', mode: 'sculpt' },

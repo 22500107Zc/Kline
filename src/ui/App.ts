@@ -22,6 +22,13 @@ export class App {
   private canvas: HTMLCanvasElement;
   private heatBar = h('div', { class: 'heat-bar' });
   private boxSelect = h('div', { class: 'box-select' });
+  /** The knife's cut line, drawn over the viewport while the tool is live. */
+  private knifeLine = (() => {
+    // SVG needs its own namespace; `h` only makes HTML elements.
+    const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    el.setAttribute('class', 'knife-line');
+    return el;
+  })();
   private shortcuts = h('div', { class: 'overlay-panel shortcuts hidden' });
   private viewportHint = h('div', { class: 'viewport-hint' });
   private dropVeil = h('div', { class: 'drop-veil' }, [
@@ -52,7 +59,7 @@ export class App {
     const sculptPanel = new SculptPanel(this.editor);
     const timeline = new Timeline(this.editor);
     const viewport = h('main', { class: 'viewport' }, [
-      this.canvas, this.buildBar.root, this.boxSelect, this.viewportHint,
+      this.canvas, this.buildBar.root, this.boxSelect, this.knifeLine, this.viewportHint,
       sculptPanel.root, this.uvEditor.root, this.dropVeil, this.shortcuts,
       this.renderWindow.root, this.palette.root,
     ]);
@@ -96,6 +103,19 @@ export class App {
     } else {
       this.boxSelect.style.display = 'none';
     }
+    const knife = this.editor.knifePath;
+    if (knife && knife.length > 0) {
+      const pts = knife.map(([x, y]) => `${x},${y}`).join(' ');
+      const dots = knife
+        .slice(0, this.editor.knifePointCount)
+        .map(([x, y]) => `<circle cx="${x}" cy="${y}" r="3" />`)
+        .join('');
+      this.knifeLine.innerHTML = `<polyline points="${pts}" />${dots}`;
+      this.knifeLine.style.display = 'block';
+    } else {
+      this.knifeLine.style.display = 'none';
+    }
+
     const label = this.editor.modalLabel;
     this.viewportHint.textContent = label ?? '';
     this.viewportHint.classList.toggle('visible', !!label);

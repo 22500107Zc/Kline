@@ -18,6 +18,7 @@ import { SnapSettings, defaultSnap, snapPointUnderCursor } from './snapping';
 import { SculptSettings, SculptStroke, defaultSculpt } from '../sculpt/sculpt';
 import { ChannelPath, removeKey, setKey } from '../anim/animation';
 import { bevelEdges } from '../mesh/bevel';
+import { knifeCut } from '../mesh/knife';
 import { transferUV } from '../uv/transfer';
 import { RenderJob } from '../render/pathtrace/RenderJob';
 import { RenderSettings, defaultRenderSettings } from '../render/pathtrace/types';
@@ -48,7 +49,8 @@ type Modal =
   | { type: 'bevel'; state: BevelState }
   | { type: 'inset'; baseline: Mesh; faces: number[]; startX: number; startY: number; thickness: number; depth: number }
   | { type: 'loopcut'; edge: number | null; cuts: number }
-  | { type: 'box'; rect: Rect; extend: boolean; subtract: boolean };
+  | { type: 'box'; rect: Rect; extend: boolean; subtract: boolean }
+  | { type: 'knife'; points: [number, number][]; preview: [number, number] | null };
 
 export type EditorEvent = 'change' | 'status' | 'modal' | 'render' | 'frame';
 
@@ -209,6 +211,7 @@ export class Editor {
         return `Bevel ${b.width.toFixed(4)} — ${b.segments} segment${b.segments === 1 ? '' : 's'}, profile ${b.profile.toFixed(2)} (scroll for segments)`;
       }
       case 'box': return 'Box Select';
+      case 'knife': return 'Knife';
     }
   }
 
@@ -781,6 +784,95 @@ export class Editor {
   // ------------------------------------------------------------------ bevel
 
   /** Start a modal bevel on the current edge (or face-region) selection. */
+  // ------------------------------------------------------------------ knife
+
+  /**
+   * Begin a knife cut. Clicking adds points, Enter cuts, Escape backs out.
+   */
+  startKnife(): void {
+    if (!this.editObject || !this.editMesh) {
+      this.setStatus('Knife works in Edit Mode');
+      return;
+    }
+    this.modal = { type: 'knife', points: [], preview: null };
+    this.setStatus('Knife: click to place cut points, Enter to cut, Esc to cancel');
+    this.emit('modal');
+    this.requestRender();
+  }
+
+  /** The cut line so far, for the overlay to draw. */
+  get knifePath(): [number, number][] | null {
+    if (this.modal?.type !== 'knife') return null;
+    return this.modal.preview ? [...this.modal.points, this.modal.preview] : [...this.modal.points];
+  }
+
+  /** How many of `knifePath`'s points are placed rather than the live cursor. */
+  get knifePointCount(): number {
+    return this.modal?.type === 'knife' ? this.modal.points.length : 0;
+  }
+
+  private addKnifePoint(x: number, y: number): void {
+    if (this.modal?.type !== 'knife') return;
+    this.modal.points.push([x, y]);
+    this.setStatus(
+      `Knife: ${this.modal.points.length} point${this.modal.points.length === 1 ? '' : 's'} — Enter to cut`,
+    );
+    this.emit('modal');
+    this.requestRender();
+  }
+
+  private applyKnife(): void {
+    if (this.modal?.type !== 'knife') return;
+    const path = this.modal.points;
+    const obj = this.editObject;
+    const mesh = this.editMesh;
+    this.modal = null;
+    this.emit('modal');
+    if (!obj || !mesh || path.length < 2) {
+      this.setStatus('Knife needs at least two points');
+      this.changed();
+      return;
+    }
+    const view = this.viewport();
+    const model = obj.worldMatrix(this.scene);
+    const eye = this.camera.eye();
+    const forward = this.camera.forward();
+    const t = mesh.topology();
+    const normalMat = model.normalMatrix();
+
+    this.beginUndo('Knife');
+    const result = knifeCut(mesh, {
+      project: (p) => {
+        const s = this.camera.worldToScreen(model.transformPoint(p), view.width, view.height);
+        return [s.x, s.y];
+      },
+      path,
+      // Only what the user can see. A cut drawn over the front of a model is
+      // very rarely meant for the back of it as well.
+      frontFacing: (f) => {
+        const n = normalMat.transformDirection(t.faceNormals[f]);
+        const c = model.transformPoint(t.faceCenters[f]);
+        const towards = this.camera.orthographic ? forward.neg() : eye.sub(c);
+        return n.dot(towards) > 0;
+      },
+    });
+    if (result.splits === 0) {
+      this.setStatus('The knife did not cross any faces');
+      const undoState = this.history.undo(this.snapshot('cancelled'));
+      if (undoState) this.restore(undoState);
+      return;
+    }
+    // Select what was cut, so the next operation has something to work on.
+    this.selectMode = 'vertex';
+    this.selection.verts = new Set(result.newVerts);
+    this.selection.edges.clear();
+    this.selection.faces.clear();
+    this.syncSelection();
+    this.markGeometryDirty(obj);
+    this.setStatus(`Knife split ${result.splits} face${result.splits === 1 ? '' : 's'}`);
+    this.changed();
+  }
+
   startBevel(): void {
     const obj = this.editObject;
     const mesh = this.editMesh;
@@ -1172,6 +1264,9 @@ export class Editor {
         this.applyBoxSelect();
         this.modal = null;
         break;
+      case 'knife':
+        this.applyKnife();
+        return;
     }
     this.emit('modal');
     this.changed();
@@ -1328,6 +1423,12 @@ export class Editor {
     this.canvas.setPointerCapture(e.pointerId);
 
     if (this.modal) {
+      // The knife collects points on click rather than being confirmed by one.
+      if (this.modal.type === 'knife') {
+        if (e.button === 0) this.addKnifePoint(p.x, p.y);
+        else if (e.button === 2) this.cancelModal();
+        return;
+      }
       if (e.button === 0) this.confirmModal();
       else if (e.button === 2) this.cancelModal();
       return;
@@ -1375,6 +1476,11 @@ export class Editor {
         case 'box':
           this.modal.rect.x1 = p.x;
           this.modal.rect.y1 = p.y;
+          this.emit('modal');
+          this.requestRender();
+          break;
+        case 'knife':
+          this.modal.preview = [p.x, p.y];
           this.emit('modal');
           this.requestRender();
           break;
