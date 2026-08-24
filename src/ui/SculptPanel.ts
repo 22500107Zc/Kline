@@ -84,6 +84,35 @@ export class SculptPanel {
     });
     this.root.appendChild(sym);
 
+    // The weight brush needs to know which bone it is painting, and that only
+    // makes sense once the mesh is actually bound to something.
+    if (ed.sculpt.brush === 'weight') {
+      const mesh = ed.sculptObject?.mesh;
+      const rig = [...ed.scene.objects.values()].find((o) => {
+        if (!o.armature) return false;
+        return ed.sculptObject?.modifiers.some((m) => m.type === 'armature' && m.objectId === o.id) ?? false;
+      });
+      if (!mesh?.skin || !rig?.armature) {
+        this.root.appendChild(h('p', {
+          class: 'sp-warn',
+          text: 'Bind this mesh to an armature first (Rig → Bind) — there are no weights to paint yet.',
+        }));
+      } else {
+        const bones = rig.armature.bones;
+        const picker = h('select', { class: 'sel' }) as HTMLSelectElement;
+        bones.forEach((b, i) => picker.append(h('option', { value: String(i), text: b.name })));
+        picker.value = String(Math.min(ed.sculpt.weightBone, bones.length - 1));
+        picker.addEventListener('change', () => {
+          ed.sculpt.weightBone = Number(picker.value);
+          ed.activeBone = ed.sculpt.weightBone;
+          ed.emit('change');
+          ed.requestRender();
+        });
+        picker.addEventListener('keydown', (e) => e.stopPropagation());
+        this.root.append(h('span', { class: 'sp-head', text: 'Painting bone' }), picker);
+      }
+    }
+
     this.root.appendChild(h('span', { class: 'sp-head', text: 'Topology' }));
     const tools = h('div', { class: 'sp-topology' });
     tools.append(

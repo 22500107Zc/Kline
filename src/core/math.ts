@@ -190,6 +190,22 @@ export class Mat4 {
       .multiply(Mat4.rotationAxis(new Vec3(1, 0, 0), e.x));
   }
 
+  /**
+   * A matrix from three axes and an origin, columns in that order.
+   *
+   * Handy wherever a frame is already known as axes — a bone's rest
+   * orientation, a tangent basis — rather than as euler angles.
+   */
+  static fromBasis(x: Vec3, y: Vec3, z: Vec3, origin: Vec3 = new Vec3()): Mat4 {
+    const r = new Mat4();
+    const m = r.m;
+    m[0] = x.x; m[1] = x.y; m[2] = x.z; m[3] = 0;
+    m[4] = y.x; m[5] = y.y; m[6] = y.z; m[7] = 0;
+    m[8] = z.x; m[9] = z.y; m[10] = z.z; m[11] = 0;
+    m[12] = origin.x; m[13] = origin.y; m[14] = origin.z; m[15] = 1;
+    return r;
+  }
+
   static compose(position: Vec3, rotation: Vec3, scale: Vec3): Mat4 {
     return Mat4.translation(position)
       .multiply(Mat4.rotationEuler(rotation))
@@ -401,6 +417,15 @@ export class AABB {
  * (Ericson, Real-Time Collision Detection). Used by UV transfer, the boolean
  * classifier and anything else that needs "how far is this from the surface".
  */
+/** The point on segment `a`-`b` nearest to `p`. */
+export function closestPointOnSegment(p: Vec3, a: Vec3, b: Vec3): Vec3 {
+  const ab = b.sub(a);
+  const len = ab.lengthSq();
+  if (len < 1e-20) return a.clone();
+  const t = clamp(p.sub(a).dot(ab) / len, 0, 1);
+  return a.add(ab.scale(t));
+}
+
 export function closestPointOnTriangle(
   p: Vec3, a: Vec3, b: Vec3, c: Vec3,
 ): { point: Vec3; u: number; v: number; w: number } {

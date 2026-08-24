@@ -1,5 +1,6 @@
 import { Vec3, clamp } from '../core/math';
 import { Mesh } from '../mesh/Mesh';
+import { MAX_INFLUENCES, resizeSkin, setWeight, weightOf } from '../mesh/skin';
 
 /**
  * Sculpting.
@@ -12,7 +13,8 @@ import { Mesh } from '../mesh/Mesh';
  */
 
 export type SculptBrush =
-  | 'draw' | 'smooth' | 'inflate' | 'grab' | 'flatten' | 'scrape' | 'pinch' | 'crease' | 'mask';
+  | 'draw' | 'smooth' | 'inflate' | 'grab' | 'flatten' | 'scrape' | 'pinch' | 'crease' | 'mask'
+  | 'weight';
 
 export const BRUSH_LABELS: Record<SculptBrush, string> = {
   draw: 'Draw',
@@ -24,6 +26,7 @@ export const BRUSH_LABELS: Record<SculptBrush, string> = {
   pinch: 'Pinch',
   crease: 'Crease',
   mask: 'Mask',
+  weight: 'Weight',
 };
 
 export interface SculptSettings {
@@ -46,12 +49,17 @@ export interface SculptSettings {
    * Stepping along the path at a fixed spacing makes the two identical.
    */
   spacing: number;
+  /**
+   * Bone the weight brush paints for. Meaningless to the other brushes, but it
+   * lives here so a stroke carries everything it needs.
+   */
+  weightBone: number;
 }
 
 export function defaultSculpt(): SculptSettings {
   return {
     brush: 'draw', radius: 0.35, strength: 0.5, invert: false,
-    symmetry: [false, false, false], autoSmooth: 0.1, spacing: 0.2,
+    symmetry: [false, false, false], autoSmooth: 0.1, spacing: 0.2, weightBone: 0,
   };
 }
 
@@ -255,6 +263,28 @@ export class SculptStroke {
   private dabAt(center: Vec3, normal: Vec3, radius: number, s: SculptSettings): number {
     const verts = this.grid.query(center, radius);
     if (verts.length === 0) return 0;
+
+    // The weight brush paints bone influence rather than the surface.
+    if (s.brush === 'weight') {
+      if (!this.mesh.skin) return 0;
+      const skin = this.mesh.skin.bones.length === this.mesh.positions.length * MAX_INFLUENCES
+        ? this.mesh.skin
+        : resizeSkin(this.mesh.skin, this.mesh.positions.length);
+      this.mesh.skin = skin;
+      // Inverted paints the weight away, which is how you fix a limb that has
+      // grabbed part of the torso.
+      const target = s.invert ? 0 : 1;
+      let n = 0;
+      for (const i of verts) {
+        const w = brushFalloff(this.mesh.positions[i].distanceTo(center) / radius);
+        if (w <= 0) continue;
+        const now = weightOf(skin, i, s.weightBone);
+        setWeight(skin, i, s.weightBone, now + (target - now) * clamp(s.strength * w, 0, 1));
+        this.touched.add(i);
+        n++;
+      }
+      return n;
+    }
 
     // The mask brush paints the mask rather than the surface.
     if (s.brush === 'mask') {

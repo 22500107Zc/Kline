@@ -2,6 +2,7 @@ import { Mat4, Vec3 } from '../core/math';
 import { Mesh } from '../mesh/Mesh';
 import { Scene, SceneObject } from '../scene/Scene';
 import { ViewportCamera } from '../scene/ViewportCamera';
+import { posedSegments } from '../anim/armature';
 import { DynamicBuffer, Program, setupAttribs } from './gl';
 import { buildPoints, buildSurface, buildWire } from './MeshBuffers';
 import {
@@ -32,6 +33,8 @@ export interface ViewportOptions {
   backfaceCulling: boolean;
   /** Replace base colours with a procedural checker, for judging an unwrap. */
   uvCheck?: boolean;
+  /** Bone the rig tools are working on, drawn highlighted. */
+  activeBone?: number;
 }
 
 export interface LineSegment {
@@ -527,6 +530,17 @@ export class Renderer {
       } else if (obj.type === 'camera' && obj.camera) {
         const c: [number, number, number] = selected ? THEME.wireSelected : THEME.camera;
         pushCameraGizmo(segments, m, obj.camera.fov, camera.pixelScaleAt(m.transformPoint(new Vec3()), this.height) * 55, c);
+      } else if (obj.type === 'armature' && obj.armature) {
+        // Bones as octahedra: a plain line gives no sense of which way a bone
+        // is twisted, and roll is exactly what decides how a joint bends.
+        const c: [number, number, number] = selected ? THEME.wireSelected : [0.55, 0.72, 0.95];
+        const segs = posedSegments(obj.armature);
+        for (let i = 0; i < segs.length; i++) {
+          const head = m.transformPoint(segs[i].head);
+          const tail = m.transformPoint(segs[i].tail);
+          const bright: [number, number, number] = i === options.activeBone ? THEME.wireSelected : c;
+          pushBone(segments, head, tail, bright);
+        }
       } else if (obj.type === 'empty') {
         const c: [number, number, number] = selected ? THEME.wireSelected : [0.6, 0.6, 0.65];
         const o = m.transformPoint(new Vec3());
@@ -665,6 +679,35 @@ function pushCircle(
     const p = center.add(u.scale(Math.cos(a) * radius)).add(v.scale(Math.sin(a) * radius));
     out.push({ a: prev, b: p, color, overlay });
     prev = p;
+  }
+}
+
+/**
+ * An octahedral bone from head to tail.
+ *
+ * A plain line would be cheaper, but it gives no sense of which way the bone
+ * is twisted — and roll is exactly what decides which way a joint bends, so it
+ * has to be visible.
+ */
+function pushBone(
+  out: LineSegment[], head: Vec3, tail: Vec3, color: [number, number, number],
+): void {
+  const axis = tail.sub(head);
+  const len = axis.length();
+  if (len < 1e-6) return;
+  const dir = axis.scale(1 / len);
+  const helper = Math.abs(dir.z) < 0.9 ? new Vec3(0, 0, 1) : new Vec3(1, 0, 0);
+  const x = helper.cross(dir).normalized().scale(len * 0.12);
+  const y = dir.cross(x.normalized()).normalized().scale(len * 0.12);
+  // The widest point sits a short way along, which is what reads as a joint.
+  const waist = head.add(dir.scale(len * 0.2));
+  const ring = [waist.add(x), waist.add(y), waist.sub(x), waist.sub(y)];
+  for (let i = 0; i < 4; i++) {
+    const a = ring[i];
+    const b = ring[(i + 1) % 4];
+    out.push({ a, b, color });
+    out.push({ a: head, b: a, color });
+    out.push({ a, b: tail, color });
   }
 }
 

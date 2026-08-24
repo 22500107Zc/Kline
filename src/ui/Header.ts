@@ -9,6 +9,7 @@ const MENUS: { label: string; categories: Command['category'][] }[] = [
   { label: 'Add', categories: ['Add'] },
   { label: 'Object', categories: ['Object'] },
   { label: 'Mesh', categories: ['Mesh'] },
+  { label: 'Rig', categories: ['Rig'] },
   { label: 'Select', categories: ['Select'] },
   { label: 'View', categories: ['View'] },
 ];

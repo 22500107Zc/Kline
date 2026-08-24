@@ -1,13 +1,14 @@
 import { AABB, Mat4, Vec3 } from '../core/math';
 import { Mesh } from '../mesh/Mesh';
-import { Modifier, ObjectResolver, evaluateStack, stackKey } from '../modifiers';
+import { ArmatureResolver, Modifier, ObjectResolver, evaluateStack, stackKey } from '../modifiers';
 import { Material, cloneMaterial, createMaterial } from './Material';
 import { SceneTexture, reserveTextureId } from './Texture';
 import {
   Channel, TimelineSettings, cloneChannels, completeTransform, defaultTimeline, sampleChannels,
 } from '../anim/animation';
+import { ArmatureData, cloneArmature, createArmature } from '../anim/armature';
 
-export type ObjectType = 'mesh' | 'light' | 'camera' | 'empty';
+export type ObjectType = 'mesh' | 'light' | 'camera' | 'empty' | 'armature';
 export type LightType = 'point' | 'sun' | 'spot' | 'area';
 
 export interface LightData {
@@ -71,6 +72,8 @@ export class SceneObject {
   materialSlots: number[] = [];
   light: LightData | null = null;
   camera: CameraData | null = null;
+  /** Bones, when this object is an armature. */
+  armature: ArmatureData | null = null;
 
   private evalCache: { key: string; revision: number; mesh: Mesh } | null = null;
 
@@ -117,9 +120,17 @@ export class SceneObject {
     let refs = '';
     if (scene) {
       for (const mod of this.modifiers) {
-        if (mod.type !== 'boolean' || mod.objectId === null) continue;
+        if (mod.type !== 'armature' && mod.type !== 'boolean') continue;
+        if (mod.objectId === null) continue;
         const other = scene.get(mod.objectId);
-        refs += `|${mod.objectId}:${other?.mesh?.revision ?? -1}`;
+        if (mod.type === 'armature') {
+          // The pose is the input here, so it has to be part of the key or a
+          // posed rig would keep showing the mesh from before it moved.
+          refs += `|A${mod.objectId}:${JSON.stringify(other?.armature?.bones ?? null)}`;
+          refs += `:${JSON.stringify(other?.position)},${JSON.stringify(other?.rotation)}`;
+        } else if (mod.type === 'boolean') {
+          refs += `|${mod.objectId}:${other?.mesh?.revision ?? -1}`;
+        }
       }
     }
     const key = stackKey(this.modifiers, editMode) + refs;
@@ -142,7 +153,20 @@ export class SceneObject {
     this.evaluating = true;
     let result: Mesh;
     try {
-      result = evaluateStack(this.mesh, this.modifiers, editMode, resolve);
+      const rig: ArmatureResolver | undefined = scene
+        ? (id) => {
+          const other = scene.get(id);
+          if (!other || !other.armature) return null;
+          const mine = this.worldMatrix(scene);
+          const theirs = other.worldMatrix(scene);
+          return {
+            armature: other.armature,
+            meshToArmature: theirs.inverse().multiply(mine),
+            armatureToMesh: mine.inverse().multiply(theirs),
+          };
+        }
+        : undefined;
+      result = evaluateStack(this.mesh, this.modifiers, editMode, resolve, rig);
     } finally {
       this.evaluating = false;
     }
@@ -239,6 +263,7 @@ export class Scene {
     obj.mesh = mesh;
     if (type === 'light') obj.light = createLightData();
     if (type === 'camera') obj.camera = createCameraData();
+    if (type === 'armature') obj.armature = createArmature();
     if (mesh) obj.materialSlots = [this.ensureDefaultMaterial()];
     this.objects.set(obj.id, obj);
     this.order.push(obj.id);
@@ -406,6 +431,7 @@ export class Scene {
         materialSlots: [...o.materialSlots],
         light: o.light ? { ...o.light, color: [...o.light.color] as [number, number, number] } : null,
         camera: o.camera ? { ...o.camera } : null,
+        armature: o.armature ? cloneArmature(o.armature) : null,
         animation: cloneChannels(o.animation),
       })),
     };
@@ -436,6 +462,7 @@ export class Scene {
       o.materialSlots = od.materialSlots ?? [];
       o.light = od.light ?? null;
       o.camera = od.camera ?? null;
+      o.armature = od.armature ? cloneArmature(od.armature) : null;
       o.animation = cloneChannels(od.animation ?? []);
       s.objects.set(o.id, o);
       s.nextId = Math.max(s.nextId, o.id + 1);
@@ -463,6 +490,7 @@ export interface SerializedObject {
   materialSlots: number[];
   light: LightData | null;
   camera: CameraData | null;
+  armature?: ArmatureData | null;
   animation?: Channel[];
 }
 

@@ -19,6 +19,9 @@ import { SculptSettings, SculptStroke, defaultSculpt } from '../sculpt/sculpt';
 import { ChannelPath, removeKey, setKey } from '../anim/animation';
 import { bevelEdges } from '../mesh/bevel';
 import { knifeCut } from '../mesh/knife';
+import { clearPose, createBone, sortBones } from '../anim/armature';
+import { envelopeWeights } from '../mesh/skin';
+import { createModifier } from '../modifiers';
 import { transferUV } from '../uv/transfer';
 import { RenderJob } from '../render/pathtrace/RenderJob';
 import { RenderSettings, defaultRenderSettings } from '../render/pathtrace/types';
@@ -144,7 +147,9 @@ export class Editor {
         this.renderer.render({
           scene: this.scene,
           camera: this.camera,
-          options: this.options,
+          // The rig tools highlight the bone they act on; the renderer only
+          // needs to know which one.
+          options: { ...this.options, activeBone: this.activeBone },
           edit: this.editOverlay(),
           lines: this.overlayLines(),
         });
@@ -561,6 +566,124 @@ export class Editor {
     obj.position = this.scene.cursor.clone();
     this.selectObject(obj.id);
     return obj;
+  }
+
+  addArmature(): SceneObject {
+    this.beginUndo('Add armature');
+    const obj = this.scene.add('armature', 'Armature');
+    obj.position = this.scene.cursor.clone();
+    this.selectObject(obj.id);
+    this.activeBone = 0;
+    return obj;
+  }
+
+  // ---------------------------------------------------------------- rigging
+
+  /** Index of the bone edits and weight painting apply to. */
+  activeBone = 0;
+
+  /** The selected armature, if exactly one is involved in the selection. */
+  get activeArmature(): SceneObject | null {
+    const active = this.scene.get(this.scene.active ?? -1);
+    if (active?.armature) return active;
+    for (const id of this.scene.selection) {
+      const o = this.scene.get(id);
+      if (o?.armature) return o;
+    }
+    return null;
+  }
+
+  /**
+   * Add a bone growing out of the active one, so building a chain is a matter
+   * of pressing the key repeatedly rather than typing coordinates.
+   */
+  extrudeBone(): void {
+    const obj = this.activeArmature;
+    if (!obj?.armature) {
+      this.setStatus('Select an armature first');
+      return;
+    }
+    const bones = obj.armature.bones;
+    const parent = Math.min(Math.max(0, this.activeBone), bones.length - 1);
+    const from = bones[parent];
+    this.beginUndo('Add bone');
+    const head = from.tail;
+    const dir = [
+      from.tail[0] - from.head[0],
+      from.tail[1] - from.head[1],
+      from.tail[2] - from.head[2],
+    ] as [number, number, number];
+    const len = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+    bones.push(createBone({
+      name: `Bone.${String(bones.length).padStart(3, '0')}`,
+      parent,
+      head: [...head] as [number, number, number],
+      tail: [head[0] + dir[0] / len, head[1] + dir[1] / len, head[2] + dir[2] / len],
+    }));
+    sortBones(obj.armature);
+    this.activeBone = bones.length - 1;
+    this.setStatus(`Added bone ${bones.length} of ${bones.length}`);
+    this.changed();
+    this.requestRender();
+  }
+
+  /**
+   * Bind the selected meshes to the selected armature, generating weights.
+   *
+   * This is the one operation a rig is actually for, so it does the whole
+   * thing: weights, the modifier, and the parent link, rather than leaving
+   * three separate steps to remember in the right order.
+   */
+  bindToArmature(): void {
+    const rig = this.activeArmature;
+    if (!rig?.armature) {
+      this.setStatus('Select an armature along with the meshes to bind');
+      return;
+    }
+    const meshes = [...this.scene.selection]
+      .map((id) => this.scene.get(id))
+      .filter((o): o is SceneObject => !!o && o.type === 'mesh' && !!o.mesh);
+    if (meshes.length === 0) {
+      this.setStatus('Select at least one mesh as well as the armature');
+      return;
+    }
+    this.beginUndo('Bind to armature');
+    const rigWorld = rig.worldMatrix(this.scene);
+    for (const obj of meshes) {
+      const toArmature = rigWorld.inverse().multiply(obj.worldMatrix(this.scene));
+      obj.mesh!.skin = envelopeWeights(obj.mesh!, rig.armature, toArmature);
+      obj.mesh!.markDirty();
+      if (!obj.modifiers.some((m) => m.type === 'armature' && m.objectId === rig.id)) {
+        const mod = createModifier('armature');
+        if (mod.type === 'armature') mod.objectId = rig.id;
+        obj.modifiers.push(mod);
+      }
+      obj.invalidate();
+      this.markGeometryDirty(obj);
+    }
+    this.setStatus(
+      `Bound ${meshes.length} mesh${meshes.length === 1 ? '' : 'es'} to ${rig.name} with automatic weights`,
+    );
+    this.changed();
+  }
+
+  /** Put every bone back where it started. */
+  clearArmaturePose(): void {
+    const rig = this.activeArmature;
+    if (!rig?.armature) {
+      this.setStatus('Select an armature first');
+      return;
+    }
+    this.beginUndo('Clear pose');
+    clearPose(rig.armature);
+    for (const o of this.scene.objects.values()) {
+      if (o.modifiers.some((m) => m.type === 'armature' && m.objectId === rig.id)) {
+        o.invalidate();
+        this.markGeometryDirty(o);
+      }
+    }
+    this.setStatus('Pose cleared');
+    this.changed();
   }
 
   // ------------------------------------------------------------------ modals

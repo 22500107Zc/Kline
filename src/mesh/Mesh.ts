@@ -1,4 +1,5 @@
 import { AABB, Mat4, Vec3 } from '../core/math';
+import type { SkinData } from './skin';
 
 /**
  * Kiln's mesh kernel.
@@ -64,6 +65,12 @@ export class Mesh {
    * nothing is masked.
    */
   mask: Float32Array | null = null;
+  /**
+   * Bone weights, when this mesh is bound to an armature. Stored here rather
+   * than on the rig because they belong to the geometry: subdividing has to
+   * carry them, and swapping the rig should not throw them away.
+   */
+  skin: SkinData | null = null;
 
   private _topology: Topology | null = null;
   private _revision = 0;
@@ -206,6 +213,7 @@ export class Mesh {
     m.seams = this.seams ? new Set(this.seams) : null;
     m.edgeWeights = this.edgeWeights ? new Map(this.edgeWeights) : null;
     m.mask = this.mask ? this.mask.slice() : null;
+    m.skin = this.skin ? { bones: this.skin.bones.slice(), weights: this.skin.weights.slice() } : null;
     return m;
   }
 
@@ -466,6 +474,7 @@ export class Mesh {
     faceUV?: (number[] | null)[] | null; seams?: string[] | null;
     edgeWeights?: [string, number][] | null;
     mask?: number[] | null;
+    skin?: { bones: number[]; weights: number[] } | null;
   } {
     const positions: number[] = [];
     for (const p of this.positions) positions.push(p.x, p.y, p.z);
@@ -479,6 +488,7 @@ export class Mesh {
       seams: this.seams ? [...this.seams] : null,
       edgeWeights: this.edgeWeights ? [...this.edgeWeights] : null,
       mask: this.mask ? [...this.mask] : null,
+      skin: this.skin ? { bones: [...this.skin.bones], weights: [...this.skin.weights] } : null,
     };
   }
 
@@ -494,6 +504,9 @@ export class Mesh {
     m.seams = d.seams && d.seams.length ? new Set(d.seams) : null;
     m.edgeWeights = d.edgeWeights && d.edgeWeights.length ? new Map(d.edgeWeights) : null;
     m.mask = d.mask && d.mask.length ? Float32Array.from(d.mask) : null;
+    m.skin = d.skin
+      ? { bones: Int32Array.from(d.skin.bones), weights: Float32Array.from(d.skin.weights) }
+      : null;
     return m;
   }
 }

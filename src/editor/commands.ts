@@ -31,7 +31,7 @@ import { pruneSelection } from './selection';
 export interface Command {
   id: string;
   label: string;
-  category: 'File' | 'Edit' | 'Add' | 'Object' | 'Mesh' | 'Select' | 'View';
+  category: 'File' | 'Edit' | 'Add' | 'Object' | 'Mesh' | 'Rig' | 'Select' | 'View';
   shortcut?: string;
   /** Which mode the command applies to; omitted means every mode. */
   mode?: EditorMode;
@@ -170,6 +170,36 @@ export const COMMANDS: Command[] = [
   { id: 'add.light.area', label: 'Area Light', category: 'Add', mode: 'object', run: (ed) => ed.addLight('area') },
   { id: 'add.camera', label: 'Camera', category: 'Add', mode: 'object', run: (ed) => ed.addCamera() },
   { id: 'add.empty', label: 'Empty', category: 'Add', mode: 'object', run: (ed) => ed.addEmpty() },
+  { id: 'add.armature', label: 'Armature', category: 'Add', mode: 'object', run: (ed) => ed.addArmature() },
+
+  // ---------------------------------------------------------------- Rigging
+  {
+    id: 'rig.extrudeBone', label: 'Add Bone', category: 'Rig', mode: 'object',
+    run: (ed) => ed.extrudeBone(),
+    enabled: (ed) => !!ed.activeArmature,
+  },
+  {
+    id: 'rig.bind', label: 'Bind to Armature (automatic weights)', category: 'Rig', mode: 'object',
+    run: (ed) => ed.bindToArmature(),
+    enabled: (ed) => !!ed.activeArmature && ed.scene.selection.size >= 2,
+  },
+  {
+    id: 'rig.clearPose', label: 'Clear Pose', category: 'Rig', mode: 'object',
+    run: (ed) => ed.clearArmaturePose(),
+    enabled: (ed) => !!ed.activeArmature,
+  },
+  {
+    id: 'rig.nextBone', label: 'Next Bone', category: 'Rig',
+    run: (ed) => {
+      const rig = ed.activeArmature;
+      if (!rig?.armature || rig.armature.bones.length === 0) return;
+      ed.activeBone = (ed.activeBone + 1) % rig.armature.bones.length;
+      ed.setStatus(`Active bone: ${rig.armature.bones[ed.activeBone].name}`);
+      ed.emit('change');
+      ed.requestRender();
+    },
+    enabled: (ed) => !!ed.activeArmature,
+  },
 
   // ----------------------------------------------------------------- Select
   { id: 'select.all', label: 'Select All', category: 'Select', shortcut: 'A', run: (ed) => ed.selectAll() },

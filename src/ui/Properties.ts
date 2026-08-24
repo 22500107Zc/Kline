@@ -207,6 +207,73 @@ export class Properties {
       ]));
     }
 
+    if (obj.type === 'armature' && obj.armature) {
+      const arm = obj.armature;
+      const rows: HTMLElement[] = [];
+      arm.bones.forEach((bone, i) => {
+        const active = i === ed.activeBone;
+        rows.push(h('div', { class: `slot${active ? ' active' : ''}` }, [
+          h('button', {
+            class: 'outliner-name', text: bone.name,
+            title: bone.parent >= 0 ? `Child of ${arm.bones[bone.parent]?.name ?? '?'}` : 'Root bone',
+            on: {
+              click: () => {
+                ed.activeBone = i;
+                ed.emit('change');
+                ed.requestRender();
+              },
+            },
+          }),
+          h('span', { class: 'outliner-badge', text: bone.parent >= 0 ? `→${bone.parent}` : 'root' }),
+        ]));
+      });
+      this.body.appendChild(this.section('Bones', [
+        h('div', { class: 'slot-list' }, rows),
+        h('div', { class: 'btn-row' }, [
+          h('button', { class: 'btn', text: 'Add bone', on: { click: () => runCommand(ed, 'rig.extrudeBone') } }),
+          h('button', { class: 'btn', text: 'Clear pose', on: { click: () => runCommand(ed, 'rig.clearPose') } }),
+        ]),
+        h('p', {
+          class: 'dim small',
+          text: 'Select the armature and the meshes, then Rig → Bind to give them automatic weights.',
+        }),
+      ]));
+
+      const bone = arm.bones[Math.min(ed.activeBone, arm.bones.length - 1)];
+      if (bone) {
+        const vec = (
+          label: string, get: () => [number, number, number], set: (v: [number, number, number]) => void,
+          step: number,
+        ): HTMLElement => row(label, h('div', { class: 'nf-group' }, (['x', 'y', 'z'] as const).map((axis, a) =>
+          numberField({
+            label: axis, value: get()[a], step, precision: 3,
+            onChange: (v) => {
+              ed.beginUndo(`Bone ${label.toLowerCase()}`);
+              const next = [...get()] as [number, number, number];
+              next[a] = v;
+              set(next);
+              this.repose(ed, obj.id);
+            },
+          }))));
+        this.body.appendChild(this.section(`Bone — ${bone.name}`, [
+          vec('Head', () => bone.head, (v) => { bone.head = v; }, 0.05),
+          vec('Tail', () => bone.tail, (v) => { bone.tail = v; }, 0.05),
+          vec('Pose rotation', () => bone.rotation.map((r) => r * RAD2DEG) as [number, number, number],
+            (v) => { bone.rotation = v.map((d) => d * DEG2RAD) as [number, number, number]; }, 5),
+          vec('Pose offset', () => bone.position, (v) => { bone.position = v; }, 0.05),
+          row('Envelope', numberField({
+            label: '', value: bone.envelope, step: 0.05, min: 0, precision: 3,
+            onChange: (v) => {
+              ed.beginUndo('Bone envelope');
+              bone.envelope = v;
+              this.repose(ed, obj.id);
+            },
+          })),
+          h('p', { class: 'dim small', text: 'Envelope 0 works it out from the bone length.' }),
+        ]));
+      }
+    }
+
     if (obj.type === 'camera' && obj.camera) {
       const cam = obj.camera;
       this.body.appendChild(this.section('Camera', [
@@ -237,6 +304,18 @@ export class Properties {
         }),
       ]));
     }
+  }
+
+  /** Re-evaluate anything bound to this rig, so the viewport follows the edit. */
+  private repose(ed: Editor, rigId: number): void {
+    for (const o of ed.scene.objects.values()) {
+      if (o.modifiers.some((m) => m.type === 'armature' && m.objectId === rigId)) {
+        o.invalidate();
+        ed.markGeometryDirty(o);
+      }
+    }
+    ed.requestRender();
+    ed.emit('change');
   }
 
   private colorInput(
