@@ -429,3 +429,26 @@ test('the signing hook leaves every other platform alone', async () => {
     });
   }
 });
+
+test('signing skips the universal halves and signs everything else', () => {
+  // Signing the two single-architecture builds that the universal app is
+  // merged from makes their signature files differ, and the merge demands
+  // byte-identical non-binary files — so it fails with "Expected all
+  // non-binary files to have identical SHAs". The merged app is signed
+  // instead, on the second call electron-builder makes for it.
+  const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+  const { isUniversalHalf } = createRequire(import.meta.url)(
+    join(root, BUILD.afterPack as string),
+  ) as { isUniversalHalf: (dir: string) => boolean };
+
+  // The halves, named by electron-builder as `${appOutDir}-${Arch[arch]}-temp`.
+  assert.equal(isUniversalHalf('release/mac-universal-x64-temp'), true);
+  assert.equal(isUniversalHalf('release/mac-universal-arm64-temp'), true);
+
+  // Everything that ends up in front of a user has to be signed: the merged
+  // universal app behind the pkg, and the standalone builds behind the dmg
+  // and zip for each architecture.
+  assert.equal(isUniversalHalf('release/mac-universal'), false);
+  assert.equal(isUniversalHalf('release/mac'), false);
+  assert.equal(isUniversalHalf('release/mac-arm64'), false);
+});

@@ -19,16 +19,37 @@
  * macOS still warns that it is from an unidentified developer, and the user
  * still clears that once with right-click -> Open. It only makes the app
  * *runnable*, which is the part that was missing.
- *
- * Intel builds tolerate being unsigned, so this changes nothing for them.
  */
 
 const { execFileSync } = require('node:child_process');
 const { existsSync } = require('node:fs');
 const { join } = require('node:path');
 
+/**
+ * The universal build is merged from two single-architecture builds, and the
+ * merge requires every non-binary file in them to be byte-identical. A
+ * signature is not identical across architectures, so signing the halves makes
+ * the merge fail outright:
+ *
+ *   Expected all non-binary files to have identical SHAs when creating a
+ *   universal build but "…/_CodeSignature/CodeResources" did not
+ *
+ * The halves are therefore left alone and the merged app is signed instead —
+ * electron-builder calls this hook a second time for it, with the comment
+ * "give users a final opportunity to perform things on the combined universal
+ * package before signing". Those temporary halves are the only outputs that
+ * get skipped; the standalone arm64 and x64 apps behind the dmg and zip are
+ * signed normally.
+ *
+ * The naming is electron-builder's own: `${appOutDir}-${Arch[arch]}-temp`.
+ */
+function isUniversalHalf(appOutDir) {
+  return /-(?:x64|arm64)-temp$/.test(appOutDir);
+}
+
 exports.default = async function adhocSign(context) {
   if (context.electronPlatformName !== 'darwin') return;
+  if (isUniversalHalf(context.appOutDir)) return;
 
   const appName = `${context.packager.appInfo.productFilename}.app`;
   const appPath = join(context.appOutDir, appName);
@@ -45,5 +66,7 @@ exports.default = async function adhocSign(context) {
   // Signing that silently produced nothing is the failure this whole file
   // exists to prevent, so it is checked rather than assumed.
   execFileSync('codesign', ['--verify', '--deep', appPath], { stdio: 'inherit' });
-  console.log(`  • ad-hoc signed  ${appName} (${context.arch === 1 ? 'x64' : 'arm64'})`);
+  console.log(`  • ad-hoc signed  ${appName}  ${context.appOutDir}`);
 };
+
+exports.isUniversalHalf = isUniversalHalf;
