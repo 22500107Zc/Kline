@@ -108,3 +108,32 @@ test('preference defaults are sane', () => {
   assert.ok(p.renderSamples > 0 && p.renderWidth > 0 && p.renderHeight > 0);
   assert.ok(p.snapIncrement > 0);
 });
+
+test('the panel windows are reachable by menu, palette and key, not only by key', () => {
+  // Both spent a release openable only through an undocumented chord: no menu
+  // entry, no palette hit, nothing in the shortcut sheet. Routing them through
+  // commands is what puts them on all three at once, so that is what is
+  // asserted here rather than the key handler alone.
+  for (const [id, chord] of [['view.uvEditor', 'ctrl+u'], ['view.graphEditor', 'ctrl+g']]) {
+    const command = COMMANDS_BY_ID.get(id);
+    assert.ok(command, `${id} is not a command, so nothing can list it`);
+    assert.equal(command.category, 'View', `${id} would not appear under any menu`);
+    assert.ok(command.shortcut, `${id} has no shortcut to display`);
+    assert.equal(lookupKey(chord, 'object'), id, `${chord} does not reach ${id}`);
+  }
+});
+
+test('every command a menu would show can actually be run', () => {
+  // A command with no `run` is a dead entry in the menu and the palette.
+  for (const command of COMMANDS) {
+    assert.equal(typeof command.run, 'function', `${command.id} has no run`);
+    assert.ok(command.label, `${command.id} has no label`);
+  }
+  // And every key binding points at a command that exists.
+  for (const binding of KEYMAP) {
+    assert.ok(
+      COMMANDS_BY_ID.has(binding.command),
+      `${binding.chord} is bound to ${binding.command}, which does not exist`,
+    );
+  }
+});

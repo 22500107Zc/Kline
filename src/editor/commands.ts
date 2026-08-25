@@ -588,6 +588,14 @@ export const COMMANDS: Command[] = [
     },
   },
   {
+    id: 'view.uvEditor', label: 'UV Editor', category: 'View', shortcut: 'Ctrl+U',
+    run: (ed) => ed.panels.toggleUV?.(),
+  },
+  {
+    id: 'view.graphEditor', label: 'Graph Editor', category: 'View', shortcut: 'Ctrl+G',
+    run: (ed) => ed.panels.toggleGraph?.(),
+  },
+  {
     id: 'view.grid', label: 'Toggle Grid', category: 'View',
     run: (ed) => {
       ed.options.showGrid = !ed.options.showGrid;
@@ -1320,6 +1328,8 @@ export const KEYMAP: KeyBinding[] = [
   { chord: 's', command: 'transform.scale' },
   { chord: 'a', command: 'select.all' },
   { chord: 'alt+a', command: 'select.none' },
+  { chord: 'ctrl+u', command: 'view.uvEditor' },
+  { chord: 'ctrl+g', command: 'view.graphEditor' },
   { chord: 'ctrl+i', command: 'select.invert' },
   { chord: 'ctrl+l', command: 'select.linked', mode: 'edit' },
   { chord: '1', command: 'select.vertex', mode: 'edit' },

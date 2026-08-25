@@ -245,3 +245,41 @@ test('asking for circles still gets circles', () => {
   const p = plan('3 circles in a row');
   assert.ok(p.parts.every((q) => q.shape === 'circle'));
 });
+
+test('a spiral staircase spirals, and a plain one does not', () => {
+  const straight = plan('a staircase');
+  const treads = (p: { parts: { name: string }[] }) => p.parts.filter((q) => q.name.startsWith('Step'));
+
+  // A straight flight climbs along one axis and never leaves it.
+  const flight = treads(straight);
+  assert.ok(flight.length >= 2, 'a staircase should have steps');
+  assert.ok(
+    flight.every((s) => Math.abs(s.position[0]) < 1e-9),
+    'a plain staircase should not wander off its axis',
+  );
+
+  const spiral = plan('a spiral staircase');
+  const wound = treads(spiral);
+  assert.ok(wound.length >= 2, 'a spiral staircase should have steps');
+
+  // Every tread is the same distance from the axis, at a different angle, and
+  // higher than the one before: that is what makes it a helix rather than a
+  // ring or a flight.
+  const radii = wound.map((s) => Math.hypot(s.position[0], s.position[1]));
+  assert.ok(Math.max(...radii) - Math.min(...radii) < 1e-6, 'treads should share one radius');
+  assert.ok(radii[0] > 0.1, 'treads should stand off the axis');
+
+  const angles = wound.map((s) => Math.atan2(s.position[1], s.position[0]));
+  assert.ok(new Set(angles.map((a) => a.toFixed(4))).size === angles.length, 'every tread turns further');
+  for (let i = 1; i < wound.length; i++) {
+    assert.ok(wound[i].position[2] > wound[i - 1].position[2], `tread ${i} does not rise`);
+  }
+  // And each one is turned to face the way it points, not left axis-aligned.
+  assert.ok(
+    wound.some((s) => Math.abs((s.rotation ?? [0, 0, 0])[2]) > 1),
+    'treads should be rotated about the axis',
+  );
+
+  // The count still comes from the prompt.
+  assert.equal(treads(plan('a spiral staircase with 20 steps')).length, 20);
+});

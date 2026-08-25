@@ -108,6 +108,17 @@ export class Editor {
   private listeners = new Map<EditorEvent, Set<() => void>>();
   private needsRender = true;
   private running = false;
+  /**
+   * Windows the shell owns that commands need to open.
+   *
+   * The UV and graph editors are DOM, so the editor cannot hold them — but a
+   * command is the one thing that reaches the menu, the palette and the
+   * shortcut list at once, and both of them spent their first release
+   * reachable only by a key combination nothing mentioned. The shell fills
+   * this in at startup; a command calls through it and does not care what is
+   * on the other side.
+   */
+  panels: { toggleUV?: () => void; toggleGraph?: () => void } = {};
   private pointer = { x: 0, y: 0, down: false, button: -1, startX: 0, startY: 0, dragging: false };
   /**
    * Set when a press has already been spent on something other than picking.
@@ -155,21 +166,33 @@ export class Editor {
     this.running = true;
     const loop = (): void => {
       if (!this.running) return;
-      if (this.needsRender || this.renderer.resize()) {
-        this.needsRender = false;
-        this.renderer.render({
-          scene: this.scene,
-          camera: this.camera,
-          // The rig tools highlight the bone they act on; the renderer only
-          // needs to know which one.
-          options: { ...this.options, activeBone: this.activeBone },
-          edit: this.editOverlay(),
-          lines: this.overlayLines(),
-        });
-      }
+      if (this.needsRender || this.renderer.resize()) this.renderNow();
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
+  }
+
+  /**
+   * Draw one frame right now, outside the animation loop.
+   *
+   * Worth being a method rather than a closure inside `start`: a WebGL
+   * drawing buffer is only readable until the browser composites it, so
+   * anything that wants to look at the pixels it just produced — a test
+   * asserting that a shadow actually landed, a thumbnail — has to draw and
+   * read within one task. There was no way to ask for that before, which is
+   * a large part of why a renderer bug could sit unnoticed.
+   */
+  renderNow(): void {
+    this.needsRender = false;
+    this.renderer.render({
+      scene: this.scene,
+      camera: this.camera,
+      // The rig tools highlight the bone they act on; the renderer only
+      // needs to know which one.
+      options: { ...this.options, activeBone: this.activeBone },
+      edit: this.editOverlay(),
+      lines: this.overlayLines(),
+    });
   }
 
   stop(): void {

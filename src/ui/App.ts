@@ -59,6 +59,12 @@ export class App {
     this.renderWindow = new RenderWindow(this.editor);
     this.uvEditor = new UVEditor(this.editor);
     this.graphEditor = new GraphEditor(this.editor);
+    // Registered rather than key-handled here, so both windows reach the View
+    // menu, the command palette and the shortcut list through one definition.
+    this.editor.panels = {
+      toggleUV: () => this.uvEditor.toggle(),
+      toggleGraph: () => this.graphEditor.toggle(),
+    };
     const sculptPanel = new SculptPanel(this.editor);
     const timeline = new Timeline(this.editor);
     const viewport = h('main', { class: 'viewport' }, [
@@ -152,16 +158,6 @@ export class App {
       if (e.key === '?' || (e.shiftKey && e.key === '/')) {
         e.preventDefault();
         this.toggleShortcuts();
-        return;
-      }
-      if (meta && e.key.toLowerCase() === 'u') {
-        e.preventDefault();
-        this.uvEditor.toggle();
-        return;
-      }
-      if (meta && e.key.toLowerCase() === 'g') {
-        e.preventDefault();
-        this.graphEditor.toggle();
         return;
       }
       if (e.key === 'Escape') {

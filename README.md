@@ -488,8 +488,11 @@ closed solid instead.
 ```bash
 npm run dev         # Vite dev server with HMR
 npm run typecheck   # tsc --noEmit, strict
-npm test            # 187 unit tests over the kernel, operators, UVs, sculpting,
+npm test            # everything below
+npm run test:unit   # 339 unit tests over the kernel, operators, UVs, sculpting,
                     # animation, the path tracer, the scene and IO
+npm run test:app    # 9 tests in a real browser: shadows land, overlays draw,
+                    # clicks and modals behave. Skipped if no Chromium is found.
 npm run build       # typecheck + production bundle into dist/
 npm run app         # run the desktop shell against the built bundle
 npm run dist        # package installers for the current OS into release/
@@ -502,6 +505,16 @@ invariants (a cube stays a closed manifold through extrude and loop cut,
 Catmull–Clark converges toward a sphere while pinning open boundaries, solidify
 produces watertight output) rather than snapshotting numbers, so they catch
 genuine topology regressions.
+
+The browser suite covers the part no unit test can reach. Three bugs shipped
+through that gap — a shadow pass that silently drew nothing, a click that threw
+away the selection it had just confirmed, an axis whose labels ran together —
+and each was found by looking at the screen rather than by running the suite.
+So `tests/app.test.mjs` renders real frames under SwiftShader and reads the
+pixels back, and drives real pointer and key input. Every test in it was
+written against a failure that actually reached a user, and each was checked by
+putting the bug back and watching it go red. It needs Playwright and a Chromium
+build; without either it skips with a reason and the rest still runs.
 
 ## Not there yet
 

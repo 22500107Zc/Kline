@@ -18,6 +18,22 @@ export interface RecipeOptions {
   color?: string;
   /** How many, for recipes that repeat (steps, floors, boxes). */
   count?: number;
+  /**
+   * The normalised prompt, for adjectives a recipe alone can interpret.
+   *
+   * Scale, colour and count mean the same thing to everything, so they get
+   * their own fields. "Spiral" only means something to a staircase. Rather
+   * than grow this interface a field per adjective per recipe, a recipe that
+   * cares can read the words it was asked with.
+   */
+  words?: string;
+}
+
+/** True when the prompt used any of these words. */
+export function said(o: RecipeOptions, ...terms: string[]): boolean {
+  const text = o.words;
+  if (!text) return false;
+  return terms.some((t) => new RegExp(`\\b${t}\\b`).test(text));
 }
 
 type Recipe = (o: RecipeOptions) => BuildPart[];
@@ -168,12 +184,54 @@ function tower(o: RecipeOptions): BuildPart[] {
 function stairs(o: RecipeOptions): BuildPart[] {
   const c = o.color ?? '#9aa0a6';
   const steps = Math.max(2, Math.min(40, o.count ?? 8));
+  if (said(o, 'spiral', 'spirals', 'helical', 'helix', 'winding', 'circular', 'curved')) {
+    return spiralStairs(steps, c);
+  }
   const rise = 0.18;
   const run = 0.28;
   const parts: BuildPart[] = [];
   for (let i = 0; i < steps; i++) {
     const h = rise * (i + 1);
     parts.push(part('cube', `Step ${i + 1}`, [0, i * run, h / 2], [1.2, run, h], c));
+  }
+  return parts;
+}
+
+/**
+ * Treads winding around a central post.
+ *
+ * A twelfth of a turn per step is roughly what a real spiral stair does: it
+ * keeps the going at the walking line — about two thirds of the way out —
+ * close to the going of an ordinary flight, which is what makes one climbable
+ * rather than merely spiral.
+ */
+function spiralStairs(steps: number, c: string): BuildPart[] {
+  const rise = 0.21;
+  const radius = 1.15;
+  const tread = 0.09;
+  const perStep = (Math.PI * 2) / 12;
+  const height = rise * (steps + 1);
+  const parts: BuildPart[] = [
+    part('cylinder', 'Newel', [0, 0, height / 2], [0.17, 0.17, height], c, { smooth: true }),
+  ];
+  for (let i = 0; i < steps; i++) {
+    const a = i * perStep;
+    const z = rise * (i + 1);
+    const degrees = (a * 180) / Math.PI;
+    // The tread runs outward from the post, so it is half a radius out and
+    // turned to face along its own angle.
+    parts.push(part(
+      'cube', `Step ${i + 1}`,
+      [Math.cos(a) * radius * 0.5, Math.sin(a) * radius * 0.5, z - tread / 2],
+      [radius, 0.44, tread], c, { rotation: [0, 0, degrees] },
+    ));
+    // A baluster at the outer edge of each tread: without one the treads read
+    // as a stack of loose slabs rather than a stair.
+    parts.push(part(
+      'cylinder', `Baluster ${i + 1}`,
+      [Math.cos(a) * (radius - 0.07), Math.sin(a) * (radius - 0.07), z + 0.4],
+      [0.05, 0.05, 0.8], c, { smooth: true },
+    ));
   }
   return parts;
 }

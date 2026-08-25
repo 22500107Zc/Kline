@@ -159,7 +159,7 @@ export function interpret(prompt: string): InterpretResult {
   const color = findColor(text);
   const count = findCount(text);
   const { scale, stretch } = findScale(text);
-  const options: RecipeOptions = { scale, stretch, color, count };
+  const options: RecipeOptions = { scale, stretch, color, count, words: text };
 
   // A recognised noun wins: "five tall towers" is five towers, not five cubes.
   for (const recipe of RECIPE_KEYS) {

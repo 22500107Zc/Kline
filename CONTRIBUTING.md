@@ -19,7 +19,8 @@ pull request.
 
 ```bash
 npm run typecheck   # strict TypeScript, no implicit any, no unused locals
-npm test            # node:test over the kernel, scene, modifiers and IO
+npm test            # node:test over the kernel, scene, modifiers and IO, then
+                    # the same app in a real browser (skipped without Chromium)
 npm run build       # make sure the production bundle still builds
 npm run app         # if you touched electron/ or src/desktop.ts
 ```
