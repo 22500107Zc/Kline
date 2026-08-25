@@ -319,7 +319,10 @@ test('a spiral staircase spirals, and a plain one does not', () => {
  * out with no macOS installer on it, which is the platform the app is
  * developed on.
  */
-test('the packaging config cannot produce a build that fails only on macOS', () => {
+test('the packaging config cannot produce a build that fails on one platform only', () => {
+  // macOS: electron-builder hard-links each association's icon into the app
+  // bundle under that icon's basename, so two associations sharing an icon
+  // link the same destination twice and the whole job dies with EEXIST.
   const seen = new Set<string>();
   for (const fa of BUILD.fileAssociations ?? []) {
     if (!fa.icon) continue;
@@ -327,9 +330,27 @@ test('the packaging config cannot produce a build that fails only on macOS', () 
     assert.ok(
       !seen.has(basename),
       `two file associations both link "${basename}" into the macOS bundle, which fails ` +
-      'with EEXIST — give one association every extension it covers, or separate icon files',
+      'with EEXIST — give each association its own icon file',
     );
     seen.add(basename);
+  }
+
+  // Linux: the obvious fix for the above — one association listing both
+  // extensions — is rejected by the Linux packager, which parses `ext` as a
+  // bare string and fails on an array:
+  //
+  //   appimage.FileAssociation.Ext: ReadString: expects " or n, but found [
+  //
+  // The two rules point opposite ways, which is how one release went out
+  // missing macOS and the next would have gone out missing Linux. Together
+  // they only leave one shape: one association per extension, each with its
+  // own icon file.
+  for (const fa of BUILD.fileAssociations ?? []) {
+    assert.equal(
+      typeof fa.ext, 'string',
+      `file association ext ${JSON.stringify(fa.ext)} must be a single string — ` +
+      'the Linux packager cannot read an array',
+    );
   }
 });
 

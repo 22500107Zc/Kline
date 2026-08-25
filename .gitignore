@@ -6,3 +6,4 @@ dist/
 .test-build/
 release/
 .scratch/
+release/
