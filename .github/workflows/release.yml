@@ -19,13 +19,13 @@ jobs:
         include:
           - os: macos-latest
             target: --mac
-            artifact: kiln-macos
+            artifact: kline-macos
           - os: windows-latest
             target: --win
-            artifact: kiln-windows
+            artifact: kline-windows
           - os: ubuntu-latest
             target: --linux
-            artifact: kiln-linux
+            artifact: kline-linux
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -91,12 +91,12 @@ jobs:
       - uses: softprops/action-gh-release@v2
         if: steps.gate.outputs.publish == 'true'
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'kiln-0.1.0' }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('kline-{0}', github.sha) }}
           # Without this the tag is cut against the default branch, so the
           # auto-attached "Source code" zip contains that branch, not the code
           # these installers were actually built from.
           target_commitish: ${{ github.sha }}
-          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Kiln 0.1.0' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && format('Kline {0}', github.ref_name) || 'Kline (unreleased build)' }}
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
           files: dist-assets/*
           fail_on_unmatched_files: true
@@ -105,21 +105,26 @@ jobs:
             The files you want are listed above it.
 
             ### macOS — start here
-            **`Kiln-0.1.0-universal.pkg`** — one file, works on both Apple Silicon
-            and Intel. Double-click it and the installer puts **Kiln.app** into
+            The **`.pkg`** is one file and works on both Apple Silicon and
+            Intel. Double-click it and the installer puts **Kline.app** into
             your Applications folder. Nothing to unzip, nothing to drag.
 
             These builds are unsigned, so macOS refuses the very first
             double-click. Right-click the `.pkg` -> **Open** -> **Open** and it
-            installs. After that Kiln launches from Applications or Spotlight like
-            anything else.
+            installs. After that Kline launches from Applications or Spotlight
+            like anything else.
 
-            The `.dmg` and `.zip` files are the same app in other wrappers, if you
-            would rather not run an installer.
+            The `.dmg` and `.zip` files are the same app in other wrappers, if
+            you would rather not run an installer.
 
             ### Windows
-            **`Kiln Setup 0.1.0.exe`** to install, or **`Kiln 0.1.0.exe`** to run
-            without installing. SmartScreen: **More info** -> **Run anyway**, once.
+            **`Kline Setup ....exe`** to install, or the plain **`Kline ....exe`**
+            to run without installing. SmartScreen: **More info** -> **Run
+            anyway**, once.
 
             ### Linux
-            **`Kiln-0.1.0.AppImage`** (`chmod +x` it first) or **`kiln_0.1.0_amd64.deb`**.
+            The **`.AppImage`** (`chmod +x` it first) or the **`.deb`**.
+
+            ### Scene files
+            Kline saves `.kline` files, and still opens the `.kiln` files
+            written before the rename.
