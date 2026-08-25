@@ -129,6 +129,52 @@ export class DynamicBuffer {
   }
 }
 
+/** An index buffer, kept alongside its vertex buffer. */
+export class IndexBuffer {
+  readonly buffer: WebGLBuffer;
+  private capacity = 0;
+  count = 0;
+
+  constructor(private gl: WebGL2RenderingContext) {
+    const b = gl.createBuffer();
+    if (!b) throw new Error('failed to create index buffer');
+    this.buffer = b;
+  }
+
+  upload(data: Uint32Array): void {
+    const gl = this.gl;
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.buffer);
+    if (data.byteLength > this.capacity) {
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+      this.capacity = data.byteLength;
+    } else {
+      gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, data);
+    }
+    this.count = data.length;
+  }
+
+  dispose(): void {
+    this.gl.deleteBuffer(this.buffer);
+  }
+}
+
+/**
+ * Attribute arrays that are currently on, per context.
+ *
+ * Enabling an attribute array is context state, not program state — it
+ * outlives the program that turned it on. A pass with fewer inputs than the
+ * last one therefore inherits its leftovers, and the moment one of those
+ * leftovers points at a buffer that has since been deleted, WebGL rejects
+ * every draw with INVALID_OPERATION. Silently: the pass simply produces
+ * nothing. Tracking what is on costs one Set and removes a whole class of
+ * bug that is close to undiagnosable from the picture alone.
+ */
+const enabledAttribs = new WeakMap<WebGL2RenderingContext, Set<number>>();
+
+/**
+ * Point the program's attributes at the bound buffer, and turn off any array
+ * left enabled by an earlier pass.
+ */
 export function setupAttribs(
   gl: WebGL2RenderingContext,
   program: Program,
@@ -136,12 +182,31 @@ export function setupAttribs(
 ): void {
   const stride = layout.reduce((s, a) => s + a.size, 0) * 4;
   let offset = 0;
+  const live = new Set<number>();
   for (const a of layout) {
     const loc = program.attrib(a.name);
     if (loc >= 0) {
+      live.add(loc);
       gl.enableVertexAttribArray(loc);
       gl.vertexAttribPointer(loc, a.size, gl.FLOAT, false, stride, offset);
     }
     offset += a.size * 4;
   }
+  applyAttribs(gl, live);
+}
+
+/**
+ * Record `live` as the enabled set and disable everything that was on before
+ * and is not in it.
+ *
+ * Exported because not every pass has a named layout — the grid is a bare
+ * fullscreen triangle — and a pass that sets its attributes by hand still has
+ * to leave the context in a state the next pass can trust.
+ */
+export function applyAttribs(gl: WebGL2RenderingContext, live: Set<number>): void {
+  const previous = enabledAttribs.get(gl);
+  if (previous) {
+    for (const loc of previous) if (!live.has(loc)) gl.disableVertexAttribArray(loc);
+  }
+  enabledAttribs.set(gl, new Set(live));
 }

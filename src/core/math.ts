@@ -122,6 +122,135 @@ export function vec3(x = 0, y = 0, z = 0): Vec3 {
   return new Vec3(x, y, z);
 }
 
+/**
+ * Unit quaternion.
+ *
+ * Euler angles are the right thing in the transform panel — people think in
+ * "rotate 30 degrees about Z" — and the wrong thing everywhere a rotation has
+ * to be *integrated*. Adding angular velocity to three angles is not rotation:
+ * the axes are not independent, so the result depends on the order they are
+ * applied in and drifts further from the truth every step. A quaternion has
+ * neither problem, so anything that spins over time uses one and converts back
+ * at the edges.
+ */
+export class Quat {
+  constructor(public x = 0, public y = 0, public z = 0, public w = 1) {}
+
+  static identity(): Quat {
+    return new Quat(0, 0, 0, 1);
+  }
+
+  static fromAxisAngle(axis: Vec3, angle: number): Quat {
+    const n = axis.normalized();
+    const h = angle * 0.5;
+    const s = Math.sin(h);
+    return new Quat(n.x * s, n.y * s, n.z * s, Math.cos(h));
+  }
+
+  /**
+   * From intrinsic XYZ euler, matching `Mat4.rotationEuler` exactly.
+   *
+   * Composed rather than written as a closed form. The closed form is three
+   * lines shorter and one sign error away from silently disagreeing with the
+   * matrix everything else uses, which is the kind of bug that surfaces as a
+   * baked animation being subtly wrong rather than as anything failing.
+   */
+  static fromEuler(e: Vec3): Quat {
+    const qx = Quat.fromAxisAngle(new Vec3(1, 0, 0), e.x);
+    const qy = Quat.fromAxisAngle(new Vec3(0, 1, 0), e.y);
+    const qz = Quat.fromAxisAngle(new Vec3(0, 0, 1), e.z);
+    // Z last, matching Rz · Ry · Rx.
+    return qz.multiply(qy).multiply(qx);
+  }
+
+  clone(): Quat {
+    return new Quat(this.x, this.y, this.z, this.w);
+  }
+
+  /** this * o — apply `o` first. */
+  multiply(o: Quat): Quat {
+    return new Quat(
+      this.w * o.x + this.x * o.w + this.y * o.z - this.z * o.y,
+      this.w * o.y - this.x * o.z + this.y * o.w + this.z * o.x,
+      this.w * o.z + this.x * o.y - this.y * o.x + this.z * o.w,
+      this.w * o.w - this.x * o.x - this.y * o.y - this.z * o.z,
+    );
+  }
+
+  normalized(): Quat {
+    const l = Math.hypot(this.x, this.y, this.z, this.w);
+    // A zero quaternion is not a rotation; identity is the only safe answer.
+    if (l < 1e-12) return Quat.identity();
+    return new Quat(this.x / l, this.y / l, this.z / l, this.w / l);
+  }
+
+  conjugate(): Quat {
+    return new Quat(-this.x, -this.y, -this.z, this.w);
+  }
+
+  rotate(v: Vec3): Vec3 {
+    // v + 2w(q × v) + 2(q × (q × v)), the standard shortcut that avoids
+    // building a matrix for a single vector.
+    const q = new Vec3(this.x, this.y, this.z);
+    const t = q.cross(v).scale(2);
+    return v.add(t.scale(this.w)).add(q.cross(t));
+  }
+
+  /**
+   * Integrate an angular velocity for `dt`.
+   *
+   * The derivative of orientation is ½ ω q, so a step is that scaled by dt and
+   * added — first order, then renormalised, because the addition takes the
+   * quaternion very slightly off the unit sphere every time and the error
+   * compounds into a visible shear if it is left there.
+   */
+  integrate(omega: Vec3, dt: number): Quat {
+    const wq = new Quat(omega.x, omega.y, omega.z, 0);
+    const d = wq.multiply(this);
+    return new Quat(
+      this.x + d.x * 0.5 * dt,
+      this.y + d.y * 0.5 * dt,
+      this.z + d.z * 0.5 * dt,
+      this.w + d.w * 0.5 * dt,
+    ).normalized();
+  }
+
+  /** The three axes of the frame this quaternion describes. */
+  basis(): [Vec3, Vec3, Vec3] {
+    return [
+      this.rotate(new Vec3(1, 0, 0)),
+      this.rotate(new Vec3(0, 1, 0)),
+      this.rotate(new Vec3(0, 0, 1)),
+    ];
+  }
+
+  /**
+   * Back to intrinsic XYZ euler, so a baked rotation can go into the same
+   * three numbers the transform panel edits.
+   *
+   * Read off the rotated basis vectors, which are the columns of the matrix
+   * `fromEuler` builds, so the two are inverses by construction.
+   */
+  toEuler(): Vec3 {
+    const [c0, c1, c2] = this.basis();
+    // c0.z is -sin(β), so a magnitude near one means the Y rotation is a
+    // quarter turn and the X and Z rotations have become the same rotation.
+    const sinBeta = clamp(-c0.z, -1, 1);
+    if (Math.abs(sinBeta) > 0.999999) {
+      const beta = (Math.PI / 2) * Math.sign(sinBeta);
+      // Put the whole of the degenerate pair on X and leave Z at zero, which
+      // is what keeps the result continuous as it passes through.
+      const alpha = sinBeta > 0 ? Math.atan2(c1.x, c1.y) : Math.atan2(-c1.x, c1.y);
+      return new Vec3(alpha, beta, 0);
+    }
+    return new Vec3(
+      Math.atan2(c1.z, c2.z),
+      Math.asin(sinBeta),
+      Math.atan2(c0.y, c0.x),
+    );
+  }
+}
+
 /** 4x4 matrix, column-major (m[col * 4 + row]) to match WebGL upload order. */
 export class Mat4 {
   m: Float32Array;

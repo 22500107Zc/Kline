@@ -3,8 +3,10 @@ import { Mesh } from '../mesh/Mesh';
 import { Scene, SceneObject } from '../scene/Scene';
 import { ViewportCamera } from '../scene/ViewportCamera';
 import { posedSegments } from '../anim/armature';
-import { DynamicBuffer, Program, setupAttribs } from './gl';
-import { buildPoints, buildSurface, buildWire } from './MeshBuffers';
+import { DynamicBuffer, IndexBuffer, Program, applyAttribs, setupAttribs } from './gl';
+import {
+  LINE_LAYOUT, POINT_LAYOUT, SURFACE_LAYOUT, buildPoints, buildSurface, buildWire,
+} from './MeshBuffers';
 import {
   GRID_FRAG, GRID_VERT, LINE_FRAG, LINE_VERT, MAX_LIGHTS, MAX_MATERIALS, MAX_TEXTURES,
   OUTLINE_FRAG, OUTLINE_VERT, POINT_FRAG, POINT_VERT, SHADOW_FRAG, SHADOW_SIZE, SHADOW_VERT,
@@ -75,6 +77,8 @@ export const THEME = {
 interface GeometryEntry {
   key: string;
   surface: DynamicBuffer;
+  /** Triangle indices into `surface`. */
+  surfaceIndex: IndexBuffer;
   wire: DynamicBuffer;
   points: DynamicBuffer;
 }
@@ -106,6 +110,9 @@ export class Renderer {
   height = 1;
   pixelRatio = 1;
   lastDrawCalls = 0;
+  /** Vertices and pre-deduplication corners of the last surface built. */
+  lastVertices = 0;
+  lastCorners = 0;
 
   constructor(private canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', {
@@ -158,6 +165,7 @@ export class Renderer {
       entry = {
         key: '',
         surface: new DynamicBuffer(this.gl),
+        surfaceIndex: new IndexBuffer(this.gl),
         wire: new DynamicBuffer(this.gl),
         points: new DynamicBuffer(this.gl),
       };
@@ -168,6 +176,9 @@ export class Renderer {
     const faceSel = editing && editing.selectMode === 'face' ? editing.faces : null;
     const surface = buildSurface(mesh, faceSel);
     entry.surface.upload(surface.data, surface.count);
+    entry.surfaceIndex.upload(surface.indices);
+    this.lastVertices = surface.count;
+    this.lastCorners = surface.corners;
 
     if (editing) {
       const wire = buildWire(mesh, editing.edges, THEME.wire, THEME.wireSelected);
@@ -187,6 +198,7 @@ export class Renderer {
     for (const [id, entry] of this.cache) {
       if (!scene.objects.has(id)) {
         entry.surface.dispose();
+        entry.surfaceIndex.dispose();
         entry.wire.dispose();
         entry.points.dispose();
         this.cache.delete(id);
@@ -311,11 +323,9 @@ export class Renderer {
     this.bindShadowMap(p);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, entry.surface.buffer);
-    setupAttribs(gl, p, [
-      { name: 'aPos', size: 3 }, { name: 'aNormal', size: 3 }, { name: 'aUV', size: 2 },
-      { name: 'aFlags', size: 1 }, { name: 'aMatId', size: 1 }, { name: 'aVColor', size: 3 },
-    ]);
-    gl.drawArrays(gl.TRIANGLES, 0, entry.surface.count);
+    setupAttribs(gl, p, SURFACE_LAYOUT);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, entry.surfaceIndex.buffer);
+    gl.drawElements(gl.TRIANGLES, entry.surfaceIndex.count, gl.UNSIGNED_INT, 0);
     this.lastDrawCalls++;
   }
 
@@ -398,11 +408,9 @@ export class Renderer {
       p.setFloat('uWidth', 0.0035);
       p.setVec3('uColor', ...(active ? THEME.outlineActive : THEME.outlineSelected));
       gl.bindBuffer(gl.ARRAY_BUFFER, entry.surface.buffer);
-      setupAttribs(gl, p, [
-        { name: 'aPos', size: 3 }, { name: 'aNormal', size: 3 },
-        { name: 'aFlags', size: 1 }, { name: 'aMatId', size: 1 }, { name: 'aVColor', size: 3 },
-      ]);
-      gl.drawArrays(gl.TRIANGLES, 0, entry.surface.count);
+      setupAttribs(gl, p, SURFACE_LAYOUT);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, entry.surfaceIndex.buffer);
+      gl.drawElements(gl.TRIANGLES, entry.surfaceIndex.count, gl.UNSIGNED_INT, 0);
       this.lastDrawCalls++;
     }
     gl.cullFace(gl.BACK);
@@ -436,6 +444,7 @@ export class Renderer {
       gl.enableVertexAttribArray(loc);
       gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
     }
+    applyAttribs(gl, loc >= 0 ? new Set([loc]) : new Set());
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.depthMask(true);
     gl.disable(gl.BLEND);
@@ -483,7 +492,7 @@ export class Renderer {
       p.setVec3('uColor', ...THEME.vertex);
       p.setVec3('uSelectColor', ...THEME.vertexSelected);
       gl.bindBuffer(gl.ARRAY_BUFFER, entry.points.buffer);
-      setupAttribs(gl, p, [{ name: 'aPos', size: 3 }, { name: 'aFlags', size: 1 }]);
+      setupAttribs(gl, p, POINT_LAYOUT);
       gl.drawArrays(gl.POINTS, 0, entry.points.count);
       this.lastDrawCalls++;
     }
@@ -504,7 +513,7 @@ export class Renderer {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer.buffer);
-    setupAttribs(gl, p, [{ name: 'aPos', size: 3 }, { name: 'aColor', size: 3 }]);
+    setupAttribs(gl, p, LINE_LAYOUT);
     gl.drawArrays(gl.LINES, 0, buffer.count);
     gl.disable(gl.BLEND);
     this.lastDrawCalls++;
@@ -783,11 +792,9 @@ export class Renderer {
       if (entry.surface.count === 0) continue;
       p.setMat4('uModel', d.model.m);
       gl.bindBuffer(gl.ARRAY_BUFFER, entry.surface.buffer);
-      setupAttribs(gl, p, [
-        { name: 'aPos', size: 3 }, { name: 'aNormal', size: 3 }, { name: 'aUV', size: 2 },
-        { name: 'aFlags', size: 1 }, { name: 'aMatId', size: 1 }, { name: 'aVColor', size: 3 },
-      ]);
-      gl.drawArrays(gl.TRIANGLES, 0, entry.surface.count);
+      setupAttribs(gl, p, SURFACE_LAYOUT);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, entry.surfaceIndex.buffer);
+      gl.drawElements(gl.TRIANGLES, entry.surfaceIndex.count, gl.UNSIGNED_INT, 0);
       this.lastDrawCalls++;
     }
 

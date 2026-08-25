@@ -1,7 +1,7 @@
-import { Vec3 } from '../core/math';
+import { Quat, Vec3, decomposeMatrix } from '../core/math';
 import { Scene } from '../scene/Scene';
 import { setKey } from '../anim/animation';
-import { PhysicsWorld, RigidBody, bodyForBounds, defaultWorld } from './rigidbody';
+import { PhysicsWorld, RigidBody, bodyForBounds, defaultWorld, refreshInertia } from './rigidbody';
 
 /**
  * Turning a simulation into animation.
@@ -24,10 +24,10 @@ export interface BakeResult {
 /**
  * Build a world from whatever in the scene has been marked as a body.
  *
- * Shapes come from world-space bounds rather than the geometry itself. A box
- * around a chair settles it on a floor correctly, and an exact hull would cost
- * far more than the difference is worth in an application where the point is
- * to get a plausible resting arrangement quickly.
+ * Shapes come from bounds rather than from the geometry itself. A box around a
+ * chair settles it on a floor correctly, and an exact hull would cost far more
+ * than the difference is worth in an application where the point is to get a
+ * plausible resting arrangement quickly.
  */
 export function worldFromScene(scene: Scene): PhysicsWorld {
   const world = new PhysicsWorld(defaultWorld());
@@ -37,23 +37,24 @@ export function worldFromScene(scene: Scene): PhysicsWorld {
     if (!geo || geo.positions.length === 0) continue;
     const local = geo.bounds();
     if (!local.valid) continue;
-    const m = obj.worldMatrix(scene);
-    let lo = new Vec3(Infinity, Infinity, Infinity);
-    let hi = new Vec3(-Infinity, -Infinity, -Infinity);
-    for (let i = 0; i < 8; i++) {
-      const p = m.transformPoint(new Vec3(
-        i & 1 ? local.max.x : local.min.x,
-        i & 2 ? local.max.y : local.min.y,
-        i & 4 ? local.max.z : local.min.z,
-      ));
-      lo = new Vec3(Math.min(lo.x, p.x), Math.min(lo.y, p.y), Math.min(lo.z, p.z));
-      hi = new Vec3(Math.max(hi.x, p.x), Math.max(hi.y, p.y), Math.max(hi.z, p.z));
-    }
+
+    // The body is oriented, so it is sized from the object's *local* bounds
+    // and given the object's rotation — measuring the axis-aligned extent of
+    // an already-rotated object would give a box bigger than the object and
+    // then rotate that too.
+    const world4 = obj.worldMatrix(scene);
+    const decomposed = decomposeMatrix(world4);
     const mass = obj.physics.kind === 'passive' ? 0 : Math.max(1e-3, obj.physics.mass);
-    const body = bodyForBounds(obj.id, lo, hi, obj.physics.shape, mass);
+    const body = bodyForBounds(
+      obj.id, local.min, local.max, obj.physics.shape, mass,
+      Quat.fromEuler(decomposed.rotation), decomposed.scale,
+    );
+    // `bodyForBounds` puts the body at the local centre; move that into world
+    // space through the same transform the object uses.
+    body.position = world4.transformPoint(local.min.add(local.max.sub(local.min).scale(0.5)));
     body.friction = obj.physics.friction;
     body.restitution = obj.physics.restitution;
-    body.rotation = obj.rotation.clone();
+    refreshInertia(body);
     world.add(body);
   }
   return world;
