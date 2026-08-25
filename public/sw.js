@@ -6,7 +6,7 @@
  * launching instantly while still picking up a rebuild on the next start.
  */
 
-const CACHE = 'kiln-shell-v1';
+const CACHE = 'kline-shell-v1';
 
 self.addEventListener('install', () => {
   self.skipWaiting();

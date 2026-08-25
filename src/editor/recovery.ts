@@ -16,10 +16,14 @@ import { SerializedScene } from '../scene/Scene';
  * where IndexedDB is missing or blocked.
  */
 
-const DB_NAME = 'kiln';
+const DB_NAME = 'kline';
+/** The database name before the application was renamed. */
+const LEGACY_DB_NAME = 'kiln';
 const DB_VERSION = 1;
 const STORE = 'recovery';
-const LS_KEY = 'kiln.autosave';
+const LS_KEY = 'kline.autosave';
+/** The localStorage fallback key before the rename. */
+const LEGACY_LS_KEY = 'kiln.autosave';
 
 export interface RecoverySlot {
   id: number;
@@ -73,10 +77,88 @@ function openDatabase(): Promise<IDBDatabase> {
   });
 }
 
+/**
+ * Anything left in the database from before the application was renamed.
+ *
+ * IndexedDB names are not aliases — a rename simply points at an empty
+ * database, and whatever was in the old one is still on disk and completely
+ * unreachable. That is somebody's unsaved work, so it is read once and copied
+ * across the first time the new database is opened.
+ *
+ * Best-effort throughout: an absent legacy database, a blocked open, or a
+ * browser that never had one all mean the same thing here, which is nothing
+ * to carry over.
+ */
+async function adoptLegacyRecovery(into: IDBDatabase): Promise<void> {
+  const existing = await new Promise<unknown[]>((resolve) => {
+    try {
+      const t = into.transaction(STORE, 'readonly');
+      const req = t.objectStore(STORE).getAll();
+      req.onsuccess = () => resolve(req.result ?? []);
+      req.onerror = () => resolve([]);
+    } catch {
+      resolve([]);
+    }
+  });
+  // Only ever into an empty store, so this cannot overwrite newer work.
+  if (existing.length > 0) return;
+
+  const legacy = await new Promise<IDBDatabase | null>((resolve) => {
+    let settled = false;
+    const done = (value: IDBDatabase | null): void => {
+      if (!settled) { settled = true; resolve(value); }
+    };
+    try {
+      const req = indexedDB.open(LEGACY_DB_NAME);
+      // Opening a database that does not exist creates an empty one; the
+      // upgrade callback firing is how we know there was nothing there.
+      req.onupgradeneeded = () => { req.transaction?.abort(); done(null); };
+      req.onsuccess = () => done(req.result);
+      req.onerror = () => done(null);
+      req.onblocked = () => done(null);
+      setTimeout(() => done(null), 2000);
+    } catch {
+      done(null);
+    }
+  });
+  if (!legacy) return;
+  try {
+    if (!legacy.objectStoreNames.contains(STORE)) return;
+    const records = await new Promise<StoredRecovery[]>((resolve) => {
+      try {
+        const t = legacy.transaction(STORE, 'readonly');
+        const req = t.objectStore(STORE).getAll();
+        req.onsuccess = () => resolve((req.result ?? []) as StoredRecovery[]);
+        req.onerror = () => resolve([]);
+      } catch {
+        resolve([]);
+      }
+    });
+    if (records.length === 0) return;
+    await new Promise<void>((resolve) => {
+      try {
+        const t = into.transaction(STORE, 'readwrite');
+        const store = t.objectStore(STORE);
+        for (const record of records) store.put(record);
+        t.oncomplete = () => resolve();
+        t.onerror = () => resolve();
+        t.onabort = () => resolve();
+      } catch {
+        resolve();
+      }
+    });
+  } finally {
+    legacy.close();
+  }
+}
+
 export function indexedDbBackend(): RecoveryBackend | null {
   if (typeof indexedDB === 'undefined') return null;
   let db: Promise<IDBDatabase> | null = null;
-  const handle = (): Promise<IDBDatabase> => (db ??= openDatabase());
+  const handle = (): Promise<IDBDatabase> => (db ??= openDatabase().then(async (opened) => {
+    await adoptLegacyRecovery(opened).catch(() => { /* nothing to carry over */ });
+    return opened;
+  }));
 
   const tx = async <T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => Promise<T>): Promise<T> => {
     const d = await handle();
@@ -110,8 +192,8 @@ function localStore(): Storage | null {
   try {
     const s = window.localStorage;
     // Safari in private mode hands back an object that throws on write.
-    s.setItem('__kiln_probe__', '1');
-    s.removeItem('__kiln_probe__');
+    s.setItem('__kline_probe__', '1');
+    s.removeItem('__kline_probe__');
     return s;
   } catch {
     return null;
@@ -123,7 +205,10 @@ export function localStorageBackend(): RecoveryBackend | null {
   if (!s) return null;
   const read = (): StoredRecovery[] => {
     try {
-      const raw = s.getItem(LS_KEY);
+      // The name this key had before the application was renamed is still
+      // read: someone whose browser crashed under the old name should get
+      // their work back under the new one.
+      const raw = s.getItem(LS_KEY) ?? s.getItem(LEGACY_LS_KEY);
       if (!raw) return [];
       const parsed = JSON.parse(raw);
       // The old format was a single record rather than a list.

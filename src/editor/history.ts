@@ -133,6 +133,18 @@ export class History {
     return this.redoStack[this.redoStack.length - 1]?.label ?? '';
   }
 
+  /**
+   * The recorded steps, newest last, for anything that wants to look back
+   * rather than travel back.
+   *
+   * Comparing against an earlier version needs to *read* a snapshot without
+   * unwinding to it, which undo cannot do — it pops. The scenes handed out
+   * here are the stored ones, so callers must treat them as read-only.
+   */
+  steps(): { index: number; label: string; scene: SerializedScene }[] {
+    return this.undoStack.map((s, index) => ({ index, label: s.label, scene: s.scene }));
+  }
+
   clear(): void {
     this.undoStack.length = 0;
     this.redoStack.length = 0;

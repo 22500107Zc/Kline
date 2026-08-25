@@ -87,6 +87,7 @@ in vec2 aUV;
 in float aFlags;
 in float aMatId;
 in vec3 aVColor;
+in float aDiff;
 
 uniform mat4 uViewProj;
 uniform mat4 uModel;
@@ -97,6 +98,7 @@ out vec3 vNormal;
 out vec2 vUV;
 out vec3 vVColor;
 flat out float vFlags;
+flat out float vDiff;
 flat out int vMat;
 
 void main() {
@@ -106,6 +108,7 @@ void main() {
   vUV = aUV;
   vVColor = aVColor;
   vFlags = aFlags;
+  vDiff = aDiff;
   vMat = int(aMatId + 0.5);
   gl_Position = uViewProj * world;
 }
@@ -120,6 +123,7 @@ in vec3 vNormal;
 in vec2 vUV;
 in vec3 vVColor;
 flat in float vFlags;
+flat in float vDiff;
 flat in int vMat;
 
 uniform vec3 uCamPos;
@@ -146,6 +150,9 @@ uniform mediump sampler2DShadow uShadowMap;
 uniform float uShadowStrength;   // 0 disables the lookup entirely
 uniform float uShadowTexel;      // 1 / shadow map size
 uniform int uShadowLight;        // which light index casts, or -1
+uniform float uDiffMode;         // 0 hides the comparison, 1 shows it
+uniform vec3 uDiffAdded;
+uniform vec3 uDiffMoved;
 
 uniform vec3 uAmbient;
 uniform int uShadingMode;      // 0 = studio solid, 1 = material/rendered
@@ -276,6 +283,12 @@ void main() {
   }
 
   color = mix(color, uSelectColor, vFlags * 0.32);
+  // Comparison tint, laid over the shaded surface rather than replacing it,
+  // so the form stays readable while the change is unmissable.
+  if (uDiffMode > 0.5) {
+    if (vDiff > 1.5) color = mix(color, uDiffAdded, 0.72);
+    else if (vDiff > 0.5) color = mix(color, uDiffMoved, 0.6);
+  }
   color = mix(color, uSelectColor * 0.85, uObjectSelected * 0.10);
   fragColor = vec4(encodeSRGB(acesTonemap(color)), uMatAlpha[mi] * uOpacity);
 }

@@ -6,7 +6,7 @@ import { Mesh } from '../mesh/Mesh';
  * splitting draws.
  */
 
-export const SURFACE_STRIDE = 13; // pos(3) normal(3) uv(2) flags(1) matId(1) colour(3)
+export const SURFACE_STRIDE = 14; // pos(3) normal(3) uv(2) flags(1) matId(1) colour(3) diff(1)
 
 /**
  * The interleaved surface vertex, in order.
@@ -24,6 +24,11 @@ export const SURFACE_LAYOUT: { name: string; size: number }[] = [
   { name: 'aFlags', size: 1 },
   { name: 'aMatId', size: 1 },
   { name: 'aVColor', size: 3 },
+  // Which way this face differs from the version being compared against.
+  // Its own lane rather than a spare range of aFlags: a face can be both
+  // selected and newly added, and packing two meanings into one number is how
+  // you end up unable to show that.
+  { name: 'aDiff', size: 1 },
 ];
 export const LINE_STRIDE = 6; // pos(3) color(3)
 export const POINT_STRIDE = 4; // pos(3) flags(1)
@@ -133,7 +138,9 @@ class CornerIndex {
  * whether it paid would mean keeping two layouts alive and getting the
  * unindexed one's vertex order wrong exactly once.
  */
-export function buildSurface(mesh: Mesh, selectedFaces: Set<number> | null): SurfaceData {
+export function buildSurface(
+  mesh: Mesh, selectedFaces: Set<number> | null, diffClasses?: Uint8Array | null,
+): SurfaceData {
   const t = mesh.topology();
   const tris = mesh.triCount;
   const corners = tris * 3;
@@ -148,6 +155,7 @@ export function buildSurface(mesh: Mesh, selectedFaces: Set<number> | null): Sur
     const smooth = mesh.isFaceSmooth(f);
     const fn = t.faceNormals[f];
     const flag = selectedFaces && selectedFaces.has(f) ? 1 : 0;
+    const diff = diffClasses && f < diffClasses.length ? diffClasses[f] : 0;
     const mat = mesh.faceMaterial[f] ?? 0;
     const uv = mesh.uvFor(f);
     const vc = mesh.colors;
@@ -169,6 +177,7 @@ export function buildSurface(mesh: Mesh, selectedFaces: Set<number> | null): Sur
         scratch[10] = painted ? vc[ci] : 1;
         scratch[11] = painted ? vc[ci + 1] : 1;
         scratch[12] = painted ? vc[ci + 2] : 1;
+        scratch[13] = diff;
         indices[n++] = index.intern(scratch, v);
       }
     }

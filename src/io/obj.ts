@@ -3,9 +3,9 @@ import { Mesh } from '../mesh/Mesh';
 import { Scene } from '../scene/Scene';
 
 /**
- * Wavefront OBJ. Kiln is Z-up like Blender, while OBJ is conventionally Y-up,
+ * Wavefront OBJ. Kline is Z-up like Blender, while OBJ is conventionally Y-up,
  * so both directions convert axes the way Blender's default importer/exporter
- * does: (x, y, z)_kiln <-> (x, z, -y)_obj.
+ * does: (x, y, z)_kline <-> (x, z, -y)_obj.
  */
 
 function toObjAxes(p: Vec3): Vec3 {
@@ -17,7 +17,7 @@ function fromObjAxes(p: Vec3): Vec3 {
 }
 
 export function exportOBJ(scene: Scene, selectionOnly = false): string {
-  const lines: string[] = ['# Exported from Kiln', `# ${new Date().toISOString()}`];
+  const lines: string[] = ['# Exported from Kline', `# ${new Date().toISOString()}`];
   const matLines: string[] = [];
   let vertexOffset = 1;
   let uvOffset = 1;
@@ -99,7 +99,7 @@ export function exportOBJ(scene: Scene, selectionOnly = false): string {
 }
 
 export function exportMTL(scene: Scene): string {
-  const out: string[] = ['# Exported from Kiln'];
+  const out: string[] = ['# Exported from Kline'];
   for (const mat of scene.materials) {
     out.push(
       `newmtl ${mat.name.replace(/\s+/g, '_')}`,

@@ -6,6 +6,7 @@ import { LightType, Scene, SceneObject, SerializedScene } from '../scene/Scene';
 import { ViewportCamera } from '../scene/ViewportCamera';
 import { createMaterial } from '../scene/Material';
 import { History, EditorSnapshot } from './history';
+import { SceneDiff, diffScene, summarise } from '../diff';
 import { TransformKind, TransformSession } from './transform';
 import {
   Rect, boxSelectElements, boxSelectObjects, normalizeRect, pickElement, pickFaceRay, pickObject,
@@ -57,7 +58,7 @@ type Modal =
   | { type: 'box'; rect: Rect; extend: boolean; subtract: boolean }
   | { type: 'knife'; points: [number, number][]; preview: [number, number] | null };
 
-export type EditorEvent = 'change' | 'status' | 'modal' | 'render' | 'frame';
+export type EditorEvent = 'change' | 'status' | 'modal' | 'render' | 'frame' | 'diff';
 
 /**
  * The application controller: owns the scene, the viewport camera, input
@@ -69,6 +70,14 @@ export class Editor {
   readonly camera = new ViewportCamera();
   readonly renderer: Renderer;
   readonly history = new History();
+  /**
+   * The version currently being compared against, and the result.
+   *
+   * Held on the editor rather than inside the panel that shows it, because the
+   * viewport tints geometry from it too — a comparison is a mode the whole
+   * application is in, not a window that happens to be open.
+   */
+  comparison: { label: string; against: SerializedScene; diff: SceneDiff } | null = null;
   readonly recovery = new RecoveryStore();
 
   mode: EditorMode = 'object';
@@ -118,7 +127,7 @@ export class Editor {
    * this in at startup; a command calls through it and does not care what is
    * on the other side.
    */
-  panels: { toggleUV?: () => void; toggleGraph?: () => void } = {};
+  panels: { toggleUV?: () => void; toggleGraph?: () => void; toggleDiff?: () => void } = {};
   private pointer = { x: 0, y: 0, down: false, button: -1, startX: 0, startY: 0, dragging: false };
   /**
    * Set when a press has already been spent on something other than picking.
@@ -172,6 +181,56 @@ export class Editor {
     requestAnimationFrame(loop);
   }
 
+  // -------------------------------------------------------------- comparison
+
+  /**
+   * Start comparing the scene against another version of it.
+   *
+   * The comparison is recomputed whenever the scene changes, so the tint
+   * follows edits live: undo a step and the geometry it added stops being
+   * green while you watch.
+   */
+  compareAgainst(against: SerializedScene, label: string): SceneDiff {
+    const diff = diffScene(against, this.scene.toJSON());
+    this.comparison = { label, against, diff };
+    this.options.showDiff = true;
+    this.setStatus(`Comparing with ${label} — ${summarise(diff)}`);
+    this.emit('diff');
+    this.markAllGeometryDirty();
+    this.requestRender();
+    return diff;
+  }
+
+  /** Recompute against the same version, after the scene has moved on. */
+  refreshComparison(): void {
+    if (!this.comparison) return;
+    this.comparison.diff = diffScene(this.comparison.against, this.scene.toJSON());
+    this.emit('diff');
+    this.markAllGeometryDirty();
+    this.requestRender();
+  }
+
+  stopComparing(): void {
+    if (!this.comparison) return;
+    this.comparison = null;
+    this.options.showDiff = false;
+    this.setStatus('Comparison closed');
+    this.emit('diff');
+    this.markAllGeometryDirty();
+    this.requestRender();
+  }
+
+  /**
+   * Drop every cached surface buffer.
+   *
+   * A comparison changes how geometry is coloured without changing the
+   * geometry, so nothing the cache keys on has moved and it would happily
+   * keep serving the untinted buffers.
+   */
+  private markAllGeometryDirty(): void {
+    for (const obj of this.scene.objects.values()) this.renderer.invalidate(obj.id);
+  }
+
   /**
    * Draw one frame right now, outside the animation loop.
    *
@@ -192,6 +251,7 @@ export class Editor {
       options: { ...this.options, activeBone: this.activeBone },
       edit: this.editOverlay(),
       lines: this.overlayLines(),
+      diff: this.options.showDiff ? this.comparison?.diff ?? null : null,
     });
   }
 
@@ -474,7 +534,7 @@ export class Editor {
     this.changed();
   }
 
-  /** Replace the whole scene from a parsed .kiln document. */
+  /** Replace the whole scene from a parsed .kline document. */
   loadSceneJSON(data: SerializedScene): void {
     const restored = Scene.fromJSON(data);
     this.history.clear();

@@ -1,6 +1,6 @@
-# Kiln
+# Kline
 
-**A 3D modelling application for your desktop — and your browser.** Kiln is an
+**A 3D modelling application for your desktop — and your browser.** Kline is an
 open source alternative to Blender's modelling workflow: mesh editing with
 bevel and booleans, sculpting, UV unwrapping, keyframe animation, a
 non-destructive modifier stack, PBR materials, a path-traced renderer and glTF
@@ -8,9 +8,9 @@ export — in dependency-free TypeScript. Drop in a photo or a video and it
 builds geometry from it. No account, no server; nothing you open ever leaves
 your machine.
 
-![Kiln editing a subdivided form](docs/screenshot.png)
+![Kline editing a subdivided form](docs/screenshot.png)
 
-Kiln runs two ways: as a **desktop app** you double-click, or as a page in a
+Kline runs two ways: as a **desktop app** you double-click, or as a page in a
 browser tab. Same code either way.
 
 ### Get the desktop app
@@ -18,11 +18,11 @@ browser tab. Same code either way.
 Grab the build for your platform from the
 [Releases page](https://github.com/22500107zc/yes/releases):
 
-- **macOS** — `Kiln-0.1.0-universal.pkg`, one file for both Apple Silicon and
-  Intel, which installs Kiln straight into Applications. (A `.dmg` and a zipped
-  `Kiln.app` are there too, if you prefer.)
+- **macOS** — `Kline-0.1.0-universal.pkg`, one file for both Apple Silicon and
+  Intel, which installs Kline straight into Applications. (A `.dmg` and a zipped
+  `Kline.app` are there too, if you prefer.)
 - **Windows** — an `.exe` installer, or a portable `.exe` that needs no install.
-- **Linux** — `.AppImage` or `.deb`. Kiln gets a Dock/Start-menu entry and a desktop shortcut, opens
+- **Linux** — `.AppImage` or `.deb`. Kline gets a Dock/Start-menu entry and a desktop shortcut, opens
 `.kiln` files on double-click, and has a real menu bar with native Open and
 Save dialogs.
 
@@ -30,10 +30,10 @@ These builds are **unsigned**, so the first launch needs one extra step:
 
 - **macOS** — right-click the `.pkg` (or the app) ▸ **Open** ▸ **Open**, once.
   (If it says the app is damaged, run
-  `xattr -dr com.apple.quarantine /Applications/Kiln.app`.)
+  `xattr -dr com.apple.quarantine /Applications/Kline.app`.)
 - **Windows** — SmartScreen shows "Windows protected your PC" ▸ **More info** ▸
   **Run anyway**, once.
-- **Linux** — `chmod +x Kiln-*.AppImage`, then run it.
+- **Linux** — `chmod +x Kline-*.AppImage`, then run it.
 
 ### Or build it yourself
 
@@ -44,7 +44,7 @@ npm install
 
 npm run app     # build and launch the desktop app
 npm run dist    # build an installer for the machine you are on -> release/
-npm run dev     # web version with hot reload, for working on Kiln itself
+npm run dev     # web version with hot reload, for working on Kline itself
 ```
 
 `npm run dist` only builds for the OS it runs on — macOS installers need a Mac.
@@ -58,7 +58,7 @@ npm start       # builds, then opens http://localhost:4173
 
 Chrome and Edge can install that page as a standalone app too (⋮ ▸ *Install page
 as app*), which is lighter than the Electron build and works offline once
-cached. Kiln needs WebGL2 — Chrome, Firefox, Edge and Safari 15+ all have it.
+cached. Kline needs WebGL2 — Chrome, Firefox, Edge and Safari 15+ all have it.
 Opening `dist/index.html` straight off disk will *not* work: browsers block ES
 modules over `file://`.
 
@@ -100,7 +100,7 @@ ollama serve
 ```
 
 Click the chip at the right of the Build box, press **Connect**, and you are
-done. Kiln defaults to `http://127.0.0.1:11434`.
+done. Kline defaults to `http://127.0.0.1:11434`.
 
 Any OpenAI-compatible endpoint works too — Groq and OpenRouter have free tiers,
 LM Studio and llama.cpp are local. Be clear-eyed about hosted "free": those
@@ -108,7 +108,7 @@ tiers are free *today*, rate-limited, and need an account. Nobody serves GPUs
 for nothing indefinitely, so local is the only zero anyone can promise.
 
 Coding models do this better than chat models. When one writes something that
-does not run, Kiln hands the error back and asks again — which is usually
+does not run, Kline hands the error back and asks again — which is usually
 enough.
 
 ### Without a model
@@ -133,6 +133,8 @@ keep going.
 | `Cmd/Ctrl + K` | Search every command — the fastest way to find anything |
 | `Cmd/Ctrl + Shift + B` | Jump to the Build box |
 | `Cmd/Ctrl + U` | UV editor |
+| `Cmd/Ctrl + G` | Graph editor |
+| `Cmd/Ctrl + D` | Compare versions |
 | `F12` | Render the image |
 | `?` | The full keyboard sheet |
 
@@ -141,11 +143,42 @@ that Recalculate Normals lives in Edit Mode instead of finding nothing.
 
 ---
 
+## See what changed
+
+Every other 3D application answers *what does this look like now*. None of them
+answers *what is different from an hour ago* — you open the old file next to
+the new one and squint at it.
+
+Press `Cmd/Ctrl + D` and pick a version: a step in your undo history, or a
+scene file from last week. The model in front of you is then coloured by what
+actually changed.
+
+- **Green** — geometry this version gained.
+- **Amber** — geometry that is the same, but somewhere else.
+- **Red outlines** — faces that are gone, drawn where they used to be.
+
+Alongside it, a per-object list: what moved, what was renamed, whose modifier
+stack changed, whose material changed, how many faces and vertices each object
+gained or lost. Click any of them to frame it.
+
+It keeps up while you work. Undo a step with a comparison open and the geometry
+it added stops being green while you watch.
+
+The hard part is that a mesh has no line numbers. Comparing vertex arrays falls
+apart the moment an operator renumbers anything — and most of them do. So faces
+are identified by where their corners are in space, sorted so that winding and
+starting corner do not matter, which survives an operator rebuilding the mesh
+from scratch. An index-aligned pass runs first to catch geometry that merely
+*moved*, since a sculpted face is neither an addition nor a deletion and
+reporting it as both would be true and useless.
+
+---
+
 ## Build from a reference
 
 ![A traced mug reference extruded into a solid, hole and all](docs/reference-to-mesh.png)
 
-Drag an image or a video anywhere onto the window. Kiln reads it locally, traces
+Drag an image or a video anywhere onto the window. Kline reads it locally, traces
 it, and builds a mesh straight away — then rebuilds that same object as you
 adjust the settings, with the detected outline drawn over your reference so the
 threshold is something you can see rather than guess. Videos are scrubbable, so
@@ -164,7 +197,7 @@ editable mesh — press Tab and keep modelling.
 ### Hooking up a local AI model
 
 For genuine single-image reconstruction (TripoSR, InstantMesh, TRELLIS,
-Hunyuan3D and friends), Kiln talks to a model server you run yourself. It does
+Hunyuan3D and friends), Kline talks to a model server you run yourself. It does
 not bundle weights — those are gigabytes and want a GPU — but the other half is
 in the box:
 
@@ -173,11 +206,11 @@ python3 tools/kiln-ai-server.py                  # echo backend, verifies the wi
 python3 tools/kiln-ai-server.py --backend triposr
 ```
 
-Then in Kiln: **Create ▸ Local AI model ▸ Check ▸ Generate 3D**. The server
+Then in Kline: **Create ▸ Local AI model ▸ Check ▸ Generate 3D**. The server
 defaults to `127.0.0.1`, so your images stay on your machine unless you
 deliberately point it somewhere else.
 
-The contract is two endpoints, so pointing Kiln at your own pipeline means
+The contract is two endpoints, so pointing Kline at your own pipeline means
 writing one function:
 
 ```
@@ -196,10 +229,10 @@ connection before installing anything.
 
 ## Why this exists
 
-Blender is extraordinary and Kiln is not trying to replace it. What Kiln
+Blender is extraordinary and Kline is not trying to replace it. What Kline
 replaces is the *first ten minutes*: downloading a 300 MB package to box-model
 a shape, check a silhouette, clean up a scanned mesh, or convert an OBJ to
-glTF. Kiln opens in a tab, uses Blender's keymap so your hands already know it,
+glTF. Kline opens in a tab, uses Blender's keymap so your hands already know it,
 and everything you make stays on your machine — there is no server.
 
 The whole application is dependency-free TypeScript: the mesh kernel, the
@@ -476,7 +509,7 @@ move.
 **Booleans work on surfaces, not on a tree of planes.** The classic BSP
 approach splits every polygon against every plane it meets, which is fine on
 flat operands and never finishes on two rounded surfaces meeting almost
-tangentially. Kiln finds the triangle pairs that actually cross through a BVH,
+tangentially. Kline finds the triangle pairs that actually cross through a BVH,
 cuts only those, and classifies each piece by ray parity — so the work is
 proportional to the number of crossings rather than to their arrangement.
 Floating point still leaves the occasional sliver, and no tolerance setting
@@ -489,11 +522,11 @@ closed solid instead.
 npm run dev         # Vite dev server with HMR
 npm run typecheck   # tsc --noEmit, strict
 npm test            # everything below
-npm run test:unit   # 349 unit tests over the kernel, operators, UVs, sculpting,
-                    # animation, the path tracer, the scene and IO
-npm run test:app    # 14 tests in a real browser: shadows land, overlays draw,
-                    # strokes and rigs reach the screen, clicks and modals
-                    # behave. Skipped if no Chromium is found.
+npm run test:unit   # 365 unit tests over the kernel, operators, UVs, sculpting,
+                    # animation, the path tracer, comparison, the scene and IO
+npm run test:app    # 17 tests in a real browser: shadows land, overlays draw,
+                    # strokes and rigs reach the screen, comparisons tint,
+                    # clicks and modals behave. Skipped without Chromium.
 npm run build       # typecheck + production bundle into dist/
 npm run app         # run the desktop shell against the built bundle
 npm run dist        # package installers for the current OS into release/
@@ -519,7 +552,7 @@ build; without either it skips with a reason and the rest still runs.
 
 ## Not there yet
 
-Honest list of what Blender has that Kiln does not:
+Honest list of what Blender has that Kline does not:
 
 - **Geometry nodes** and **Python scripting.** The Build box writes JavaScript
   against a sandboxed geometry API instead, and `kiln.editor` in the browser
@@ -558,5 +591,5 @@ for anything touching `src/mesh` are the easiest to merge.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). Kiln contains no Blender code; the resemblance is
+MIT — see [LICENSE](LICENSE). Kline contains no Blender code; the resemblance is
 in the keymap, which is deliberate.

@@ -1,9 +1,9 @@
 /*
- * Kiln desktop shell.
+ * Kline desktop shell.
  *
  * A thin Electron host around the same static bundle the web build ships.
  * It adds the three things a browser tab cannot: a real application window,
- * a native menu bar driven by Kiln's own command registry, and native file
+ * a native menu bar driven by Kline's own command registry, and native file
  * dialogs for opening and saving scenes.
  */
 
@@ -19,12 +19,12 @@ const STATE_FILE = path.join(app.getPath('userData'), 'window-state.json');
 // A privileged custom scheme, because ES modules and service workers are both
 // blocked on file:// — this gives the bundle a proper secure origin.
 protocol.registerSchemesAsPrivileged([{
-  scheme: 'kiln',
+  scheme: 'kline',
   privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, codeCache: true },
 }]);
 
 let mainWindow = null;
-/** A .kiln path from the command line or a Finder double-click, held until the window is ready. */
+/** A scene path from the command line or a Finder double-click, held until the window is ready. */
 let pendingOpen = null;
 
 function readWindowState() {
@@ -49,7 +49,7 @@ function saveWindowState(win) {
 }
 
 function serveBundle() {
-  protocol.handle('kiln', (request) => {
+  protocol.handle('kline', (request) => {
     const url = new URL(request.url);
     let pathname = decodeURIComponent(url.pathname);
     if (pathname === '' || pathname === '/') pathname = '/index.html';
@@ -70,7 +70,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     backgroundColor: '#131214',
-    title: 'Kiln',
+    title: 'Kline',
     show: false,
     autoHideMenuBar: false,
     titleBarStyle: IS_MAC ? 'hiddenInset' : 'default',
@@ -96,7 +96,7 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  mainWindow.loadURL('kiln://app/');
+  mainWindow.loadURL('kline://app/');
 
   // Smoke-test hook: `KILN_SMOKE=<png path> electron .` boots the shell, saves a
   // screenshot and exits, so CI can prove the desktop build actually renders.
@@ -118,7 +118,7 @@ function createWindow() {
   return mainWindow;
 }
 
-/** Turn Kiln's own shortcut strings into Electron accelerators. */
+/** Turn Kline's own shortcut strings into Electron accelerators. */
 function toAccelerator(shortcut) {
   if (!shortcut || !/ctrl\+/i.test(shortcut)) return undefined; // single keys stay with the canvas
   if (/numpad/i.test(shortcut)) return undefined;
@@ -128,7 +128,7 @@ function toAccelerator(shortcut) {
 const MENU_ORDER = ['File', 'Edit', 'Add', 'Object', 'Mesh', 'Select', 'View'];
 
 function buildMenu(commands) {
-  const send = (id) => () => mainWindow?.webContents.send('kiln:command', id);
+  const send = (id) => () => mainWindow?.webContents.send('kline:command', id);
   const byCategory = new Map();
   for (const cmd of commands ?? []) {
     const list = byCategory.get(cmd.category) ?? [];
@@ -140,7 +140,7 @@ function buildMenu(commands) {
 
   if (IS_MAC) {
     template.push({
-      label: 'Kiln',
+      label: 'Kline',
       submenu: [
         { role: 'about' }, { type: 'separator' },
         { role: 'services' }, { type: 'separator' },
@@ -175,10 +175,10 @@ function buildMenu(commands) {
   template.push({
     label: 'Help',
     submenu: [
-      { label: 'Keyboard Shortcuts', click: () => mainWindow?.webContents.send('kiln:shortcuts') },
+      { label: 'Keyboard Shortcuts', click: () => mainWindow?.webContents.send('kline:shortcuts') },
       { type: 'separator' },
       {
-        label: 'Kiln on GitHub',
+        label: 'Kline on GitHub',
         click: () => shell.openExternal('https://github.com/22500107zc/yes'),
       },
     ],
@@ -188,8 +188,8 @@ function buildMenu(commands) {
 }
 
 function queueOpen(filePath) {
-  if (!filePath || !filePath.endsWith('.kiln')) return;
-  if (mainWindow) mainWindow.webContents.send('kiln:open-file', readScene(filePath));
+  if (!filePath || !/\.(kline|kiln)$/.test(filePath)) return;
+  if (mainWindow) mainWindow.webContents.send('kline:open-file', readScene(filePath));
   else pendingOpen = filePath;
 }
 
@@ -210,7 +210,7 @@ if (!app.requestSingleInstanceLock()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
-    queueOpen(argv.find((a) => a.endsWith('.kiln')));
+    queueOpen(argv.find((a) => /\.(kline|kiln)$/.test(a)));
   });
 
   app.on('open-file', (event, filePath) => {
@@ -222,7 +222,7 @@ if (!app.requestSingleInstanceLock()) {
     serveBundle();
     buildMenu([]);
     createWindow();
-    queueOpen(process.argv.find((a) => a.endsWith('.kiln')));
+    queueOpen(process.argv.find((a) => /\.(kline|kiln)$/.test(a)));
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -235,16 +235,16 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 // The renderer owns the command registry, so it tells the shell what to show.
-ipcMain.on('kiln:register-commands', (_event, commands) => {
+ipcMain.on('kline:register-commands', (_event, commands) => {
   buildMenu(commands);
   if (pendingOpen && mainWindow) {
-    mainWindow.webContents.send('kiln:open-file', readScene(pendingOpen));
+    mainWindow.webContents.send('kline:open-file', readScene(pendingOpen));
     pendingOpen = null;
   }
 });
 
 const FILTERS = {
-  kiln: { name: 'Kiln Scene', extensions: ['kiln'] },
+  kline: { name: 'Kline Scene', extensions: ['kline'] },
   obj: { name: 'Wavefront OBJ', extensions: ['obj'] },
   mtl: { name: 'Material Library', extensions: ['mtl'] },
   stl: { name: 'STL', extensions: ['stl'] },
@@ -252,7 +252,7 @@ const FILTERS = {
 };
 
 // Every export goes through a real Save dialog rather than a silent download.
-ipcMain.handle('kiln:save-file', async (_event, { defaultName, data, binary }) => {
+ipcMain.handle('kline:save-file', async (_event, { defaultName, data, binary }) => {
   const ext = String(defaultName ?? '').split('.').pop()?.toLowerCase() ?? '';
   const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
     title: 'Export',
@@ -269,11 +269,11 @@ ipcMain.handle('kiln:save-file', async (_event, { defaultName, data, binary }) =
   }
 });
 
-ipcMain.handle('kiln:open-scene', async () => {
+ipcMain.handle('kline:open-scene', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
     title: 'Open Scene',
     properties: ['openFile'],
-    filters: [{ name: 'Kiln Scene', extensions: ['kiln'] }],
+    filters: [{ name: 'Kline Scene', extensions: ['kline', 'kiln'] }],
   });
   if (canceled || filePaths.length === 0) return null;
   return readScene(filePaths[0]);

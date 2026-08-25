@@ -29,7 +29,7 @@ if (app.skip) {
   const shadowScene = async () => {
     await resetScene(page);
     await page.evaluate(() => {
-      const k = window.kiln, ed = k.editor, S = ed.scene;
+      const k = window.kline, ed = k.editor, S = ed.scene;
       k.run('add.plane');
       const floor = S.get(S.active);
       floor.scale.x = 8;
@@ -61,7 +61,7 @@ if (app.skip) {
   test('the shadow pass writes depth rather than leaving the map empty', async () => {
     await shadowScene();
     const depth = await page.evaluate(() => {
-      const ed = window.kiln.editor;
+      const ed = window.kline.editor;
       const r = ed.renderer;
       const gl = r.gl;
       ed.renderNow();
@@ -136,7 +136,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
       gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
       gl.disableVertexAttribArray(loc);
-      window.kiln.editor.requestRender();
+      window.kline.editor.requestRender();
       return { min, occupied, of: N * N };
     });
 
@@ -153,10 +153,10 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     await shadowScene();
     const points = floorGrid();
 
-    await page.evaluate(() => { window.kiln.editor.options.shadows = true; });
+    await page.evaluate(() => { window.kline.editor.options.shadows = true; });
     const lit = (await samplePixels(page, points)).map(luma);
 
-    await page.evaluate(() => { window.kiln.editor.options.shadows = false; });
+    await page.evaluate(() => { window.kline.editor.options.shadows = false; });
     const flat = (await samplePixels(page, points)).map(luma);
 
     // Only points that are on the floor at all — the frame also contains the
@@ -180,13 +180,13 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
       `no shadow reached the floor: brightness ranges over only ${spread(lit).toFixed(1)}`,
     );
 
-    await page.evaluate(() => { window.kiln.editor.options.shadows = true; });
+    await page.evaluate(() => { window.kline.editor.options.shadows = true; });
   });
 
   test('no pass leaves a GL error behind, in any mode', async () => {
     await resetScene(page);
     const errors = await page.evaluate(() => {
-      const k = window.kiln, ed = k.editor, S = ed.scene;
+      const k = window.kline, ed = k.editor, S = ed.scene;
       const gl = ed.renderer.gl;
       k.run('add.uvsphere');
       const ball = S.get(S.active);
@@ -237,7 +237,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     // the stride wrong, and the overlay does not vanish — it scatters, which
     // is why counting pixels is not enough. Where they land is the test.
     const check = async (selectMode) => page.evaluate((mode) => {
-      const k = window.kiln, ed = k.editor;
+      const k = window.kline, ed = k.editor;
       ed.setSelectMode(mode);
       k.run('select.all');
       ed.options.showOverlays = true;
@@ -279,7 +279,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     }, selectMode);
 
     await page.evaluate(() => {
-      const k = window.kiln;
+      const k = window.kline;
       k.run('add.uvsphere');
       k.run('mode.edit');
     });
@@ -304,7 +304,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
   const cubeWithTopFacePicked = async () => {
     await resetScene(page);
     await page.evaluate(() => {
-      const k = window.kiln;
+      const k = window.kline;
       k.run('add.cube');
       k.run('mode.edit');
       k.run('select.face');
@@ -320,7 +320,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
   test('confirming a modal with a click keeps the selection', async () => {
     await cubeWithTopFacePicked();
     assert.equal(
-      await page.evaluate(() => window.kiln.editor.selection.faces.size), 1,
+      await page.evaluate(() => window.kline.editor.selection.faces.size), 1,
       'clicking the top face should select exactly it',
     );
 
@@ -336,7 +336,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     await page.mouse.up();
 
     const after = await page.evaluate(() => {
-      const ed = window.kiln.editor;
+      const ed = window.kline.editor;
       return { faces: ed.selection.faces.size, modal: ed.modal ? ed.modal.type : null };
     });
     assert.equal(after.modal, null, 'the click should have confirmed the inset');
@@ -346,7 +346,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
 
   test('inset then extrude chains, which is the whole point of keeping it', async () => {
     const top = await cubeWithTopFacePicked();
-    const faces = () => page.evaluate(() => window.kiln.editor.editObject.mesh.faceCount);
+    const faces = () => page.evaluate(() => window.kline.editor.editObject.mesh.faceCount);
     const start = await faces();
 
     await page.keyboard.press('i');
@@ -367,7 +367,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
   test('the ordinary ways of selecting still work', async () => {
     await resetScene(page);
     await page.evaluate(() => {
-      const k = window.kiln, S = k.editor.scene;
+      const k = window.kline, S = k.editor.scene;
       k.run('add.cube');
       S.get(S.active).position.x = -2.2;
       k.run('add.cube');
@@ -376,7 +376,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
       S.active = null;
       k.editor.requestRender();
     });
-    const count = () => page.evaluate(() => window.kiln.editor.scene.selection.size);
+    const count = () => page.evaluate(() => window.kline.editor.scene.selection.size);
 
     const left = await screenPoint(page, [-2.2, 0, 0]);
     await page.mouse.click(left.x, left.y);
@@ -406,13 +406,13 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
   test('escape cancels a transform and puts the value back', async () => {
     await resetScene(page);
     await page.evaluate(() => {
-      const k = window.kiln, S = k.editor.scene;
+      const k = window.kline, S = k.editor.scene;
       k.run('add.cube');
       S.selection = new Set([S.active]);
       k.editor.requestRender();
     });
     const x = () => page.evaluate(
-      () => +window.kiln.editor.scene.get(window.kiln.editor.scene.active).position.x,
+      () => +window.kline.editor.scene.get(window.kline.editor.scene.active).position.x,
     );
     const origin = await screenPoint(page, [0, 0, 0]);
     const before = await x();
@@ -446,7 +446,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
   test('a sculpt stroke moves the surface it is dragged over', async () => {
     await resetScene(page);
     await page.evaluate(() => {
-      const k = window.kiln, ed = k.editor;
+      const k = window.kline, ed = k.editor;
       k.run('add.uvsphere');
       k.run('mode.sculpt');
       ed.sculpt.brush = 'draw';
@@ -458,7 +458,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     await dragAcross({ x: centre.x - 30, y: centre.y });
 
     const moved = await page.evaluate(() => {
-      const o = window.kiln.editor.scene.get(window.kiln.editor.scene.active);
+      const o = window.kline.editor.scene.get(window.kline.editor.scene.active);
       let n = 0, worst = 0, nan = 0;
       o.mesh.positions.forEach((p, i) => {
         if (!Number.isFinite(p.x + p.y + p.z)) { nan++; return; }
@@ -477,7 +477,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
   test('a mask holds back the brush where it was painted', async () => {
     await resetScene(page);
     await page.evaluate(() => {
-      const k = window.kiln, ed = k.editor;
+      const k = window.kline, ed = k.editor;
       k.run('add.uvsphere');
       k.run('mode.sculpt');
       ed.sculpt.brush = 'mask';
@@ -490,7 +490,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     for (let i = 0; i < 5; i++) await dragAcross({ x: centre.x - 20, y: centre.y }, 8, 4);
 
     const painted = await page.evaluate(() => {
-      const ed = window.kiln.editor;
+      const ed = window.kline.editor;
       const o = ed.scene.get(ed.scene.active);
       if (!o.mesh.mask) return { held: 0 };
       window.__mask = [...o.mesh.mask];
@@ -502,7 +502,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
 
     await dragAcross({ x: centre.x - 20, y: centre.y }, 8, 4);
     const byLevel = await page.evaluate(() => {
-      const o = window.kiln.editor.scene.get(window.kiln.editor.scene.active);
+      const o = window.kline.editor.scene.get(window.kline.editor.scene.active);
       const masked = [], partial = [];
       o.mesh.positions.forEach((p, i) => {
         const q = window.__before[i];
@@ -526,7 +526,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
   test('posing a bound rig changes what is on screen', async () => {
     await resetScene(page);
     const bound = await page.evaluate(() => {
-      const k = window.kiln, ed = k.editor, S = ed.scene;
+      const k = window.kline, ed = k.editor, S = ed.scene;
       k.run('add.cylinder');
       const tube = S.get(S.active);
       tube.scale.z = 3;
@@ -561,7 +561,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     // sample points: on a flat-shaded surface two very different silhouettes
     // can happen to share a colour anywhere you happen to look.
     const deformed = await page.evaluate(() => {
-      const ed = window.kiln.editor, S = ed.scene;
+      const ed = window.kline.editor, S = ed.scene;
       const tube = S.get(window.__tube);
       const arm = S.get(window.__arm);
       const gl = ed.renderer.gl;
@@ -613,7 +613,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
   test('a physics bake drops a box onto a floor and keys where it lands', async () => {
     await resetScene(page);
     const baked = await page.evaluate(() => {
-      const k = window.kiln, ed = k.editor, S = ed.scene;
+      const k = window.kline, ed = k.editor, S = ed.scene;
       k.run('add.plane');
       const floor = S.get(S.active);
       floor.scale.x = 8;
@@ -649,7 +649,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
   test('the path tracer produces an image, not a blank canvas', async () => {
     await resetScene(page);
     await page.evaluate(() => {
-      const k = window.kiln, ed = k.editor, S = ed.scene;
+      const k = window.kline, ed = k.editor, S = ed.scene;
       k.run('add.plane');
       const floor = S.get(S.active);
       floor.scale.x = 6;
@@ -665,11 +665,11 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
       k.run('render.image');
     });
     await page.waitForFunction(
-      () => window.kiln.editor.activeRender && window.kiln.editor.activeRender.samplesDone > 0,
+      () => window.kline.editor.activeRender && window.kline.editor.activeRender.samplesDone > 0,
       null, { timeout: 60_000 },
     );
     const image = await page.evaluate(() => {
-      const job = window.kiln.editor.activeRender;
+      const job = window.kline.editor.activeRender;
       const data = job.toImageData();
       let min = 255, max = 0, sum = 0;
       const n = data.width * data.height;
@@ -680,7 +680,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
         sum += v;
       }
       const nan = [...data.data].some((v) => !Number.isFinite(v));
-      window.kiln.run('render.cancel');
+      window.kline.run('render.cancel');
       return { samples: job.samplesDone, triangles: job.triangles, min, max, mean: sum / n, nan };
     });
     assert.equal(image.nan, false, 'the render contains non-finite pixels');
@@ -691,6 +691,121 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
       `the render is a flat field (${image.min.toFixed(0)}..${image.max.toFixed(0)}) — nothing was traced`,
     );
     assert.ok(image.mean > 5, `the render came back essentially black (mean ${image.mean.toFixed(1)})`);
+  });
+
+  test('a comparison tints changed geometry and ghosts what was removed', async () => {
+    await resetScene(page);
+    const counts = await page.evaluate(() => {
+      const k = window.kline, ed = k.editor, S = ed.scene;
+      k.run('add.cube');
+      const block = S.get(S.active);
+      for (let i = 0; i < 4 && ed.options.shading !== 'material'; i++) k.run('view.shading');
+      ed.options.showGrid = false;
+      ed.options.showOverlays = false;
+      const before = JSON.parse(JSON.stringify(S.toJSON()));
+
+      // Subdivide: every original face is replaced, so the comparison should
+      // report new geometry and have old loops left over to ghost.
+      S.selection = new Set([block.id]);
+      S.active = block.id;
+      k.run('mode.edit');
+      k.run('select.face');
+      k.run('select.all');
+      k.run('mesh.subdivide');
+      k.run('mode.object');
+      S.selection.clear();
+      S.active = null;
+
+      const diff = ed.compareAgainst(before, 'before subdividing');
+      const entry = diff.objects.find((o) => o.id === block.id);
+      return {
+        added: entry?.mesh?.added ?? 0,
+        removed: entry?.mesh?.removed ?? 0,
+        status: entry?.status,
+      };
+    });
+    assert.equal(counts.status, 'changed', 'the edited object was not reported as changed');
+    assert.ok(counts.added > 0, 'subdividing reported no new faces');
+    assert.ok(counts.removed > 0, 'subdividing reported nothing removed');
+
+    // The whole point is that it reaches the screen, so the frames are
+    // compared with the comparison shown and hidden.
+    const pixels = await page.evaluate(() => {
+      const ed = window.kline.editor;
+      const gl = ed.renderer.gl;
+      const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+      const frame = () => {
+        ed.renderNow();
+        const px = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        return px;
+      };
+      ed.options.showDiff = false;
+      const plain = frame();
+      ed.options.showDiff = true;
+      const shown = frame();
+      let green = 0, red = 0;
+      for (let i = 0; i < w * h; i++) {
+        const dr = shown[i * 4] - plain[i * 4];
+        const dg = shown[i * 4 + 1] - plain[i * 4 + 1];
+        const db = shown[i * 4 + 2] - plain[i * 4 + 2];
+        if (dg > 25 && dg > dr && dg > db) green++;
+        if (dr > 25 && dr > dg && dr > db) red++;
+      }
+      return { green, red, of: w * h };
+    });
+    assert.ok(pixels.green > 400, `added geometry is not tinted: only ${pixels.green} greener pixels`);
+    // Removed faces cannot be tinted — they are gone — so they are drawn as
+    // outlines where they used to be, which is the other half of a diff.
+    assert.ok(pixels.red > 40, `removed geometry left no ghost: only ${pixels.red} redder pixels`);
+
+    await page.evaluate(() => window.kline.editor.stopComparing());
+  });
+
+  test('a comparison against an unchanged scene reports nothing', async () => {
+    await resetScene(page);
+    const result = await page.evaluate(() => {
+      const k = window.kline, ed = k.editor;
+      k.run('add.uvsphere');
+      const before = JSON.parse(JSON.stringify(ed.scene.toJSON()));
+      const diff = ed.compareAgainst(before, 'itself');
+      const out = { identical: diff.identical, status: ed.statusMessage };
+      ed.stopComparing();
+      return out;
+    });
+    assert.ok(result.identical, `comparing a scene with itself found differences: ${result.status}`);
+  });
+
+  test('the comparison panel opens on its shortcut and lists the changes', async () => {
+    await resetScene(page);
+    await page.evaluate(() => {
+      const k = window.kline;
+      k.run('add.cube');
+      window.__snapshot = JSON.parse(JSON.stringify(k.editor.scene.toJSON()));
+      k.run('add.uvsphere');
+      k.editor.scene.get(k.editor.scene.active).name = 'Newcomer';
+    });
+    await page.mouse.move(centre.x, centre.y);
+    await page.keyboard.press('Control+d');
+    await page.waitForTimeout(250);
+    const opened = await page.evaluate(() => {
+      const panel = document.querySelector('.diff-panel');
+      return { present: !!panel, hidden: panel?.classList.contains('hidden') };
+    });
+    assert.ok(opened.present, 'the comparison panel is not in the document');
+    assert.equal(opened.hidden, false, 'ctrl+D did not open the comparison panel');
+
+    const rows = await page.evaluate(() => {
+      window.kline.editor.compareAgainst(window.__snapshot, 'a moment ago');
+      return [...document.querySelectorAll('.diff-row')].map((r) => r.textContent);
+    });
+    assert.ok(
+      rows.some((r) => r.includes('Newcomer')),
+      `the added object is not listed; rows were ${JSON.stringify(rows)}`,
+    );
+
+    await page.evaluate(() => window.kline.editor.stopComparing());
+    await page.keyboard.press('Escape');
   });
 
   test('nothing logged an error to the console along the way', () => {

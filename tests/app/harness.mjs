@@ -145,7 +145,7 @@ export async function launchApp() {
   page.on('pageerror', (e) => consoleErrors.push(String(e)));
 
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'networkidle' });
-  await page.waitForFunction(() => !!window.kiln?.editor?.renderer, null, { timeout: 30_000 });
+  await page.waitForFunction(() => !!window.kline?.editor?.renderer, null, { timeout: 30_000 });
   // The first frames set up texture arrays and compile programs.
   await page.waitForTimeout(600);
 
@@ -173,8 +173,8 @@ export async function launchApp() {
  */
 export async function resetScene(page) {
   await page.evaluate(() => {
-    const ed = window.kiln.editor;
-    if (ed.mode !== 'object') window.kiln.run('mode.object');
+    const ed = window.kline.editor;
+    if (ed.mode !== 'object') window.kline.run('mode.object');
     for (const id of [...ed.scene.objects.keys()]) ed.scene.remove(id);
     ed.scene.selection.clear();
     ed.scene.active = null;
@@ -198,7 +198,7 @@ export async function resetScene(page) {
  */
 export async function screenPoint(page, [x, y, z]) {
   return page.evaluate(([wx, wy, wz]) => {
-    const ed = window.kiln.editor;
+    const ed = window.kline.editor;
     const r = ed.canvas.getBoundingClientRect();
     const p = ed.camera.worldToScreen(
       new (ed.camera.target.constructor)(wx, wy, wz), r.width, r.height,
@@ -216,7 +216,7 @@ export async function screenPoint(page, [x, y, z]) {
  */
 export async function samplePixels(page, points) {
   return page.evaluate((pts) => {
-    const ed = window.kiln.editor;
+    const ed = window.kline.editor;
     const gl = ed.renderer.gl;
     ed.renderNow();
     const out = [];

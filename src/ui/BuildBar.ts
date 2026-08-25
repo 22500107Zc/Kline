@@ -216,7 +216,7 @@ export class BuildBar {
     clear(this.settings);
     this.settings.appendChild(h('h3', { class: 'prop-heading', text: 'Local model (optional)' }));
     this.settings.appendChild(h('p', { class: 'dim small' }, [
-      h('span', { text: 'Everything above works with no model at all. Connect one and Kiln can build things it has no recipe for. ' }),
+      h('span', { text: 'Everything above works with no model at all. Connect one and Kline can build things it has no recipe for. ' }),
       h('b', { text: 'Ollama runs on this machine and is free forever' }),
       h('span', { text: ' — install it, then `ollama pull llama3.2`. An OpenAI-compatible endpoint works too, including free tiers.' }),
     ]));

@@ -1,25 +1,55 @@
 {
-  "name": "Kiln — 3D Modelling",
-  "short_name": "Kiln",
+  "name": "Kline \u2014 3D Modelling",
+  "short_name": "Kline",
   "description": "An open source 3D modelling application: mesh editing, modifiers, materials and glTF export, running entirely on your machine.",
-  "id": "kiln-3d",
+  "id": "kline-3d",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "display_override": ["window-controls-overlay", "standalone"],
+  "display_override": [
+    "window-controls-overlay",
+    "standalone"
+  ],
   "orientation": "landscape",
   "background_color": "#131214",
   "theme_color": "#1b1a1d",
-  "categories": ["graphics", "productivity", "utilities"],
+  "categories": [
+    "graphics",
+    "productivity",
+    "utilities"
+  ],
   "icons": [
-    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ],
   "file_handlers": [
     {
       "action": "./",
-      "accept": { "application/json": [".kiln"], "model/obj": [".obj"] }
+      "accept": {
+        "application/json": [
+          ".kline",
+          ".kiln"
+        ],
+        "model/obj": [
+          ".obj"
+        ]
+      }
     }
   ]
 }

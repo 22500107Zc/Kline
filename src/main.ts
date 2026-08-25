@@ -2,7 +2,7 @@ import { App } from './ui/App';
 import { COMMANDS, runCommand } from './editor/commands';
 import './style.css';
 
-// Registering the worker is what lets browsers install Kiln as a desktop app,
+// Registering the worker is what lets browsers install Kline as a desktop app,
 // and what makes it start without a network connection afterwards.
 if ('serviceWorker' in navigator && import.meta.env.PROD && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => {
@@ -15,28 +15,34 @@ if ('serviceWorker' in navigator && import.meta.env.PROD && location.protocol.st
 }
 
 const mount = document.getElementById('app');
-if (!mount) throw new Error('Kiln could not find its mount point (#app).');
+if (!mount) throw new Error('Kline could not find its mount point (#app).');
 
 try {
   const app = new App(mount);
-  // Scripting handle: `kiln.editor` in the browser console reaches the live
-  // scene, and `kiln.run('mesh.bevel')` fires any command in the registry.
+  // Scripting handle: `kline.editor` in the browser console reaches the live
+  // scene, and `kline.run('mesh.bevel')` fires any command in the registry.
   // The same handle is what the end-to-end tests drive the app through.
-  (window as unknown as { kiln: unknown }).kiln = {
+  const handle = {
     app,
     editor: app.editor,
     commands: COMMANDS,
     run: (id: string) => runCommand(app.editor, id),
   };
+  const global = window as unknown as { kline: unknown; kiln: unknown };
+  global.kline = handle;
+  // The handle was called `kiln` before the application was renamed, and it is
+  // documented, scriptable and probably sitting in somebody's saved snippets.
+  // Keeping the old name pointing at the same object costs one line.
+  global.kiln = handle;
 } catch (err) {
   mount.innerHTML = '';
   const message = err instanceof Error ? err.message : String(err);
   const panel = document.createElement('div');
   panel.className = 'fatal';
   panel.innerHTML = `
-    <h1>Kiln could not start</h1>
+    <h1>Kline could not start</h1>
     <p>${message}</p>
-    <p class="dim">Kiln needs WebGL2. Try a recent Chrome, Firefox, Edge or Safari, and make
+    <p class="dim">Kline needs WebGL2. Try a recent Chrome, Firefox, Edge or Safari, and make
     sure hardware acceleration is enabled.</p>`;
   mount.appendChild(panel);
   throw err;

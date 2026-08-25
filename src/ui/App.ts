@@ -14,6 +14,7 @@ import { Timeline } from './Timeline';
 import { RenderWindow } from './RenderWindow';
 import { UVEditor } from './UVEditor';
 import { GraphEditor } from './GraphEditor';
+import { DiffPanel } from './DiffPanel';
 import { SculptPanel } from './SculptPanel';
 import { formatAge } from '../editor/recovery';
 
@@ -41,6 +42,7 @@ export class App {
   private renderWindow!: RenderWindow;
   private uvEditor!: UVEditor;
   private graphEditor!: GraphEditor;
+  private diffPanel!: DiffPanel;
   private recoveryBar = h('div', { class: 'recovery-bar hidden' });
 
   constructor(private mount: HTMLElement) {
@@ -59,17 +61,21 @@ export class App {
     this.renderWindow = new RenderWindow(this.editor);
     this.uvEditor = new UVEditor(this.editor);
     this.graphEditor = new GraphEditor(this.editor);
-    // Registered rather than key-handled here, so both windows reach the View
-    // menu, the command palette and the shortcut list through one definition.
+    this.diffPanel = new DiffPanel(this.editor);
+    // Registered rather than key-handled here, so every window reaches the
+    // View menu, the command palette and the shortcut list through one
+    // definition.
     this.editor.panels = {
       toggleUV: () => this.uvEditor.toggle(),
       toggleGraph: () => this.graphEditor.toggle(),
+      toggleDiff: () => this.diffPanel.toggle(),
     };
     const sculptPanel = new SculptPanel(this.editor);
     const timeline = new Timeline(this.editor);
     const viewport = h('main', { class: 'viewport' }, [
       this.canvas, this.buildBar.root, this.boxSelect, this.knifeLine, this.viewportHint,
-      sculptPanel.root, this.uvEditor.root, this.graphEditor.root, this.dropVeil, this.shortcuts,
+      sculptPanel.root, this.uvEditor.root, this.graphEditor.root, this.diffPanel.root,
+      this.dropVeil, this.shortcuts,
       this.renderWindow.root, this.palette.root,
     ]);
     const right = h('div', { class: 'sidebar' }, [outliner.root, properties.root]);
@@ -173,6 +179,11 @@ export class App {
         }
         if (this.graphEditor.visible) {
           this.graphEditor.hide();
+          e.preventDefault();
+          return;
+        }
+        if (this.diffPanel.visible) {
+          this.diffPanel.hide();
           e.preventDefault();
           return;
         }

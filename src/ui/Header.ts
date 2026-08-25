@@ -21,10 +21,12 @@ export class Header {
   private modeArea = h('div', { class: 'header-right' });
 
   constructor(private editor: Editor, onShowShortcuts: () => void) {
-    this.root.appendChild(h('div', { class: 'wordmark', title: 'Kiln' }, [
-      h('span', { text: 'K' }),
+    // The accent sits on the middle letter, which is what gives the wordmark
+    // its balance at this letter-spacing.
+    this.root.appendChild(h('div', { class: 'wordmark', title: 'Kline' }, [
+      h('span', { text: 'KL' }),
       h('span', { class: 'wordmark-accent', text: 'I' }),
-      h('span', { text: 'LN' }),
+      h('span', { text: 'NE' }),
     ]));
 
     const menuBar = h('nav', { class: 'menu-bar' });

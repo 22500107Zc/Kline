@@ -24,7 +24,7 @@ test('OBJ export writes transformed, Y-up geometry', () => {
   assert.equal(text.split('\n').filter((l) => l.startsWith('f ')).length, 6);
   assert.match(text, /^o Cube$/m);
   assert.match(text, /^usemtl Clay$/m);
-  // Kiln's +Z (up) becomes OBJ's +Y, so every vertex sits at y = 0 or y = 2.
+  // Kline's +Z (up) becomes OBJ's +Y, so every vertex sits at y = 0 or y = 2.
   for (const line of verts) {
     const y = parseFloat(line.split(/\s+/)[2]);
     assert.ok(Math.abs(y) < 1e-6 || Math.abs(y - 2) < 1e-6, `unexpected y ${y}`);
@@ -73,7 +73,7 @@ test('glTF export produces a valid-looking document', () => {
 
   // The root node converts Z-up to Y-up and owns every other node.
   const root = gltf.nodes[gltf.scenes[0].nodes[0]];
-  assert.equal(root.name, 'KilnScene');
+  assert.equal(root.name, 'KlineScene');
   assert.ok(Math.abs(root.rotation[0] + Math.SQRT1_2) < 1e-6);
   assert.equal(root.children.length, 2);
 
