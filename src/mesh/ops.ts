@@ -39,6 +39,40 @@ export function regionBoundary(mesh: Mesh, faceSet: Set<number>): BoundaryEdge[]
   return out;
 }
 
+/**
+ * The face indices in `faces` that actually name a face on this mesh.
+ *
+ * A selection is a set of integers, and an integer only means something
+ * against the mesh it was read from. Most of the time `pruneSelection` keeps
+ * the two in step — but it runs *after* an operator, not before, so a
+ * selection that outlived its mesh still arrives pointing at faces that are no
+ * longer there: a file that stored one, an operator that shrank the mesh, an
+ * evaluated mesh standing in for the original, a mesh swapped underneath by
+ * undo.
+ *
+ * Every operator here therefore treats its indices as a request rather than a
+ * promise. What exists is worked on; what does not is dropped. The alternative
+ * is what these functions used to do, which was read past the end of an array
+ * and throw a TypeError from four frames down — a crash rather than a
+ * no-op, over a stale number.
+ */
+export function faceIndices(mesh: Mesh, faces: Iterable<number>): Set<number> {
+  const out = new Set<number>();
+  for (const f of faces) {
+    if (Number.isInteger(f) && f >= 0 && f < mesh.faces.length) out.add(f);
+  }
+  return out;
+}
+
+/** The vertex indices in `verts` that actually name a vertex on this mesh. */
+export function vertIndices(mesh: Mesh, verts: Iterable<number>): Set<number> {
+  const out = new Set<number>();
+  for (const v of verts) {
+    if (Number.isInteger(v) && v >= 0 && v < mesh.positions.length) out.add(v);
+  }
+  return out;
+}
+
 /** Every vertex touched by the given faces. */
 export function facesToVerts(mesh: Mesh, faces: Iterable<number>): Set<number> {
   const s = new Set<number>();
@@ -98,7 +132,8 @@ export interface RegionSplitResult {
  * new boundary. This is the shared skeleton of extrude and inset — the two
  * differ purely in where the duplicated vertices are then moved.
  */
-export function splitRegion(mesh: Mesh, faceSet: Set<number>): RegionSplitResult {
+export function splitRegion(mesh: Mesh, region: Set<number>): RegionSplitResult {
+  const faceSet = faceIndices(mesh, region);
   const boundary = regionBoundary(mesh, faceSet);
   // Snapshot the corner lists and coordinates before the region is remapped.
   const originalLoops = new Map<number, number[]>();
@@ -156,7 +191,7 @@ export interface ExtrudeResult {
 
 /** Extrude a region of faces. The region is left in place; move `movedVerts` to finish. */
 export function extrudeFaces(mesh: Mesh, faces: Iterable<number>): ExtrudeResult {
-  const faceSet = new Set(faces);
+  const faceSet = faceIndices(mesh, faces);
   if (faceSet.size === 0) return { movedVerts: new Set(), walls: [], normal: new Vec3(0, 0, 1) };
 
   const t = mesh.topology();
@@ -205,7 +240,7 @@ export function extrudeEdges(mesh: Mesh, edges: Iterable<number>): Set<number> {
 export function insetFaces(
   mesh: Mesh, faces: Iterable<number>, thickness = 0.1, depth = 0,
 ): { movedVerts: Set<number>; ring: number[] } {
-  const faceSet = new Set(faces);
+  const faceSet = faceIndices(mesh, faces);
   if (faceSet.size === 0) return { movedVerts: new Set(), ring: [] };
 
   const before = mesh.topology();
@@ -255,7 +290,7 @@ export function insetFacesIndividual(
 ): { movedVerts: Set<number>; ring: number[] } {
   const moved = new Set<number>();
   const ring: number[] = [];
-  for (const f of faces) {
+  for (const f of faceIndices(mesh, faces)) {
     const r = insetFaces(mesh, [f], thickness, depth);
     for (const v of r.movedVerts) moved.add(v);
     ring.push(...r.ring);
@@ -406,7 +441,7 @@ export function loopCut(
 
 /** Linear (non-smoothing) quad subdivision of the given faces. */
 export function subdivideFaces(mesh: Mesh, faces: Iterable<number>): { newVerts: number[] } {
-  const faceSet = new Set(faces);
+  const faceSet = faceIndices(mesh, faces);
   if (faceSet.size === 0) return { newVerts: [] };
   const t = mesh.topology();
   const newVerts: number[] = [];
@@ -511,8 +546,11 @@ export function subdivideFaces(mesh: Mesh, faces: Iterable<number>): { newVerts:
 
 /** Catmull-Clark subdivision of the whole mesh (used by the Subsurf modifier). */
 export function catmullClark(mesh: Mesh, levels = 1): Mesh {
+  // Each level multiplies the mesh by four, so a file claiming a hundred
+  // levels is a hang, not a model.
+  const passes = Number.isFinite(levels) ? Math.max(0, Math.min(6, Math.floor(levels))) : 1;
   let cur = mesh;
-  for (let l = 0; l < Math.max(0, Math.floor(levels)); l++) cur = catmullClarkOnce(cur);
+  for (let l = 0; l < passes; l++) cur = catmullClarkOnce(cur);
   return cur;
 }
 
@@ -619,7 +657,7 @@ function catmullClarkOnce(mesh: Mesh): Mesh {
 
 /** Weld vertices closer than `dist`. Returns how many were removed. */
 export function mergeByDistance(mesh: Mesh, verts: Iterable<number> | null, dist = 0.0001): number {
-  const candidates = verts ? new Set(verts) : new Set(mesh.positions.map((_, i) => i));
+  const candidates = verts ? vertIndices(mesh, verts) : new Set(mesh.positions.map((_, i) => i));
   const cell = Math.max(dist, 1e-9);
   const buckets = new Map<string, number[]>();
   const remap = new Array<number>(mesh.positions.length).fill(-1);
@@ -668,7 +706,7 @@ export function mergeByDistance(mesh: Mesh, verts: Iterable<number> | null, dist
 
 /** Collapse the given vertices to a single point (Merge at Center). */
 export function mergeVertices(mesh: Mesh, verts: Iterable<number>, at?: Vec3): number {
-  const list = [...verts];
+  const list = [...vertIndices(mesh, verts)];
   if (list.length < 2) return 0;
   const center = at ?? list
     .reduce((acc, v) => acc.addInPlace(mesh.positions[v]), new Vec3())
@@ -684,7 +722,7 @@ export function mergeVertices(mesh: Mesh, verts: Iterable<number>, at?: Vec3): n
 }
 
 export function deleteFaces(mesh: Mesh, faces: Iterable<number>, keepVerts = false): void {
-  const drop = new Set(faces);
+  const drop = faceIndices(mesh, faces);
   const kept: number[][] = [];
   const mats: number[] = [];
   const smooth: boolean[] = [];
@@ -702,7 +740,7 @@ export function deleteFaces(mesh: Mesh, faces: Iterable<number>, keepVerts = fal
 }
 
 export function deleteVertices(mesh: Mesh, verts: Iterable<number>): void {
-  const drop = new Set(verts);
+  const drop = vertIndices(mesh, verts);
   const doomed: number[] = [];
   for (let f = 0; f < mesh.faces.length; f++) {
     if (mesh.faces[f].some((v) => drop.has(v))) doomed.push(f);
@@ -730,7 +768,7 @@ export function deleteEdges(mesh: Mesh, edges: Iterable<number>): void {
 
 /** Merge a connected face region into a single n-gon (Dissolve Faces). */
 export function dissolveFaces(mesh: Mesh, faces: Iterable<number>): number[] {
-  const faceSet = new Set(faces);
+  const faceSet = faceIndices(mesh, faces);
   if (faceSet.size < 2) return [...faceSet];
   const boundary = regionBoundary(mesh, faceSet);
   if (boundary.length < 3) return [...faceSet];
@@ -769,7 +807,15 @@ export function dissolveFaces(mesh: Mesh, faces: Iterable<number>): number[] {
 }
 
 /** Build one n-gon (or a quad from two edges' worth of verts) from a vertex set. */
-export function makeFace(mesh: Mesh, verts: number[]): number | null {
+export function makeFace(mesh: Mesh, corners: number[]): number | null {
+  // Ordering matters here, so the corners are filtered in place rather than
+  // routed through the Set that `vertIndices` returns.
+  const seen = new Set<number>();
+  const verts = corners.filter((v) => {
+    if (!Number.isInteger(v) || v < 0 || v >= mesh.positions.length || seen.has(v)) return false;
+    seen.add(v);
+    return true;
+  });
   if (verts.length < 3) return null;
   const t = mesh.topology();
   // Order the vertices by walking existing edges when possible, else by angle.
@@ -824,7 +870,7 @@ export function makeFace(mesh: Mesh, verts: number[]): number | null {
 export function flipNormals(mesh: Mesh, faces?: Iterable<number>): void {
   // Reversing the corner order has to reverse the coordinates with it.
   if (mesh.faceUV) {
-    const list = faces ? [...faces] : mesh.faces.map((_, f) => f);
+    const list = faces ? [...faceIndices(mesh, faces)] : mesh.faces.map((_, f) => f);
     for (const f of list) {
       const uv = mesh.uvFor(f);
       if (!uv) continue;
@@ -899,7 +945,7 @@ export function recalculateNormals(mesh: Mesh, inside = false): void {
 /** Laplacian smoothing of the given vertices (or all of them). */
 export function smoothVertices(mesh: Mesh, verts: Iterable<number> | null, factor = 0.5, iterations = 1): void {
   const t0 = mesh.topology();
-  const set = verts ? new Set(verts) : new Set(mesh.positions.map((_, i) => i));
+  const set = verts ? vertIndices(mesh, verts) : new Set(mesh.positions.map((_, i) => i));
   for (let it = 0; it < iterations; it++) {
     const t = it === 0 ? t0 : mesh.topology();
     const next = mesh.positions.map((p) => p.clone());
@@ -920,7 +966,7 @@ export function smoothVertices(mesh: Mesh, verts: Iterable<number> | null, facto
 }
 
 export function triangulateFaces(mesh: Mesh, faces?: Iterable<number>): void {
-  const set = faces ? new Set(faces) : null;
+  const set = faces ? faceIndices(mesh, faces) : null;
   const out: number[][] = [];
   const mats: number[] = [];
   const smooth: boolean[] = [];
@@ -956,7 +1002,7 @@ export function triangulateFaces(mesh: Mesh, faces?: Iterable<number>): void {
 export function duplicateFaces(
   mesh: Mesh, faces: Iterable<number>,
 ): { faces: number[]; verts: Set<number> } {
-  const faceSet = [...new Set(faces)];
+  const faceSet = [...faceIndices(mesh, faces)];
   const map = new Map<number, number>();
   const verts = new Set<number>();
   for (const f of faceSet) {
@@ -979,6 +1025,6 @@ export function duplicateFaces(
 
 /** Move a set of vertices by a delta. */
 export function translateVerts(mesh: Mesh, verts: Iterable<number>, delta: Vec3): void {
-  for (const v of verts) mesh.positions[v] = mesh.positions[v].add(delta);
+  for (const v of vertIndices(mesh, verts)) mesh.positions[v] = mesh.positions[v].add(delta);
   mesh.markDirty();
 }

@@ -4,10 +4,13 @@ import { Mat4, Vec3 } from '../src/core/math';
 import { Mesh } from '../src/mesh/Mesh';
 import { createCube, createCylinder, createGrid, createIcoSphere, createPlane, createUVSphere } from '../src/mesh/primitives';
 import {
-  catmullClark, deleteFaces, dissolveFaces, duplicateFaces, edgeRing, extrudeFaces, flipNormals,
-  insetFaces, loopCut, makeFace, mergeByDistance, recalculateNormals, subdivideFaces,
+  catmullClark, deleteEdges, deleteFaces, deleteVertices, dissolveFaces, duplicateFaces, edgeRing,
+  extrudeEdges, extrudeFaces, facesToVerts, flipNormals, insetFaces, insetFacesIndividual, loopCut,
+  makeFace, mergeByDistance, mergeVertices, recalculateNormals, smoothVertices, subdivideFaces,
   translateVerts, triangulateFaces,
 } from '../src/mesh/ops';
+import { pokeFaces, spinEdges } from '../src/mesh/modeling';
+import { bevelEdges, bevelVertices, markBevelWeight } from '../src/mesh/bevel';
 
 /** Signed volume of a closed mesh; positive when outward-facing. */
 function volume(m: Mesh): number {
@@ -312,5 +315,103 @@ test('UVs follow their corners when a pinched face is split', () => {
     if (!uv) continue;
     assert.equal(uv.length, mesh.faces[f].length * 2, `face ${f} has ${uv.length} coordinates for ${mesh.faces[f].length} corners`);
     assert.ok(uv.every((c) => Number.isFinite(c)), `face ${f} has a non-finite coordinate`);
+  }
+});
+
+/**
+ * Every operator that takes indices, handed indices that name nothing.
+ *
+ * A selection is a set of integers, and an integer only means something
+ * against the mesh it was read from. `pruneSelection` normally keeps the two
+ * in step, but it runs *after* an operator rather than before — so a selection
+ * that outlived its mesh arrives still pointing at faces that are gone. Before
+ * these operators filtered their arguments, that read past the end of an array
+ * and threw a TypeError from several frames down: a crash, over a stale
+ * number, where doing nothing was the right answer.
+ */
+test('mesh operators drop indices that name nothing instead of crashing', () => {
+  const stale = [9999, -1, 0.5, NaN];
+  // Each entry runs the operator with only bad indices, and again with one
+  // real index mixed in — the second is what catches an operator that bails on
+  // an empty set but still trusts a partly-valid one.
+  const cases: [string, (m: Mesh, idx: number[]) => unknown][] = [
+    ['facesToVerts', (m, i) => facesToVerts(m, i)],
+    ['extrudeFaces', (m, i) => extrudeFaces(m, i)],
+    ['extrudeEdges', (m, i) => extrudeEdges(m, i)],
+    ['insetFaces', (m, i) => insetFaces(m, i, 0.1, 0)],
+    ['insetFacesIndividual', (m, i) => insetFacesIndividual(m, i, 0.1, 0)],
+    ['subdivideFaces', (m, i) => subdivideFaces(m, i)],
+    ['mergeByDistance', (m, i) => mergeByDistance(m, i)],
+    ['mergeVertices', (m, i) => mergeVertices(m, i)],
+    ['deleteFaces', (m, i) => deleteFaces(m, i)],
+    ['deleteVertices', (m, i) => deleteVertices(m, i)],
+    ['deleteEdges', (m, i) => deleteEdges(m, i)],
+    ['dissolveFaces', (m, i) => dissolveFaces(m, i)],
+    ['duplicateFaces', (m, i) => duplicateFaces(m, i)],
+    ['triangulateFaces', (m, i) => triangulateFaces(m, i)],
+    ['flipNormals', (m, i) => flipNormals(m, i)],
+    ['smoothVertices', (m, i) => smoothVertices(m, i)],
+    ['makeFace', (m, i) => makeFace(m, i)],
+    ['translateVerts', (m, i) => translateVerts(m, i, new Vec3(1, 0, 0))],
+    ['pokeFaces', (m, i) => pokeFaces(m, i)],
+    ['spinEdges', (m, i) => spinEdges(m, i, new Vec3(0, 0, 1), new Vec3(), Math.PI, 4)],
+    ['bevelEdges', (m, i) => bevelEdges(m, i, 0.05, 1)],
+    ['bevelVertices', (m, i) => bevelVertices(m, i, 0.05)],
+    ['markBevelWeight', (m, i) => markBevelWeight(m, i, 1)],
+  ];
+
+  for (const [name, run] of cases) {
+    for (const indices of [stale, [0, ...stale]]) {
+      const mesh = createCube();
+      run(mesh, indices);
+      for (const p of mesh.positions) {
+        assert.ok(Number.isFinite(p.x + p.y + p.z), `${name}: left a non-finite coordinate`);
+      }
+      for (const f of mesh.faces) {
+        assert.ok(f.length >= 3, `${name}: left a face with ${f.length} corners`);
+        for (const v of f) {
+          assert.ok(
+            Number.isInteger(v) && v >= 0 && v < mesh.positions.length,
+            `${name}: left corner ${v} against ${mesh.positions.length} vertices`,
+          );
+        }
+      }
+      assert.equal(
+        mesh.faceMaterial.length, mesh.faces.length,
+        `${name}: left faceMaterial out of step with the faces`,
+      );
+      mesh.topology();
+    }
+  }
+});
+
+test('a stale index costs that index, not the operation', () => {
+  // Filtering must not turn a partly-valid request into a no-op: the real
+  // indices still have to be acted on.
+  const moved = createCube();
+  const before = moved.positions[0].clone();
+  translateVerts(moved, [0, 9999, -1, NaN], new Vec3(1, 0, 0));
+  assert.ok(
+    Math.abs(moved.positions[0].x - (before.x + 1)) < 1e-9,
+    'the vertex that does exist should still have moved',
+  );
+
+  const subdivided = createCube();
+  subdivideFaces(subdivided, [0, 9999]);
+  assert.equal(subdivided.faces.length, 9, 'the one real face should still have been subdivided');
+
+  const deleted = createCube();
+  deleteFaces(deleted, [0, 9999]);
+  assert.equal(deleted.faces.length, 5, 'the one real face should still have been deleted');
+});
+
+test('a file cannot ask for a subdivision level that never returns', () => {
+  // Each level multiplies the mesh by four, so an unbounded level read from a
+  // modifier in a file is a hang rather than a model.
+  const from = createCube();
+  for (const levels of [1e6, Infinity, NaN, -5, 2.7]) {
+    const out = catmullClark(from, levels);
+    assert.ok(out.faces.length > 0, `levels=${levels} should still produce a mesh`);
+    assert.ok(out.faces.length < 200_000, `levels=${levels} produced ${out.faces.length} faces`);
   }
 });

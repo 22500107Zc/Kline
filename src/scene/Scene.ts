@@ -522,46 +522,147 @@ export class Scene {
     };
   }
 
+  /**
+   * Rebuild a scene from a document, keeping only what is actually usable.
+   *
+   * This is the one entry point in the application whose input nobody here
+   * wrote. A file arrives truncated by a full disk, half-written by a cloud
+   * folder, edited by hand, or produced by a different version — and every
+   * one of those used to throw a raw TypeError out of the loader, which took
+   * the whole application down rather than reporting a bad file.
+   *
+   * The rule throughout is the one the modifier stack already follows: check
+   * what a field has to be, keep it if it is, drop it if it is not, and never
+   * throw. An empty scene is a scene somebody can still work in; a stack
+   * trace is not.
+   */
   static fromJSON(data: SerializedScene): Scene {
+    const doc = (data ?? {}) as Partial<SerializedScene>;
     const s = new Scene();
-    s.nextId = data.nextId ?? 1;
-    s.world = { ...s.world, ...data.world };
-    s.cursor = Vec3.fromArray(data.cursor ?? [0, 0, 0]);
-    s.materials = (data.materials ?? []).map(cloneMaterial);
-    s.textures = (data.textures ?? []).map((t) => ({ ...t }));
-    s.timeline = { ...defaultTimeline(), ...(data.timeline ?? {}), playing: false };
+
+    const number = (v: unknown, fallback: number): number => (
+      typeof v === 'number' && Number.isFinite(v) ? v : fallback
+    );
+    /** A transform component, defaulting per-axis rather than all-or-nothing. */
+    const vector = (v: unknown, fallback: number): Vec3 => {
+      const a = Array.isArray(v) ? v : [];
+      return new Vec3(number(a[0], fallback), number(a[1], fallback), number(a[2], fallback));
+    };
+
+    s.nextId = Math.max(1, Math.floor(number(doc.nextId, 1)));
+    s.world = { ...s.world, ...(doc.world && typeof doc.world === 'object' ? doc.world : {}) };
+    s.cursor = vector(doc.cursor, 0);
+    s.materials = (Array.isArray(doc.materials) ? doc.materials : [])
+      .filter((m) => m && typeof m === 'object')
+      .map(cloneMaterial);
+    s.textures = (Array.isArray(doc.textures) ? doc.textures : [])
+      .filter((t) => t && typeof t === 'object')
+      .map((t) => ({ ...t }));
+    s.timeline = {
+      ...defaultTimeline(),
+      ...(doc.timeline && typeof doc.timeline === 'object' ? doc.timeline : {}),
+      playing: false,
+    };
     for (const t of s.textures) reserveTextureId(t.id);
-    s.order = [...(data.order ?? [])];
-    for (const od of data.objects ?? []) {
-      const o = new SceneObject(od.id, od.name, od.type);
+    s.order = (Array.isArray(doc.order) ? doc.order : []).filter((id) => Number.isInteger(id));
+
+    for (const raw of Array.isArray(doc.objects) ? doc.objects : []) {
+      if (!raw || typeof raw !== 'object') continue;
+      const od = raw as Partial<SerializedObject>;
+      // An object with no usable id cannot be referenced, parented or
+      // selected, so there is nothing to salvage.
+      if (!Number.isInteger(od.id)) continue;
+      const o = new SceneObject(
+        od.id as number,
+        typeof od.name === 'string' ? od.name : 'Object',
+        od.type ?? 'mesh',
+      );
       o.owner = s;
-      o.position = Vec3.fromArray(od.position);
-      o.rotation = Vec3.fromArray(od.rotation);
-      o.scale = Vec3.fromArray(od.scale);
+      o.position = vector(od.position, 0);
+      o.rotation = vector(od.rotation, 0);
+      // Scale defaults to one: a zero there would make the object invisible
+      // and its matrix singular.
+      o.scale = vector(od.scale, 1);
       o.visible = od.visible !== false;
       o.locked = !!od.locked;
-      o.parent = od.parent ?? null;
-      o.children = [...(od.children ?? [])];
-      o.mesh = od.mesh ? Mesh.fromJSON(od.mesh) : null;
-      // Straight from a file, so each one is checked and completed rather
-      // than trusted; anything unrecognisable is dropped instead of carried.
-      o.modifiers = (od.modifiers ?? [])
+      o.parent = Number.isInteger(od.parent) ? (od.parent as number) : null;
+      o.children = (Array.isArray(od.children) ? od.children : []).filter((id) => Number.isInteger(id));
+      o.mesh = od.mesh && typeof od.mesh === 'object' ? Mesh.fromJSON(od.mesh) : null;
+      // Each modifier is checked and completed rather than trusted; anything
+      // unrecognisable is dropped instead of carried.
+      o.modifiers = (Array.isArray(od.modifiers) ? od.modifiers : [])
         .map((m) => normaliseModifier(m))
         .filter((m): m is Modifier => m !== null);
-      o.materialSlots = od.materialSlots ?? [];
-      o.light = od.light ?? null;
-      o.camera = od.camera ?? null;
-      o.armature = od.armature ? cloneArmature(od.armature) : null;
-      o.physics = od.physics ? { ...od.physics } : null;
-      o.animation = cloneChannels(od.animation ?? []);
+      o.materialSlots = (Array.isArray(od.materialSlots) ? od.materialSlots : [])
+        .filter((i) => Number.isInteger(i) && i >= 0);
+      o.light = od.light && typeof od.light === 'object' ? od.light : null;
+      o.camera = od.camera && typeof od.camera === 'object' ? od.camera : null;
+      o.armature = od.armature && typeof od.armature === 'object' ? cloneArmature(od.armature) : null;
+      o.physics = od.physics && typeof od.physics === 'object' ? { ...od.physics } : null;
+      o.animation = sanitiseChannels(od.animation);
       s.objects.set(o.id, o);
       s.nextId = Math.max(s.nextId, o.id + 1);
     }
-    if (s.order.length === 0) s.order = [...s.objects.keys()];
-    s.selection = new Set((data.selection ?? []).filter((id) => s.objects.has(id)));
-    s.active = data.active !== undefined && s.objects.has(data.active as number) ? data.active : null;
+
+    // Parent and child links that point nowhere would leave objects
+    // unreachable in the outliner and loop forever in a world-matrix walk.
+    for (const o of s.objects.values()) {
+      if (o.parent !== null && !s.objects.has(o.parent)) o.parent = null;
+      if (o.parent === o.id) o.parent = null;
+      o.children = o.children.filter((id) => id !== o.id && s.objects.has(id));
+    }
+    // A parent cycle is not repairable by filtering alone; walk up from each
+    // object and cut the link that closes the loop.
+    for (const o of s.objects.values()) {
+      const seen = new Set<number>([o.id]);
+      let cursor = o;
+      while (cursor.parent !== null) {
+        if (seen.has(cursor.parent)) { cursor.parent = null; break; }
+        seen.add(cursor.parent);
+        const next = s.objects.get(cursor.parent);
+        if (!next) { cursor.parent = null; break; }
+        cursor = next;
+      }
+    }
+
+    s.order = s.order.filter((id) => s.objects.has(id));
+    for (const id of s.objects.keys()) if (!s.order.includes(id)) s.order.push(id);
+    s.selection = new Set(
+      (Array.isArray(doc.selection) ? doc.selection : []).filter((id) => s.objects.has(id)),
+    );
+    s.active = Number.isInteger(doc.active) && s.objects.has(doc.active as number)
+      ? (doc.active as number)
+      : null;
     return s;
   }
+}
+
+/**
+ * Animation channels from a document, keeping only the keys that are keys.
+ *
+ * A channel whose keys are missing, null, or not an array is not something to
+ * interpolate; a key with a non-finite frame or value would put NaN into a
+ * transform the moment the playhead reached it.
+ */
+function sanitiseChannels(raw: unknown): Channel[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Channel[] = [];
+  for (const c of raw) {
+    if (!c || typeof c !== 'object') continue;
+    const channel = c as Partial<Channel>;
+    if (typeof channel.path !== 'string') continue;
+    if (!Number.isInteger(channel.index) || (channel.index as number) < 0) continue;
+    if (!Array.isArray(channel.keys)) continue;
+    const keys = channel.keys
+      .filter((k) => k && typeof k === 'object'
+        && Number.isFinite((k as { frame: number }).frame)
+        && Number.isFinite((k as { value: number }).value))
+      .map((k) => ({ ...(k as object) })) as Channel['keys'];
+    if (keys.length === 0) continue;
+    keys.sort((a, b) => a.frame - b.frame);
+    out.push({ path: channel.path, index: channel.index as number, keys });
+  }
+  return out;
 }
 
 export interface SerializedObject {
