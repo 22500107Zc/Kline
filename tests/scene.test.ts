@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEG2RAD, Mat4, Vec3, decomposeMatrix } from '../src/core/math';
 import { Scene } from '../src/scene/Scene';
-import { createCube, createPlane } from '../src/mesh/primitives';
+import { createCube, createPlane, createUVSphere } from '../src/mesh/primitives';
 import { MODIFIER_LABELS, createModifier, evaluateStack, normaliseModifier } from '../src/modifiers';
-import { hexToLinear, linearToHex } from '../src/scene/Material';
+import { createMaterial, hexToLinear, linearToHex } from '../src/scene/Material';
 
 test('matrix decomposition round-trips through compose', () => {
   const position = new Vec3(1.5, -2, 0.25);
@@ -224,4 +224,129 @@ test('a modifier keeps the values it does carry', () => {
   assert.equal((filled as { levels: number }).levels, 3);
   // And the field it did not carry comes from the defaults.
   assert.equal(typeof filled.showInEdit, 'boolean');
+});
+
+/**
+ * A `.kline` file is the only input to this application that nobody here
+ * wrote. It can be truncated by a failed download, edited by hand, written by
+ * an older build, or simply be some other JSON file the user picked by
+ * mistake. Loading one has to end in a scene — possibly a smaller scene than
+ * the file described — and never in a stack trace over an empty viewport.
+ */
+test('a corrupt scene file loads as a usable scene instead of throwing', () => {
+  const source = new Scene();
+  source.materials.push(createMaterial({ name: 'Clay' }));
+  source.add('mesh', 'Cube', createCube());
+  const good = JSON.parse(JSON.stringify(source.toJSON()));
+  // The whole point of these cases is that the document is not the shape the
+  // types promise, so the mutations work on it untyped.
+  type Doc = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const mutate = (fn: (d: Doc) => void): unknown => {
+    const d: Doc = JSON.parse(JSON.stringify(good));
+    fn(d);
+    return d;
+  };
+
+  const cases: Record<string, unknown> = {
+    empty: {},
+    nullDocument: null,
+    aString: 'this is not a scene',
+    nullObjects: mutate((d) => { d.objects = null; }),
+    objectsNotArray: mutate((d) => { d.objects = 'nope'; }),
+    objectMissingMesh: mutate((d) => { delete d.objects[0].mesh; }),
+    meshMissingFaces: mutate((d) => { delete d.objects[0].mesh.faces; }),
+    meshFacesNull: mutate((d) => { d.objects[0].mesh.faces = null; }),
+    positionsTruncated: mutate((d) => { d.objects[0].mesh.positions = [1, 2]; }),
+    positionsWithNull: mutate((d) => { d.objects[0].mesh.positions[0] = null; }),
+    faceOutOfRange: mutate((d) => { d.objects[0].mesh.faces[0] = [0, 1, 9999]; }),
+    faceNotArray: mutate((d) => { d.objects[0].mesh.faces[0] = 7; }),
+    faceTooShort: mutate((d) => { d.objects[0].mesh.faces[0] = [0, 1]; }),
+    faceRepeatsACorner: mutate((d) => { d.objects[0].mesh.faces[0] = [0, 0, 0]; }),
+    objectIsItsOwnParent: mutate((d) => {
+      const o = d.objects[0];
+      o.parent = o.id;
+    }),
+    missingMaterials: mutate((d) => { delete d.materials; }),
+    materialsNotArray: mutate((d) => { d.materials = 5; }),
+    absurdNextId: mutate((d) => { d.nextId = Number.MAX_SAFE_INTEGER; }),
+    selectionGarbage: mutate((d) => { d.selection = [999, 'x', null]; }),
+    activeNamesNothing: mutate((d) => { d.active = 4242; }),
+    timelineBackwards: mutate((d) => {
+      d.timeline = { start: 100, end: 1, fps: 0, current: 50 };
+    }),
+    animationWithNoKeys: mutate((d) => {
+      d.objects[0].animation = [{ path: 'position', index: 9, keys: null }];
+    }),
+  };
+
+  for (const [name, doc] of Object.entries(cases)) {
+    const scene = Scene.fromJSON(doc as never);
+    for (const obj of scene.objects.values()) {
+      for (const axis of [obj.position, obj.rotation, obj.scale]) {
+        assert.ok(Number.isFinite(axis.x + axis.y + axis.z), `${name}: transform must be finite`);
+      }
+      // A parent chain that loops would hang worldMatrix() forever.
+      const seen = new Set<number>();
+      for (let p = obj.parent; p !== null; p = scene.get(p)?.parent ?? null) {
+        assert.ok(!seen.has(p), `${name}: parent chain loops through ${p}`);
+        seen.add(p);
+      }
+      obj.worldMatrix(scene);
+      if (!obj.mesh) continue;
+      for (const p of obj.mesh.positions) {
+        assert.ok(Number.isFinite(p.x + p.y + p.z), `${name}: coordinates must be finite`);
+      }
+      for (const f of obj.mesh.faces) {
+        assert.ok(Array.isArray(f) && f.length >= 3, `${name}: a face needs three corners`);
+        for (const v of f) {
+          assert.ok(
+            Number.isInteger(v) && v >= 0 && v < obj.mesh.positions.length,
+            `${name}: corner ${v} does not name one of the ${obj.mesh.positions.length} vertices`,
+          );
+        }
+      }
+      // Whatever survived has to be drawable and re-saveable.
+      obj.mesh.topology();
+      obj.evaluated();
+    }
+    assert.doesNotThrow(() => JSON.stringify(scene.toJSON()), `${name}: must save again`);
+  }
+});
+
+test('an intact scene file still loads intact', () => {
+  // Validation must not be quietly deleting things from good files.
+  const source = new Scene();
+  source.materials.push(createMaterial({ name: 'Clay' }));
+  const parent = source.add('mesh', 'Cube', createCube());
+  const child = source.add('mesh', 'Sphere', createUVSphere(1, 8, 6));
+  child.parent = parent.id;
+  child.position = new Vec3(2, 3, 4);
+  child.scale = new Vec3(0.5, 0.5, 0.5);
+  source.selection = new Set([child.id]);
+  source.active = child.id;
+
+  const back = Scene.fromJSON(JSON.parse(JSON.stringify(source.toJSON())));
+  assert.equal(back.objects.size, 2);
+  assert.equal(back.materials.length, source.materials.length);
+  const restored = back.get(child.id);
+  assert.ok(restored);
+  assert.equal(restored.parent, parent.id, 'parenting survives');
+  assert.deepEqual(
+    [restored.position.x, restored.position.y, restored.position.z], [2, 3, 4],
+  );
+  assert.equal(restored.scale.x, 0.5, 'a real scale is not overwritten by the default');
+  assert.equal(restored.mesh?.faceCount, child.mesh?.faceCount, 'geometry survives');
+  assert.equal(back.active, child.id);
+  assert.ok(back.selection.has(child.id));
+});
+
+test('a scale the file forgot to write defaults to one, not zero', () => {
+  // A missing scale that reads as zero collapses the object to a point, which
+  // looks exactly like the object having been deleted.
+  const source = new Scene();
+  source.add('mesh', 'Cube', createCube());
+  const doc = JSON.parse(JSON.stringify(source.toJSON()));
+  delete doc.objects[0].scale;
+  const obj = [...Scene.fromJSON(doc).objects.values()][0];
+  assert.deepEqual([obj.scale.x, obj.scale.y, obj.scale.z], [1, 1, 1]);
 });

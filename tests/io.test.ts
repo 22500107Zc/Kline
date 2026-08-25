@@ -96,3 +96,65 @@ test('glTF export honours the selection filter', () => {
   const gltf = JSON.parse(exportGLTF(s, true));
   assert.equal(gltf.meshes.length, 1);
 });
+
+/**
+ * OBJ arrives from everywhere — other applications, half-finished exports,
+ * downloads that stopped early — so the importer is the one place in Kline
+ * where the input was written by a stranger. It gets to return an empty list
+ * or a smaller model, but never a mesh the rest of the app cannot draw.
+ */
+test('a corrupt OBJ never produces geometry the app cannot draw', () => {
+  const cases: Record<string, string> = {
+    empty: '',
+    justComments: '# nothing here\n# at all\n',
+    faceBeforeVertex: 'f 1 2 3\nv 0 0 0\n',
+    outOfRange: 'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 99\n',
+    nonNumericVertex: 'v a b c\nv 1 0 0\nv 0 1 0\nf 1 2 3\n',
+    missingComponents: 'v 1 2\nv 1 0 0\nv 0 1 0\nf 1 2 3\n',
+    overflowingCoordinate: 'v 1e999 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n',
+    twoVertexFace: 'v 0 0 0\nv 1 0 0\nf 1 2\n',
+    repeatedCorner: 'v 0 0 0\nf 1 1 1\n',
+    // OBJ indices are 1-based, so a zero does not name a vertex.
+    zeroIndex: 'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 0 1 2\n',
+    negativeBeyondStart: 'v 0 0 0\nv 1 0 0\nv 0 1 0\nf -99 -2 -1\n',
+    notAnOBJAtAll: '    binary noise',
+  };
+  for (const [name, text] of Object.entries(cases)) {
+    const objects = importOBJ(text);
+    for (const { mesh } of objects) {
+      for (const p of mesh.positions) {
+        assert.ok(Number.isFinite(p.x + p.y + p.z), `${name}: coordinates must be finite`);
+      }
+      assert.ok(mesh.faces.length > 0, `${name}: an empty group should not be imported at all`);
+      for (const f of mesh.faces) {
+        assert.ok(f.length >= 3, `${name}: a face needs three corners`);
+        for (const v of f) {
+          assert.ok(
+            Number.isInteger(v) && v >= 0 && v < mesh.positions.length,
+            `${name}: corner ${v} does not name one of the ${mesh.positions.length} vertices`,
+          );
+        }
+      }
+    }
+  }
+});
+
+test('a readable OBJ still imports everything it should', () => {
+  // The hardening above must not cost the cases that were always fine.
+  const negative = importOBJ('v 0 0 0\nv 1 0 0\nv 0 1 0\nf -3 -2 -1\n');
+  assert.equal(negative.length, 1, 'negative indices count back from here');
+  assert.equal(negative[0].mesh.faces.length, 1);
+
+  const crlf = importOBJ('v 0 0 0\r\nv 1 0 0\r\nv 0 1 0\r\nf 1 2 3\r\n');
+  assert.equal(crlf[0].mesh.faces.length, 1, 'Windows line endings');
+
+  const slashes = importOBJ('v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvn 0 0 1\nf 1/1/1 2/1/1 3/1/1\n');
+  assert.equal(slashes[0].mesh.faces.length, 1, 'vertex/uv/normal corner references');
+
+  // A bad coordinate costs that coordinate, not the vertex it belongs to:
+  // dropping the `v` line would shift every index after it and quietly
+  // reassemble the model out of the wrong corners.
+  const partial = importOBJ('v 5 nope 7\nv 1 0 0\nv 0 1 0\nf 1 2 3\n');
+  assert.equal(partial[0].mesh.positions.length, 3, 'the vertex still exists');
+  assert.equal(partial[0].mesh.faces[0].length, 3, 'and the face still finds it');
+});

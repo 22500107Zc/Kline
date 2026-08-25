@@ -136,10 +136,24 @@ keep going.
 | `Cmd/Ctrl + G` | Graph editor |
 | `Cmd/Ctrl + D` | Compare versions |
 | `F12` | Render the image |
+| Help ▸ Getting Started | The guided tour, any time |
 | `?` | The full keyboard sheet |
 
 The palette lists commands from the other mode too, marked, so you can discover
 that Recalculate Normals lives in Edit Mode instead of finding nothing.
+
+---
+
+## First time here
+
+Kline opens with a short guided tour the first time you run it — six cards
+covering the two modes, the transform keys, the Build box and version
+comparison. Each card has a button that does the thing it is describing to the
+scene behind it, because watching a cube light up with vertices teaches more
+than reading that Tab does that.
+
+Tick **Do not show this when Kline opens** and it will not come back. It stays
+in **Help ▸ Getting Started** if you want it again.
 
 ---
 
@@ -522,9 +536,9 @@ closed solid instead.
 npm run dev         # Vite dev server with HMR
 npm run typecheck   # tsc --noEmit, strict
 npm test            # everything below
-npm run test:unit   # 365 unit tests over the kernel, operators, UVs, sculpting,
+npm run test:unit   # 367 unit tests over the kernel, operators, UVs, sculpting,
                     # animation, the path tracer, comparison, the scene and IO
-npm run test:app    # 17 tests in a real browser: shadows land, overlays draw,
+npm run test:app    # 20 tests in a real browser: shadows land, overlays draw,
                     # strokes and rigs reach the screen, comparisons tint,
                     # clicks and modals behave. Skipped without Chromium.
 npm run build       # typecheck + production bundle into dist/

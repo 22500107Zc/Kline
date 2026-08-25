@@ -2035,3 +2035,83 @@ button:disabled {
 .diff-swatch.diff-added { background: #3ec75c; }
 .diff-swatch.diff-moved { background: #fbae26; }
 .diff-swatch.diff-removed { background: #ee453e; }
+
+/* -------------------------------------------------------------- setup guide */
+
+.setup-guide {
+  position: absolute;
+  /* Offset rather than centred: the demonstrations act on the scene behind
+     it, so the viewport has to stay visible for any of them to mean anything. */
+  left: 28px;
+  bottom: 28px;
+  z-index: 40;
+  width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 12px;
+  background: rgba(20, 19, 22, 0.98);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.6);
+}
+
+.setup-guide.hidden {
+  display: none;
+}
+
+.setup-guide .overlay-head h2 {
+  font-size: 14px;
+}
+
+.setup-body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.setup-action {
+  display: flex;
+}
+
+.setup-try {
+  width: 100%;
+}
+
+.setup-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.setup-dots {
+  display: flex;
+  gap: 5px;
+  flex: 1;
+}
+
+.setup-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--edge);
+  cursor: pointer;
+}
+
+.setup-dot-on {
+  background: var(--ember);
+}
+
+.setup-again {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.setup-again input {
+  cursor: pointer;
+}

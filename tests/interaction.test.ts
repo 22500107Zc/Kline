@@ -137,3 +137,33 @@ test('every command a menu would show can actually be run', () => {
     );
   }
 });
+
+test('the guide is on by default and can be turned off for good', () => {
+  // A first run with nothing stored has to be the guided one — a new user who
+  // has never seen a 3D application is exactly who this exists for.
+  assert.equal(defaultPreferences().showGuideOnStart, true);
+
+  // And the choice has to be a real preference, not a session flag, or it
+  // reappears on the next launch and becomes an annoyance instead of help.
+  const off = { ...defaultPreferences(), showGuideOnStart: false };
+  const roundTripped = { ...defaultPreferences(), ...JSON.parse(JSON.stringify(off)) };
+  assert.equal(roundTripped.showGuideOnStart, false);
+
+  // A preferences blob written before this setting existed must still open,
+  // and should get the guide rather than silently losing it.
+  const older = JSON.parse(JSON.stringify(defaultPreferences()));
+  delete older.showGuideOnStart;
+  const merged = { ...defaultPreferences(), ...older };
+  assert.equal(merged.showGuideOnStart, true);
+});
+
+test('the guide is reachable from a menu and the palette, not only on first run', () => {
+  // Onboarding you cannot get back is a dead end: someone who skipped it on
+  // day one and wants it on day two has to be able to find it.
+  const open = COMMANDS_BY_ID.get('help.guide');
+  assert.ok(open, 'there is no command to open the guide');
+  assert.equal(open.category, 'Help');
+  const toggle = COMMANDS_BY_ID.get('help.guideOnStart');
+  assert.ok(toggle, 'there is no command to change whether it opens on start');
+  assert.equal(toggle.category, 'Help');
+});

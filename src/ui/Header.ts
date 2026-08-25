@@ -12,6 +12,7 @@ const MENUS: { label: string; categories: Command['category'][] }[] = [
   { label: 'Rig', categories: ['Rig'] },
   { label: 'Select', categories: ['Select'] },
   { label: 'View', categories: ['View'] },
+  { label: 'Help', categories: ['Help'] },
 ];
 
 /** Top bar: wordmark, menus, mode switch, select-mode and shading controls. */

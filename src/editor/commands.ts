@@ -32,17 +32,68 @@ import { pruneSelection } from './selection';
 export interface Command {
   id: string;
   label: string;
-  category: 'File' | 'Edit' | 'Add' | 'Object' | 'Mesh' | 'Rig' | 'Select' | 'View';
+  category: 'File' | 'Edit' | 'Add' | 'Object' | 'Mesh' | 'Rig' | 'Select' | 'View' | 'Help';
   shortcut?: string;
   /** Which mode the command applies to; omitted means every mode. */
   mode?: EditorMode;
   /** Return value is ignored; commands may return anything convenient. */
   run: (editor: Editor) => unknown;
   enabled?: (editor: Editor) => boolean;
+  /**
+   * True for operators that add geometry, which are the ones held to the face
+   * budget. Operators that shrink a mesh are deliberately never marked, so a
+   * mesh that somehow got over the budget can always be brought back down.
+   */
+  grows?: boolean;
 }
 
 const hasEditSelection = (ed: Editor): boolean => ed.mode === 'edit' && ed.selection.verts.size > 0;
 const hasObjectSelection = (ed: Editor): boolean => ed.scene.selection.size > 0;
+
+/**
+ * The largest mesh an edit-mode operator is allowed to produce.
+ *
+ * Subdivision multiplies a mesh by four every time it runs, so a few
+ * absent-minded presses take a cube past anything a browser tab can hold. The
+ * numbers are worth being concrete about: on a sphere, the fifth subdivision
+ * reaches half a million faces and takes about seven seconds, and the sixth
+ * reaches two million and takes nearly half a minute — half a minute during
+ * which the tab is frozen, nothing on screen has changed, and the natural
+ * response is to press the key again.
+ *
+ * The budget sits above any mesh someone models by hand and below the size
+ * where the tab is in danger, so the operator that would cross it is refused
+ * with a message instead of taking an hour of unsaved work down with it.
+ */
+export const MAX_EDITABLE_FACES = 1_000_000;
+
+/**
+ * Refuse an operator that would push the mesh past what the tab can hold.
+ *
+ * Returns true when there is room. The caller does nothing else on false: the
+ * status line already explains what happened and what to do about it.
+ */
+function withinFaceBudget(ed: Editor, predicted: number, label: string): boolean {
+  if (predicted <= MAX_EDITABLE_FACES) return true;
+  const millions = (predicted / 1e6).toFixed(1);
+  ed.setStatus(
+    `${label} would make ${millions}M faces, past the ${MAX_EDITABLE_FACES / 1e6}M limit — ` +
+    'select fewer faces, or add a Subdivision Surface modifier instead of subdividing the mesh',
+  );
+  return false;
+}
+
+/** How many faces subdividing this selection would leave behind. */
+export function facesAfterSubdivide(mesh: Mesh, faces: Iterable<number>): number {
+  let total = mesh.faces.length;
+  for (const f of faces) {
+    const loop = mesh.faces[f];
+    if (!loop) continue;
+    // Each selected face becomes one quad per corner.
+    total += loop.length - 1;
+  }
+  return total;
+}
 
 /** Run an edit-mode mesh operation with undo and cache invalidation handled. */
 function editOp(ed: Editor, label: string, fn: (mesh: Mesh) => void): void {
@@ -374,7 +425,7 @@ export const COMMANDS: Command[] = [
 
   // ------------------------------------------------------------------- Mesh
   {
-    id: 'mesh.extrude', label: 'Extrude Region', category: 'Mesh', mode: 'edit', shortcut: 'E',
+    id: 'mesh.extrude', label: 'Extrude Region', category: 'Mesh', mode: 'edit', shortcut: 'E', grows: true,
     enabled: hasEditSelection,
     run: (ed) => {
       const obj = ed.editObject;
@@ -402,32 +453,34 @@ export const COMMANDS: Command[] = [
     },
   },
   {
-    id: 'mesh.inset', label: 'Inset Faces', category: 'Mesh', mode: 'edit', shortcut: 'I',
+    id: 'mesh.inset', label: 'Inset Faces', category: 'Mesh', mode: 'edit', shortcut: 'I', grows: true,
     enabled: (ed) => ed.mode === 'edit' && ed.selection.faces.size > 0,
     run: (ed) => ed.startInset(),
   },
   {
-    id: 'mesh.loopcut', label: 'Loop Cut', category: 'Mesh', mode: 'edit', shortcut: 'Ctrl+R',
+    id: 'mesh.loopcut', label: 'Loop Cut', category: 'Mesh', mode: 'edit', shortcut: 'Ctrl+R', grows: true,
     run: (ed) => ed.startLoopCut(),
   },
   {
-    id: 'mesh.knife', label: 'Knife', category: 'Mesh', mode: 'edit', shortcut: 'K',
+    id: 'mesh.knife', label: 'Knife', category: 'Mesh', mode: 'edit', shortcut: 'K', grows: true,
     run: (ed) => ed.startKnife(),
     enabled: (ed) => ed.mode === 'edit',
   },
   {
-    id: 'mesh.subdivide', label: 'Subdivide', category: 'Mesh', mode: 'edit',
+    id: 'mesh.subdivide', label: 'Subdivide', category: 'Mesh', mode: 'edit', grows: true,
     enabled: (ed) => ed.mode === 'edit' && ed.selection.faces.size > 0,
     run: (ed) => {
       const faces = [...ed.selection.faces];
-      editOp(ed, 'Subdivide', (mesh) => {
-        const r = subdivideFaces(mesh, faces);
+      const mesh = ed.editMesh;
+      if (mesh && !withinFaceBudget(ed, facesAfterSubdivide(mesh, faces), 'Subdivide')) return;
+      editOp(ed, 'Subdivide', (m) => {
+        const r = subdivideFaces(m, faces);
         for (const v of r.newVerts) ed.selection.verts.add(v);
       });
     },
   },
   {
-    id: 'mesh.duplicate', label: 'Duplicate', category: 'Mesh', mode: 'edit', shortcut: 'Shift+D',
+    id: 'mesh.duplicate', label: 'Duplicate', category: 'Mesh', mode: 'edit', shortcut: 'Shift+D', grows: true,
     enabled: (ed) => ed.mode === 'edit' && ed.selection.faces.size > 0,
     run: (ed) => {
       const obj = ed.editObject;
@@ -492,7 +545,7 @@ export const COMMANDS: Command[] = [
     },
   },
   {
-    id: 'mesh.makeFace', label: 'New Face from Selection', category: 'Mesh', mode: 'edit', shortcut: 'F',
+    id: 'mesh.makeFace', label: 'New Face from Selection', category: 'Mesh', mode: 'edit', shortcut: 'F', grows: true,
     enabled: (ed) => ed.mode === 'edit' && ed.selection.verts.size >= 3,
     run: (ed) => {
       const verts = [...ed.selection.verts];
@@ -600,6 +653,20 @@ export const COMMANDS: Command[] = [
     run: (ed) => ed.panels.toggleDiff?.(),
   },
   {
+    id: 'help.guide', label: 'Getting Started Guide', category: 'Help',
+    run: (ed) => ed.panels.toggleGuide?.(),
+  },
+  {
+    id: 'help.guideOnStart',
+    label: 'Show The Guide When Kline Opens',
+    category: 'Help',
+    run: (ed) => {
+      const on = !ed.preferences.showGuideOnStart;
+      ed.applyPreferences({ ...ed.preferences, showGuideOnStart: on });
+      ed.setStatus(on ? 'The guide will open with Kline' : 'The guide will stay closed on start');
+    },
+  },
+  {
     id: 'view.compareLastStep',
     label: 'Compare With Before The Last Operation',
     category: 'View',
@@ -651,7 +718,7 @@ export const COMMANDS: Command[] = [
 
   // ------------------------------------------------------- Mesh: hard surface
   {
-    id: 'mesh.bevel', label: 'Bevel', category: 'Mesh', shortcut: 'Ctrl+B', mode: 'edit',
+    id: 'mesh.bevel', label: 'Bevel', category: 'Mesh', shortcut: 'Ctrl+B', mode: 'edit', grows: true,
     run: (ed) => ed.startBevel(),
     enabled: (ed) => ed.mode === 'edit' && (ed.selection.edges.size > 0 || ed.selection.faces.size > 0),
   },
@@ -689,7 +756,7 @@ export const COMMANDS: Command[] = [
     enabled: (ed) => ed.mode === 'edit' && ed.selection.edges.size > 0,
   },
   {
-    id: 'mesh.bevelVertices', label: 'Bevel Vertices', category: 'Mesh', mode: 'edit',
+    id: 'mesh.bevelVertices', label: 'Bevel Vertices', category: 'Mesh', mode: 'edit', grows: true,
     run: (ed) => {
       const verts = [...ed.selection.verts];
       editOp(ed, 'Bevel vertices', (mesh) => {
@@ -727,7 +794,7 @@ export const COMMANDS: Command[] = [
     },
   },
   {
-    id: 'mesh.spin', label: 'Spin Selected Edges Around Z', category: 'Mesh', mode: 'edit',
+    id: 'mesh.spin', label: 'Spin Selected Edges Around Z', category: 'Mesh', mode: 'edit', grows: true,
     run: (ed) => {
       const obj = ed.editObject;
       if (!obj) return;
@@ -744,7 +811,7 @@ export const COMMANDS: Command[] = [
     },
   },
   {
-    id: 'mesh.bridge', label: 'Bridge Edge Loops', category: 'Mesh', mode: 'edit',
+    id: 'mesh.bridge', label: 'Bridge Edge Loops', category: 'Mesh', mode: 'edit', grows: true,
     run: (ed) => {
       const edges = [...ed.selection.edges];
       let problem: string | undefined;
@@ -756,7 +823,7 @@ export const COMMANDS: Command[] = [
     enabled: (ed) => ed.mode === 'edit' && ed.selection.edges.size > 0,
   },
   {
-    id: 'mesh.poke', label: 'Poke Faces', category: 'Mesh', mode: 'edit',
+    id: 'mesh.poke', label: 'Poke Faces', category: 'Mesh', mode: 'edit', grows: true,
     run: (ed) => {
       const faces = [...ed.selection.faces];
       editOp(ed, 'Poke faces', (mesh) => {
@@ -766,7 +833,7 @@ export const COMMANDS: Command[] = [
     enabled: (ed) => ed.mode === 'edit' && ed.selection.faces.size > 0,
   },
   {
-    id: 'mesh.symmetrizeX', label: 'Symmetrize +X to -X', category: 'Mesh', mode: 'edit',
+    id: 'mesh.symmetrizeX', label: 'Symmetrize +X to -X', category: 'Mesh', mode: 'edit', grows: true,
     run: (ed) => editOp(ed, 'Symmetrize', (mesh) => symmetrize(mesh, 0, true)),
   },
   {
@@ -1308,6 +1375,13 @@ export function runCommand(editor: Editor, id: string): void {
   if (cmd.enabled && !cmd.enabled(editor)) {
     editor.setStatus(`${cmd.label} is not available right now`);
     return;
+  }
+  // Nothing may add geometry to a mesh that is already at the budget. The
+  // operators that remove geometry are never marked, so there is always a way
+  // back down from a mesh that arrived over the line in a file.
+  if (cmd.grows) {
+    const faces = editor.editMesh?.faces.length ?? 0;
+    if (faces >= MAX_EDITABLE_FACES && !withinFaceBudget(editor, faces + 1, cmd.label)) return;
   }
   void cmd.run(editor);
 }

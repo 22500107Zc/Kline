@@ -602,22 +602,108 @@ export class Mesh {
     };
   }
 
+  /**
+   * Rebuild a mesh from a document, keeping only what is actually usable.
+   *
+   * Nothing else in the application produces this input. A file does, and a
+   * file can be truncated by a full disk, half-synced by a cloud folder,
+   * hand-edited, or written by a version that stores something differently —
+   * and until this validated, any of those threw a raw TypeError out of the
+   * loader and took the application down with it. Worse were the ones that
+   * did *not* throw: a face listing two corners loaded happily and became
+   * geometry every operator downstream had to cope with.
+   *
+   * So each field is checked against what it has to be, anything unusable is
+   * dropped, and the result is always a mesh — possibly an empty one, which
+   * is a scene you can still work in and save.
+   */
   static fromJSON(d: ReturnType<Mesh['toJSON']>): Mesh {
+    const raw = (d ?? {}) as Partial<ReturnType<Mesh['toJSON']>>;
     const positions: Vec3[] = [];
-    for (let i = 0; i + 2 < d.positions.length; i += 3) {
-      positions.push(new Vec3(d.positions[i], d.positions[i + 1], d.positions[i + 2]));
+    const coords = Array.isArray(raw.positions) ? raw.positions : [];
+    for (let i = 0; i + 2 < coords.length; i += 3) {
+      const x = Number(coords[i]);
+      const y = Number(coords[i + 1]);
+      const z = Number(coords[i + 2]);
+      // A vertex that is not a point cannot be repaired into one, and letting
+      // a NaN through poisons every normal, bound and matrix it reaches.
+      positions.push(new Vec3(
+        Number.isFinite(x) ? x : 0,
+        Number.isFinite(y) ? y : 0,
+        Number.isFinite(z) ? z : 0,
+      ));
     }
-    const m = new Mesh(positions, d.faces.map((f) => f.slice()), d.faceMaterial?.slice());
-    m.shadeSmooth = !!d.shadeSmooth;
-    m.faceSmooth = d.faceSmooth ? d.faceSmooth.slice() : null;
-    m.faceUV = d.faceUV ? d.faceUV.map((u) => (u ? u.slice() : null)) : null;
-    m.seams = d.seams && d.seams.length ? new Set(d.seams) : null;
-    m.edgeWeights = d.edgeWeights && d.edgeWeights.length ? new Map(d.edgeWeights) : null;
-    m.mask = d.mask && d.mask.length ? Float32Array.from(d.mask) : null;
-    m.skin = d.skin
-      ? { bones: Int32Array.from(d.skin.bones), weights: Float32Array.from(d.skin.weights) }
+
+    // Faces are kept only where every corner is a real vertex and the loop is
+    // a polygon; the parallel per-face arrays are filtered to match, or they
+    // would silently shift by one for every face dropped.
+    const keptFaces: number[][] = [];
+    const keptFrom: number[] = [];
+    const sourceFaces = Array.isArray(raw.faces) ? raw.faces : [];
+    for (let f = 0; f < sourceFaces.length; f++) {
+      const loop = sourceFaces[f];
+      if (!Array.isArray(loop)) continue;
+      const clean: number[] = [];
+      for (const v of loop) {
+        if (!Number.isInteger(v) || v < 0 || v >= positions.length) continue;
+        // A corner repeated inside one loop is not a polygon either.
+        if (clean.length && clean[clean.length - 1] === v) continue;
+        if (clean.includes(v)) continue;
+        clean.push(v);
+      }
+      if (clean.length < 3) continue;
+      keptFaces.push(clean);
+      keptFrom.push(f);
+    }
+
+    const pick = <T>(source: unknown, at: number, fallback: T): T => (
+      Array.isArray(source) && at < source.length ? (source[at] as T) : fallback
+    );
+
+    const m = new Mesh(
+      positions,
+      keptFaces,
+      keptFrom.map((f) => {
+        const mat = pick(raw.faceMaterial, f, 0);
+        return Number.isInteger(mat) && (mat as number) >= 0 ? (mat as number) : 0;
+      }),
+    );
+    m.shadeSmooth = !!raw.shadeSmooth;
+    m.faceSmooth = Array.isArray(raw.faceSmooth)
+      ? keptFrom.map((f) => !!pick(raw.faceSmooth, f, false))
       : null;
-    m.colors = d.colors && d.colors.length ? Float32Array.from(d.colors) : null;
+    m.faceUV = Array.isArray(raw.faceUV)
+      ? keptFrom.map((f, i) => {
+        const uv = pick<number[] | null>(raw.faceUV, f, null);
+        // Coordinates only survive if there are exactly two per corner of the
+        // face as it was actually kept.
+        if (!Array.isArray(uv) || uv.length !== keptFaces[i].length * 2) return null;
+        return uv.every((c) => Number.isFinite(c)) ? uv.slice() : null;
+      })
+      : null;
+    m.seams = Array.isArray(raw.seams) && raw.seams.length
+      ? new Set(raw.seams.filter((k) => typeof k === 'string'))
+      : null;
+    m.edgeWeights = Array.isArray(raw.edgeWeights) && raw.edgeWeights.length
+      ? new Map(raw.edgeWeights.filter(
+        (e) => Array.isArray(e) && typeof e[0] === 'string' && Number.isFinite(e[1]),
+      ))
+      : null;
+    // Per-vertex arrays have to match the vertex count or they mean nothing.
+    m.mask = Array.isArray(raw.mask) && raw.mask.length === positions.length
+      ? Float32Array.from(raw.mask, (v) => (Number.isFinite(v) ? v : 0))
+      : null;
+    const skin = raw.skin;
+    m.skin = skin && Array.isArray(skin.bones) && Array.isArray(skin.weights)
+      && skin.bones.length === skin.weights.length
+      ? {
+        bones: Int32Array.from(skin.bones, (v) => (Number.isInteger(v) ? v : -1)),
+        weights: Float32Array.from(skin.weights, (v) => (Number.isFinite(v) ? v : 0)),
+      }
+      : null;
+    m.colors = Array.isArray(raw.colors) && raw.colors.length === positions.length * 3
+      ? Float32Array.from(raw.colors, (v) => (Number.isFinite(v) ? v : 1))
+      : null;
     return m;
   }
 }

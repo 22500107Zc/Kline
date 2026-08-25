@@ -149,6 +149,16 @@ export async function launchApp() {
   // The first frames set up texture arrays and compile programs.
   await page.waitForTimeout(600);
 
+  // A fresh browser profile is a first run, so the getting-started guide is
+  // up — and it sits over the bottom-left of the viewport, which is inside
+  // the area these tests click in. Closed here rather than in each test: the
+  // guide has tests of its own, and everything else wants a clear viewport.
+  await page.evaluate(() => {
+    const ed = window.kline.editor;
+    ed.applyPreferences({ ...ed.preferences, showGuideOnStart: false });
+    document.querySelector('.setup-guide')?.classList.add('hidden');
+  });
+
   const rect = await page.evaluate(() => {
     const r = document.querySelector('canvas').getBoundingClientRect();
     return { x: r.left, y: r.top, w: r.width, h: r.height };

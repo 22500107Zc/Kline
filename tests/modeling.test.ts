@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPrimitive } from '../src/mesh/primitives';
+import { buildPrimitive, createCube, createCylinder, createPlane, createUVSphere } from '../src/mesh/primitives';
+import { subdivideFaces } from '../src/mesh/ops';
+import { MAX_EDITABLE_FACES, facesAfterSubdivide } from '../src/editor/commands';
 import { bisect, bridgeLoops, chainLoops, edgeChains, pokeFaces, spinEdges, symmetrize } from '../src/mesh/modeling';
 import { Mesh } from '../src/mesh/Mesh';
 import { Vec3 } from '../src/core/math';
@@ -145,4 +147,61 @@ test('poke fans each face out from its centre', () => {
   assert.equal(cube.faceCount, 24);
   assert.ok(watertight(cube));
   assert.ok(Math.abs(volume(cube) - 8) < 1e-9, 'a flat poke should not change volume');
+});
+
+/**
+ * Subdivision multiplies a mesh by four, so a handful of presses reaches a
+ * size that freezes the tab for half a minute with nothing on screen changing
+ * — and the natural response to that is to press the key again. The operator
+ * is held to a face budget, and the budget is only worth having if the
+ * prediction behind it is exact: too low and legitimate work is refused, too
+ * high and the freeze it exists to prevent still happens.
+ */
+test('the subdivision estimate matches what subdivision actually produces', () => {
+  const meshes: [string, Mesh][] = [
+    ['cube', createCube()],
+    ['sphere', createUVSphere(1, 12, 8)],
+    ['plane', createPlane(2)],
+    ['cylinder', createCylinder()],
+  ];
+  for (const [name, mesh] of meshes) {
+    for (const selection of [
+      [] as number[],
+      [0],
+      [0, 1],
+      mesh.faces.map((_, i) => i),
+    ]) {
+      const predicted = facesAfterSubdivide(mesh, selection);
+      const copy = mesh.clone();
+      subdivideFaces(copy, selection);
+      assert.equal(
+        copy.faces.length, predicted,
+        `${name} with ${selection.length} faces selected: predicted ${predicted}, got ${copy.faces.length}`,
+      );
+    }
+  }
+});
+
+test('the face budget leaves room for real work and stops short of a frozen tab', () => {
+  // A sphere subdivided four times is 127k faces and takes about a second:
+  // heavy, but real work someone might reasonably do.
+  assert.ok(MAX_EDITABLE_FACES > 200_000, 'must not refuse meshes people actually build');
+  // Two million faces takes nearly half a minute in a frozen tab.
+  assert.ok(MAX_EDITABLE_FACES < 2_000_000, 'must refuse before the tab locks up');
+});
+
+test('a selection of every face on a subdivided mesh is predicted correctly', () => {
+  // The prediction has to hold on n-gons too, not just the quads a primitive
+  // starts with — one quad per corner, whatever the corner count.
+  const ngon = new Mesh(
+    [
+      new Vec3(0, 0, 0), new Vec3(1, 0, 0), new Vec3(2, 1, 0),
+      new Vec3(1, 2, 0), new Vec3(0, 2, 0), new Vec3(-1, 1, 0),
+    ],
+    [[0, 1, 2, 3, 4, 5]],
+  );
+  assert.equal(facesAfterSubdivide(ngon, [0]), 6, 'a hexagon becomes six quads');
+  const copy = ngon.clone();
+  subdivideFaces(copy, [0]);
+  assert.equal(copy.faces.length, 6);
 });
