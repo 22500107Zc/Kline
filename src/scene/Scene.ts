@@ -1,6 +1,8 @@
 import { AABB, Mat4, Vec3 } from '../core/math';
 import { Mesh } from '../mesh/Mesh';
-import { ArmatureResolver, Modifier, ObjectResolver, evaluateStack, stackKey } from '../modifiers';
+import {
+  ArmatureResolver, Modifier, ObjectResolver, evaluateStack, normaliseModifier, stackKey,
+} from '../modifiers';
 import { Material, cloneMaterial, createMaterial } from './Material';
 import { SceneTexture, reserveTextureId } from './Texture';
 import {
@@ -541,7 +543,11 @@ export class Scene {
       o.parent = od.parent ?? null;
       o.children = [...(od.children ?? [])];
       o.mesh = od.mesh ? Mesh.fromJSON(od.mesh) : null;
-      o.modifiers = od.modifiers ?? [];
+      // Straight from a file, so each one is checked and completed rather
+      // than trusted; anything unrecognisable is dropped instead of carried.
+      o.modifiers = (od.modifiers ?? [])
+        .map((m) => normaliseModifier(m))
+        .filter((m): m is Modifier => m !== null);
       o.materialSlots = od.materialSlots ?? [];
       o.light = od.light ?? null;
       o.camera = od.camera ?? null;

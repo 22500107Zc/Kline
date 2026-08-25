@@ -91,13 +91,40 @@ function packInto(items: PackItem[], binWidth: number, allowRotate: boolean): Pa
     // Split every free rectangle the placement overlapped, then drop any that
     // is wholly inside another — that pruning is what keeps the list maximal
     // and stops it growing without bound.
-    for (let i = free.length - 1; i >= 0; i--) {
+    //
+    // Only the pieces produced by this placement can be redundant. Every
+    // rectangle the placement missed was already maximal against every other
+    // one and nothing here changed that; and a new piece can never swallow an
+    // old one, because a new piece is a strict sub-rectangle of some R, and if
+    // it contained an old S then R would have contained S and one of them
+    // would already be gone. So the check runs over the new pieces alone.
+    //
+    // Comparing everything against everything instead — with a splice inside
+    // the loop, after every single placement — is what made a few hundred UV
+    // islands take twenty seconds to pack.
+    let write = 0;
+    const fresh: Rect[] = [];
+    for (let i = 0; i < free.length; i++) {
       const split = splitRect(free[i], placed);
-      if (split) {
-        free.splice(i, 1, ...split);
-      }
+      if (split) fresh.push(...split);
+      else free[write++] = free[i];
     }
-    pruneContained(free);
+    free.length = write;
+    for (let i = 0; i < fresh.length; i++) {
+      const candidate = fresh[i];
+      let redundant = false;
+      for (let j = 0; j < free.length && !redundant; j++) {
+        if (contains(free[j], candidate)) redundant = true;
+      }
+      for (let j = 0; j < fresh.length && !redundant; j++) {
+        if (j === i) continue;
+        // A tie between two identical rectangles has to drop exactly one of
+        // them, so equal pairs are broken by index.
+        if (!contains(fresh[j], candidate)) continue;
+        if (!contains(candidate, fresh[j]) || j < i) redundant = true;
+      }
+      if (!redundant) free.push(candidate);
+    }
   }
 
   const extent = Math.max(usedW, usedH);
@@ -140,18 +167,6 @@ function contains(outer: Rect, inner: Rect): boolean {
     && inner.y + inner.h <= outer.y + outer.h + 1e-12;
 }
 
-function pruneContained(free: Rect[]): void {
-  for (let i = free.length - 1; i >= 0; i--) {
-    for (let j = free.length - 1; j >= 0; j--) {
-      if (i === j) continue;
-      if (contains(free[j], free[i])) {
-        free.splice(i, 1);
-        break;
-      }
-    }
-  }
-}
-
 /**
  * Pack items into as small a square as they will go.
  *
@@ -179,11 +194,25 @@ export function packRects(items: PackItem[], allowRotate = true): PackResult {
   const widest = Math.max(...items.map((i) => (allowRotate ? Math.min(i.width, i.height) : i.width)));
   const ideal = Math.sqrt(Math.max(totalArea, 1e-12));
 
+  // Each trial is a full pack, and a pack costs more than linearly in the
+  // number of items — so thirty-two of them is a few milliseconds for the
+  // fifty islands a normal model has, and close to a minute for the couple of
+  // thousand a heavily subdivided one produces. The search narrows as the
+  // input grows: the gain from trying more orderings shrinks with island
+  // count anyway, because a large set averages out the differences between
+  // them.
+  const widths = items.length > 900
+    ? [0.9, 1, 1.25]
+    : items.length > 250
+      ? [0.9, 1, 1.15, 1.45, 1.9]
+      : [0.8, 0.9, 1, 1.1, 1.25, 1.45, 1.7, 2.1];
+  const tried = items.length > 900 ? orders.slice(0, 1) : items.length > 250 ? orders.slice(0, 2) : orders;
+
   let best: PackResult | null = null;
   let bestExtent = Infinity;
-  for (const order of orders) {
+  for (const order of tried) {
     const sorted = [...items].sort(order);
-    for (const mult of [0.8, 0.9, 1, 1.1, 1.25, 1.45, 1.7, 2.1]) {
+    for (const mult of widths) {
       const binWidth = Math.max(widest, ideal * mult);
       const result = packInto(sorted, binWidth, allowRotate);
       if (!result) continue;

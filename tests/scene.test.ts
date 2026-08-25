@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DEG2RAD, Mat4, Vec3, decomposeMatrix } from '../src/core/math';
 import { Scene } from '../src/scene/Scene';
 import { createCube, createPlane } from '../src/mesh/primitives';
-import { createModifier, evaluateStack } from '../src/modifiers';
+import { MODIFIER_LABELS, createModifier, evaluateStack, normaliseModifier } from '../src/modifiers';
 import { hexToLinear, linearToHex } from '../src/scene/Material';
 
 test('matrix decomposition round-trips through compose', () => {
@@ -161,4 +161,67 @@ test('hidden children are left out of a group\'s bounds', () => {
   child.visible = false;
   s.setParent(child.id, group.id);
   assert.ok(group.bounds(s).size().length() < 1e-9);
+});
+
+test('a modifier missing its fields goes inert rather than producing NaN', () => {
+  // Inside the app every modifier comes from createModifier and is complete.
+  // A scene file is not the app: one written by another version, truncated, or
+  // hand-edited arrives partial, and a partial modifier used to either throw
+  // (mirror reading axis[0] off undefined) or silently fill the mesh with NaN
+  // (solidify multiplying by an undefined thickness), which then renders as
+  // nothing and saves as a file worse than the one it came from.
+  for (const type of Object.keys(MODIFIER_LABELS) as (keyof typeof MODIFIER_LABELS)[]) {
+    const bare = { id: 1, type, name: type, enabled: true, showInEdit: true };
+    const mesh = createCube();
+    let out;
+    assert.doesNotThrow(() => {
+      out = evaluateStack(mesh, [bare as never], false);
+    }, `a bare ${type} modifier threw`);
+    assert.ok(out, `${type} produced nothing`);
+    assert.ok(
+      out.positions.every((p) => Number.isFinite(p.x + p.y + p.z)),
+      `${type} put NaN into the mesh`,
+    );
+    for (const face of out.faces) {
+      assert.ok(face.length >= 3, `${type} produced a face with ${face.length} vertices`);
+      assert.ok(
+        face.every((v) => v >= 0 && v < out.positions.length),
+        `${type} produced a face indexing a vertex that does not exist`,
+      );
+    }
+  }
+});
+
+test('a modifier this build does not know about is skipped, not fatal', () => {
+  // A scene from a newer version must still open here, minus the effect that
+  // cannot run — never as a stack that evaluates to undefined.
+  const mesh = createCube();
+  const unknown = { id: 9, type: 'holographic-lattice', name: 'From The Future', enabled: true, showInEdit: true };
+  assert.equal(normaliseModifier(unknown), null, 'an unknown type should be rejected');
+  let out;
+  assert.doesNotThrow(() => { out = evaluateStack(mesh, [unknown as never], false); });
+  assert.equal(out.faceCount, mesh.faceCount, 'an unrunnable modifier should leave the mesh alone');
+
+  // And the same scene must survive a save/load round trip without it.
+  const scene = new Scene();
+  const obj = scene.add('mesh', 'Cube');
+  obj.mesh = createCube();
+  obj.modifiers = [unknown as never, createModifier('subsurf')];
+  const back = Scene.fromJSON(JSON.parse(JSON.stringify(scene.toJSON())));
+  const restored = [...back.objects.values()][0];
+  assert.equal(restored.modifiers.length, 1, 'the unrunnable modifier should have been dropped on load');
+  assert.equal(restored.modifiers[0].type, 'subsurf', 'the runnable one should have survived');
+});
+
+test('a modifier keeps the values it does carry', () => {
+  // Completing a partial modifier must not overwrite what the file actually
+  // said — a levels: 3 subdivision has to stay a levels: 3 subdivision.
+  const filled = normaliseModifier({ id: 7, type: 'subsurf', name: 'Mine', enabled: false, levels: 3 });
+  assert.ok(filled);
+  assert.equal(filled.id, 7);
+  assert.equal(filled.name, 'Mine');
+  assert.equal(filled.enabled, false);
+  assert.equal((filled as { levels: number }).levels, 3);
+  // And the field it did not carry comes from the defaults.
+  assert.equal(typeof filled.showInEdit, 'boolean');
 });

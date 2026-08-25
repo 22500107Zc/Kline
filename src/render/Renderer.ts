@@ -159,7 +159,10 @@ export class Renderer {
 
   private geometryFor(obj: SceneObject, mesh: Mesh, edit: EditOverlay | null): GeometryEntry {
     const editing = edit && edit.objectId === obj.id ? edit : null;
-    const key = `${mesh.revision}|${editing ? `${editing.version}:${editing.selectMode}` : '-'}`;
+    // Identity as well as revision: a modifier stack hands back a new mesh
+    // every time it runs, always at revision 1, so a key without the identity
+    // matches the previous one and the buffer is never re-uploaded.
+    const key = `${mesh.id}:${mesh.revision}|${editing ? `${editing.version}:${editing.selectMode}` : '-'}`;
     let entry = this.cache.get(obj.id);
     if (!entry) {
       entry = {

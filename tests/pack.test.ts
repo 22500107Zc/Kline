@@ -163,3 +163,63 @@ test('islands do not sit on top of each other', () => {
   }
   assert.equal(clashes, 0, `${clashes} texels are claimed by two islands`);
 });
+
+test('a thousand random rectangles pack without a single overlap', () => {
+  // The pruning that keeps the free list maximal was rewritten to touch only
+  // the rectangles a placement actually produced, which is what took a real
+  // unwrap from twenty seconds to under one. It is also exactly the kind of
+  // change that can go subtly wrong and start handing out space twice, and a
+  // packer that overlaps is worse than a slow one — so this leans on it hard.
+  let seed = 20260825;
+  const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+  for (const count of [200, 1000]) {
+    const items: PackItem[] = Array.from({ length: count }, (_, id) => ({
+      id,
+      width: 0.2 + rand() * 4,
+      height: 0.2 + rand() * 4,
+    }));
+    const result = packRects(items);
+    assert.equal(result.placements.length, count, `${count}: an item was dropped`);
+    assert.ok(!overlaps(items, result), `${count}: two items overlap`);
+    assert.ok(result.occupancy > 0.55, `${count}: only ${(result.occupancy * 100).toFixed(0)}% of the bin is used`);
+  }
+});
+
+test('extreme aspect ratios still pack cleanly', () => {
+  // Long thin strips are what break a packer's free-rectangle bookkeeping:
+  // they carve wide rectangles into slivers, which is where a pruning bug
+  // shows up first.
+  const items: PackItem[] = [];
+  for (let i = 0; i < 60; i++) items.push({ id: i, width: 20, height: 0.15 });
+  for (let i = 60; i < 120; i++) items.push({ id: i, width: 0.15, height: 20 });
+  for (let i = 120; i < 150; i++) items.push({ id: i, width: 3, height: 3 });
+  const result = packRects(items);
+  assert.equal(result.placements.length, items.length, 'an item was dropped');
+  assert.ok(!overlaps(items, result), 'two items overlap');
+});
+
+test('packing many islands does not take superlinear time', () => {
+  // The old pruning compared every free rectangle against every other one,
+  // with a splice inside the loop, after every placement — so doubling the
+  // island count roughly quadrupled the work, and a heavily subdivided mesh
+  // could freeze the tab for half a minute. This asserts the shape of the
+  // curve, not a wall-clock figure, so it means the same thing on a slow
+  // machine as on a fast one.
+  const timeFor = (count: number): number => {
+    const items: PackItem[] = Array.from({ length: count }, (_, id) => ({
+      id, width: 1 + (id % 7) * 0.3, height: 1 + (id % 5) * 0.4,
+    }));
+    const started = performance.now();
+    packRects(items);
+    return performance.now() - started;
+  };
+  timeFor(200); // Warm the JIT so the first measurement is not the outlier.
+  const small = Math.max(timeFor(400), 1);
+  const large = timeFor(1600);
+  // Four times the items should not cost anywhere near sixteen times the work.
+  assert.ok(
+    large < small * 12,
+    `400 islands took ${small.toFixed(1)}ms and 1600 took ${large.toFixed(1)}ms — `
+    + 'the packer is scaling quadratically again',
+  );
+});

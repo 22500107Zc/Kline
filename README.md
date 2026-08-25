@@ -489,10 +489,11 @@ closed solid instead.
 npm run dev         # Vite dev server with HMR
 npm run typecheck   # tsc --noEmit, strict
 npm test            # everything below
-npm run test:unit   # 339 unit tests over the kernel, operators, UVs, sculpting,
+npm run test:unit   # 349 unit tests over the kernel, operators, UVs, sculpting,
                     # animation, the path tracer, the scene and IO
-npm run test:app    # 9 tests in a real browser: shadows land, overlays draw,
-                    # clicks and modals behave. Skipped if no Chromium is found.
+npm run test:app    # 14 tests in a real browser: shadows land, overlays draw,
+                    # strokes and rigs reach the screen, clicks and modals
+                    # behave. Skipped if no Chromium is found.
 npm run build       # typecheck + production bundle into dist/
 npm run app         # run the desktop shell against the built bundle
 npm run dist        # package installers for the current OS into release/

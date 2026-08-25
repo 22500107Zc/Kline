@@ -32,6 +32,60 @@ export interface Topology {
   vertNormals: Vec3[];
 }
 
+/**
+ * Cut a loop that revisits a vertex into the simple loops it is made of.
+ *
+ * Walking the loop while remembering where each vertex was last seen: coming
+ * back to one closes off everything since, which is lifted out as its own
+ * loop. What is left continues. A loop with no repeats comes back untouched
+ * and pays only for the walk.
+ */
+function splitPinchedLoop(
+  loop: number[], uv: number[] | null,
+): { loop: number[]; uv: number[] | null }[] {
+  let repeated = false;
+  const seenOnce = new Set<number>();
+  for (const v of loop) {
+    if (seenOnce.has(v)) { repeated = true; break; }
+    seenOnce.add(v);
+  }
+  if (!repeated) return [{ loop, uv }];
+
+  const out: { loop: number[]; uv: number[] | null }[] = [];
+  const stack: number[] = [];
+  const stackUV: number[] = [];
+  const where = new Map<number, number>();
+  for (let i = 0; i < loop.length; i++) {
+    const v = loop[i];
+    const seen = where.get(v);
+    if (seen !== undefined) {
+      // Everything since the earlier visit closes into its own loop — with the
+      // repeated vertex itself at the head of it, because the pinch point
+      // belongs to both halves. Leaving it out turns a triangle into an edge.
+      const tail = stack.splice(seen + 1);
+      const tailUV = uv ? stackUV.splice((seen + 1) * 2) : null;
+      for (const gone of tail) where.delete(gone);
+      const piece = [stack[seen], ...tail];
+      const pieceUV = uv && tailUV
+        ? [stackUV[seen * 2], stackUV[seen * 2 + 1], ...tailUV]
+        : null;
+      if (piece.length >= 3) out.push({ loop: piece, uv: pieceUV });
+      continue;
+    }
+    where.set(v, stack.length);
+    stack.push(v);
+    if (uv) stackUV.push(uv[i * 2], uv[i * 2 + 1]);
+  }
+  if (stack.length >= 3) out.push({ loop: stack, uv: uv ? stackUV : null });
+  return out;
+}
+
+/** Serial number for mesh identity; see `Mesh.id`. */
+let meshCounter = 0;
+function nextMeshId(): number {
+  return ++meshCounter;
+}
+
 export class Mesh {
   positions: Vec3[];
   /** Polygon corner lists, CCW when viewed from the front face. */
@@ -80,11 +134,28 @@ export class Mesh {
 
   private _topology: Topology | null = null;
   private _revision = 0;
+  private readonly _id = nextMeshId();
 
   constructor(positions: Vec3[] = [], faces: number[][] = [], faceMaterial?: number[]) {
     this.positions = positions;
     this.faces = faces;
     this.faceMaterial = faceMaterial ?? new Array(faces.length).fill(0);
+  }
+
+  /**
+   * Identity of this mesh object, distinct from every other one ever made.
+   *
+   * `revision` says whether *this* mesh has been edited, which is the right
+   * question for a mesh being modelled in place — but it says nothing about
+   * two different meshes. Every evaluated result comes back as a fresh Mesh at
+   * revision 1, so a cache keyed on revision alone cannot tell the rest pose
+   * from the posed one, or a boolean from the same boolean after its cutter
+   * moved: it hands back the buffer it already had, and the viewport quietly
+   * keeps showing geometry that is no longer there. Pairing this with the
+   * revision answers both questions.
+   */
+  get id(): number {
+    return this._id;
   }
 
   get revision(): number {
@@ -413,7 +484,20 @@ export class Mesh {
     return { indices, triFace };
   }
 
-  /** Drop faces with fewer than 3 distinct corners and repeated corners. */
+  /**
+   * Make every face loop a simple polygon, dropping what cannot be one.
+   *
+   * Removing repeated *neighbouring* corners is the easy half. The hard half
+   * is a loop that comes back to a vertex it already visited somewhere in the
+   * middle — `[a, X, c, X, e]` — which a weld produces whenever it merges two
+   * corners of the same face. That is not a polygon at all; it is two polygons
+   * pinched together at X. Left alone it triangulates into slivers with no
+   * meaningful normal, and every operator downstream inherits the mess.
+   *
+   * So a pinched loop is cut at the pinch and both halves are kept. That is
+   * what the surface actually is, and it means a merge can tidy geometry up
+   * without quietly making it invalid.
+   */
   cleanDegenerate(): void {
     const faces: number[][] = [];
     const mats: number[] = [];
@@ -435,11 +519,12 @@ export class Mesh {
         loop.pop();
         uv.length = Math.max(0, uv.length - 2);
       }
-      if (loop.length >= 3) {
-        faces.push(loop);
+      for (const piece of splitPinchedLoop(loop, uv.length === loop.length * 2 ? uv : null)) {
+        if (piece.loop.length < 3) continue;
+        faces.push(piece.loop);
         mats.push(this.faceMaterial[f] ?? 0);
         smooth.push(this.isFaceSmooth(f));
-        uvs.push(srcUV && uv.length === loop.length * 2 ? uv : null);
+        uvs.push(srcUV && piece.uv ? piece.uv : null);
       }
     }
     this.faces = faces;

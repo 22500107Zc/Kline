@@ -98,52 +98,112 @@ function planarLayout(mesh: Mesh, faces: number[]): IslandLayout {
   return { faces, uv, worldArea };
 }
 
-/** Sparse least-squares solve by conjugate gradient on the normal equations. */
+/**
+ * Sparse least-squares solve by conjugate gradient on the normal equations.
+ *
+ * Preconditioned by the diagonal of AᵀA. Plain CG on normal equations
+ * converges at the rate of the *squared* condition number, which for a
+ * conformal map over a few thousand vertices means thousands of iterations —
+ * and each one costs two full passes over the matrix. Dividing by the
+ * diagonal is the cheapest possible correction (one pass to build, one
+ * multiply per iteration) and it removes most of the spread that comes from
+ * triangles differing wildly in size, which is exactly the spread a subdivided
+ * mesh has.
+ */
 function solveLeastSquares(
   rows: { cols: number[]; vals: number[] }[], rhs: number[], cols: number, iterations: number,
 ): Float64Array {
   const x = new Float64Array(cols);
-  const mulA = (v: Float64Array): Float64Array => {
-    const out = new Float64Array(rows.length);
-    for (let r = 0; r < rows.length; r++) {
-      const row = rows[r];
-      let s = 0;
-      for (let k = 0; k < row.cols.length; k++) s += row.vals[k] * v[row.cols[k]];
-      out[r] = s;
+
+  // Flattened to compressed sparse rows before the loop. The rows arrive as an
+  // array of objects holding two more arrays, which is three pointer hops per
+  // row on every one of thousands of iterations; laid out flat it is one
+  // sequential walk over two typed arrays. Same arithmetic, several times the
+  // speed, and no allocation once the solve is running.
+  const rowCount = rows.length;
+  let nnz = 0;
+  for (const row of rows) nnz += row.cols.length;
+  const start = new Int32Array(rowCount + 1);
+  const column = new Int32Array(nnz);
+  const value = new Float64Array(nnz);
+  let at = 0;
+  for (let r = 0; r < rowCount; r++) {
+    start[r] = at;
+    const row = rows[r];
+    for (let k = 0; k < row.cols.length; k++) {
+      column[at] = row.cols[k];
+      value[at] = row.vals[k];
+      at++;
     }
-    return out;
+  }
+  start[rowCount] = at;
+
+  const scratchRows = new Float64Array(rowCount);
+  /** scratchRows = A·v */
+  const mulA = (v: Float64Array): void => {
+    for (let r = 0; r < rowCount; r++) {
+      let sum = 0;
+      for (let k = start[r]; k < start[r + 1]; k++) sum += value[k] * v[column[k]];
+      scratchRows[r] = sum;
+    }
   };
-  const mulAT = (v: Float64Array): Float64Array => {
-    const out = new Float64Array(cols);
-    for (let r = 0; r < rows.length; r++) {
-      const row = rows[r];
+  /** out = Aᵀ·v */
+  const mulAT = (v: Float64Array, out: Float64Array): void => {
+    out.fill(0);
+    for (let r = 0; r < rowCount; r++) {
       const s = v[r];
       if (s === 0) continue;
-      for (let k = 0; k < row.cols.length; k++) out[row.cols[k]] += row.vals[k] * s;
+      for (let k = start[r]; k < start[r + 1]; k++) out[column[k]] += value[k] * s;
     }
-    return out;
   };
 
-  const b = new Float64Array(rhs);
-  let r = mulAT(b);
-  const p = new Float64Array(r);
+  // The diagonal of AᵀA: the squared column norms.
+  const inverseDiagonal = new Float64Array(cols);
+  for (let k = 0; k < nnz; k++) inverseDiagonal[column[k]] += value[k] * value[k];
+  for (let i = 0; i < cols; i++) {
+    // A column with no entries constrains nothing; leaving it at 1 keeps it
+    // out of the way instead of dividing by zero.
+    inverseDiagonal[i] = inverseDiagonal[i] > 1e-30 ? 1 / inverseDiagonal[i] : 1;
+  }
+
+  const b = Float64Array.from(rhs);
+  const r = new Float64Array(cols);
+  mulAT(b, r);
+  const z = new Float64Array(cols);
+  for (let i = 0; i < cols; i++) z[i] = r[i] * inverseDiagonal[i];
+  const p = new Float64Array(z);
+  let rz = 0;
   let rr = 0;
-  for (let i = 0; i < cols; i++) rr += r[i] * r[i];
-  const target = rr * 1e-12;
+  for (let i = 0; i < cols; i++) {
+    rz += r[i] * z[i];
+    rr += r[i] * r[i];
+  }
+  // A relative residual of 1e-5 on the squared norm. These numbers become
+  // texture coordinates in the unit square: even at 8K that is a hundredth of
+  // a texel, and chasing 1e-12 instead was costing thousands of iterations for
+  // precision no texture can carry.
+  const target = rr * 1e-10;
+  const ap = new Float64Array(cols);
   for (let it = 0; it < iterations && rr > target; it++) {
-    const ap = mulAT(mulA(p));
+    mulA(p);
+    mulAT(scratchRows, ap);
     let pap = 0;
     for (let i = 0; i < cols; i++) pap += p[i] * ap[i];
     if (Math.abs(pap) < 1e-30) break;
-    const alpha = rr / pap;
+    const alpha = rz / pap;
+    let rz2 = 0;
+    let rr2 = 0;
     for (let i = 0; i < cols; i++) {
       x[i] += alpha * p[i];
       r[i] -= alpha * ap[i];
+      z[i] = r[i] * inverseDiagonal[i];
+      rz2 += r[i] * z[i];
+      rr2 += r[i] * r[i];
     }
-    let rr2 = 0;
-    for (let i = 0; i < cols; i++) rr2 += r[i] * r[i];
-    const beta = rr2 / rr;
-    for (let i = 0; i < cols; i++) p[i] = r[i] + beta * p[i];
+    if (Math.abs(rz) < 1e-300) break;
+    const beta = rz2 / rz;
+    for (let i = 0; i < cols; i++) p[i] = z[i] + beta * p[i];
+    rz = rz2;
     rr = rr2;
   }
   return x;

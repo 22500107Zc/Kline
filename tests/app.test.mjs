@@ -431,6 +431,268 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     assert.ok(Math.abs((await x()) - before) > 0.1, 'a confirmed move did not move anything');
   });
 
+  /** Drag across the middle of the viewport, the way a stroke is made. */
+  const dragAcross = async (from, steps = 10, dx = 6, dy = 0) => {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    for (let i = 1; i <= steps; i++) {
+      await page.mouse.move(from.x + i * dx, from.y + i * dy);
+      await page.waitForTimeout(20);
+    }
+    await page.mouse.up();
+    await page.waitForTimeout(150);
+  };
+
+  test('a sculpt stroke moves the surface it is dragged over', async () => {
+    await resetScene(page);
+    await page.evaluate(() => {
+      const k = window.kiln, ed = k.editor;
+      k.run('add.uvsphere');
+      k.run('mode.sculpt');
+      ed.sculpt.brush = 'draw';
+      ed.sculpt.radius = 0.5;
+      const o = ed.scene.get(ed.scene.active);
+      window.__before = o.mesh.positions.map((p) => [p.x, p.y, p.z]);
+    });
+    const centre = await screenPoint(page, [0, 0, 0]);
+    await dragAcross({ x: centre.x - 30, y: centre.y });
+
+    const moved = await page.evaluate(() => {
+      const o = window.kiln.editor.scene.get(window.kiln.editor.scene.active);
+      let n = 0, worst = 0, nan = 0;
+      o.mesh.positions.forEach((p, i) => {
+        if (!Number.isFinite(p.x + p.y + p.z)) { nan++; return; }
+        const q = window.__before[i];
+        const d = Math.hypot(p.x - q[0], p.y - q[1], p.z - q[2]);
+        if (d > 1e-6) n++;
+        if (d > worst) worst = d;
+      });
+      return { n, worst, nan };
+    });
+    assert.equal(moved.nan, 0, 'the stroke put NaN into the mesh');
+    assert.ok(moved.n > 10, `the stroke moved only ${moved.n} vertices — it is not reaching the surface`);
+    assert.ok(moved.worst > 0.005, `the stroke barely displaced anything (${moved.worst})`);
+  });
+
+  test('a mask holds back the brush where it was painted', async () => {
+    await resetScene(page);
+    await page.evaluate(() => {
+      const k = window.kiln, ed = k.editor;
+      k.run('add.uvsphere');
+      k.run('mode.sculpt');
+      ed.sculpt.brush = 'mask';
+      ed.sculpt.radius = 0.8;
+      ed.sculpt.strength = 1;
+    });
+    const centre = await screenPoint(page, [0, 0, 0]);
+    // Several passes, so a region actually reaches full mask rather than a
+    // falloff value that is supposed to move a little.
+    for (let i = 0; i < 5; i++) await dragAcross({ x: centre.x - 20, y: centre.y }, 8, 4);
+
+    const painted = await page.evaluate(() => {
+      const ed = window.kiln.editor;
+      const o = ed.scene.get(ed.scene.active);
+      if (!o.mesh.mask) return { held: 0 };
+      window.__mask = [...o.mesh.mask];
+      window.__before = o.mesh.positions.map((p) => [p.x, p.y, p.z]);
+      ed.sculpt.brush = 'draw';
+      return { held: window.__mask.filter((v) => v > 0.9).length };
+    });
+    assert.ok(painted.held > 5, `the mask brush painted only ${painted.held} vertices to full strength`);
+
+    await dragAcross({ x: centre.x - 20, y: centre.y }, 8, 4);
+    const byLevel = await page.evaluate(() => {
+      const o = window.kiln.editor.scene.get(window.kiln.editor.scene.active);
+      const masked = [], partial = [];
+      o.mesh.positions.forEach((p, i) => {
+        const q = window.__before[i];
+        const d = Math.hypot(p.x - q[0], p.y - q[1], p.z - q[2]);
+        const m = window.__mask[i] ?? 0;
+        if (m > 0.9) masked.push(d);
+        else if (m > 0.1) partial.push(d);
+      });
+      const mean = (a) => (a.length ? a.reduce((s, v) => s + v, 0) / a.length : 0);
+      return { masked: mean(masked), partial: mean(partial), partialCount: partial.length };
+    });
+    assert.ok(byLevel.partialCount > 0, 'no partly-masked vertices to compare against');
+    // A mask is a falloff, so the test is the ratio, not that masked is zero.
+    assert.ok(
+      byLevel.masked < byLevel.partial * 0.1,
+      `masked vertices moved ${byLevel.masked.toFixed(5)} against ${byLevel.partial.toFixed(5)} `
+      + 'for partly-masked ones — the mask is not holding them',
+    );
+  });
+
+  test('posing a bound rig changes what is on screen', async () => {
+    await resetScene(page);
+    const bound = await page.evaluate(() => {
+      const k = window.kiln, ed = k.editor, S = ed.scene;
+      k.run('add.cylinder');
+      const tube = S.get(S.active);
+      tube.scale.z = 3;
+      k.run('add.armature');
+      const arm = [...S.objects.values()].find((o) => o.type === 'armature');
+      k.run('rig.extrudeBone');
+      k.run('rig.extrudeBone');
+      S.selection = new Set([tube.id, arm.id]);
+      S.active = arm.id;
+      k.run('rig.bind');
+      window.__tube = tube.id;
+      window.__arm = arm.id;
+      const skin = tube.skin ?? tube.mesh.skin;
+      if (!skin) return { influences: 0 };
+      let influences = 0;
+      for (let i = 0; i < skin.bones.length; i++) if (skin.bones[i] >= 0 && skin.weights[i] > 0) influences++;
+      // Weights are a partition of unity wherever anything is bound at all.
+      const per = skin.bones.length / tube.mesh.positions.length;
+      let badSums = 0;
+      for (let v = 0; v < tube.mesh.positions.length; v++) {
+        let sum = 0;
+        for (let i = 0; i < per; i++) sum += skin.weights[v * per + i];
+        if (sum > 1e-6 && Math.abs(sum - 1) > 1e-4) badSums++;
+      }
+      return { influences, badSums };
+    });
+    assert.ok(bound.influences > 0, 'binding produced no weights at all');
+    assert.equal(bound.badSums, 0, 'some vertices have weights that do not sum to one');
+
+    // Same camera, same everything, only the bone moves — so the mesh must
+    // change, and so must the frame. Whole-frame difference rather than a few
+    // sample points: on a flat-shaded surface two very different silhouettes
+    // can happen to share a colour anywhere you happen to look.
+    const deformed = await page.evaluate(() => {
+      const ed = window.kiln.editor, S = ed.scene;
+      const tube = S.get(window.__tube);
+      const arm = S.get(window.__arm);
+      const gl = ed.renderer.gl;
+      const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+      const frame = () => {
+        ed.renderNow();
+        const px = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        return px;
+      };
+      const rest = tube.evaluated(false).positions.map((p) => [p.x, p.y, p.z]);
+      const restFrame = frame();
+
+      arm.armature.bones[arm.armature.bones.length - 1].rotation = [0, 0.9, 0];
+      tube.invalidate?.();
+      arm.invalidate?.();
+
+      const posed = tube.evaluated(false).positions.map((p) => [p.x, p.y, p.z]);
+      let moved = 0, still = 0, nan = 0;
+      posed.forEach((p, i) => {
+        if (!Number.isFinite(p[0] + p[1] + p[2])) { nan++; return; }
+        const d = Math.hypot(p[0] - rest[i][0], p[1] - rest[i][1], p[2] - rest[i][2]);
+        if (d > 1e-6) moved++; else still++;
+      });
+
+      const posedFrame = frame();
+      let changed = 0;
+      for (let i = 0; i < w * h; i++) {
+        const d = Math.abs(restFrame[i * 4] - posedFrame[i * 4])
+          + Math.abs(restFrame[i * 4 + 1] - posedFrame[i * 4 + 1])
+          + Math.abs(restFrame[i * 4 + 2] - posedFrame[i * 4 + 2]);
+        if (d > 12) changed++;
+      }
+      return { moved, still, nan, changed, pixels: w * h };
+    });
+    assert.equal(deformed.nan, 0, 'posing put NaN into the mesh');
+    assert.ok(deformed.moved > 0, 'posing a bone moved nothing');
+    assert.ok(deformed.still > 0, 'posing one bone moved the entire mesh — the weights are not localised');
+    // The evaluated mesh changing is not enough: a modifier stack returns a
+    // fresh mesh every run, and one keyed only by revision looks identical to
+    // the last, so the viewport went on showing the rest pose.
+    assert.ok(
+      deformed.changed > deformed.pixels * 0.005,
+      `only ${deformed.changed} of ${deformed.pixels} pixels changed — the deformed mesh `
+      + 'is not reaching the screen',
+    );
+  });
+
+  test('a physics bake drops a box onto a floor and keys where it lands', async () => {
+    await resetScene(page);
+    const baked = await page.evaluate(() => {
+      const k = window.kiln, ed = k.editor, S = ed.scene;
+      k.run('add.plane');
+      const floor = S.get(S.active);
+      floor.scale.x = 8;
+      floor.scale.y = 8;
+      floor.physics = { kind: 'passive', mass: 0, shape: 'box', friction: 0.6, restitution: 0.1 };
+      k.run('add.cube');
+      const box = S.get(S.active);
+      box.position.z = 5;
+      box.rotation.x = 0.4;
+      box.rotation.y = 0.3;
+      box.physics = { kind: 'active', mass: 1, shape: 'box', friction: 0.6, restitution: 0.1 };
+      k.run('physics.bake');
+      const z = box.animation.find((c) => c.path === 'position' && c.index === 2);
+      const rot = box.animation.filter((c) => c.path === 'rotation');
+      return {
+        keyed: !!z && z.keys.length > 1,
+        startZ: z ? z.keys[0].value : null,
+        endZ: z ? z.keys[z.keys.length - 1].value : null,
+        rotationChannels: rot.length,
+        rotationMoved: rot.some((c) => Math.abs(c.keys[c.keys.length - 1].value - c.keys[0].value) > 1e-3),
+        status: ed.statusMessage,
+      };
+    });
+    assert.ok(baked.keyed, 'the bake wrote no position keys');
+    assert.ok(baked.endZ < baked.startZ - 2, `the box did not fall (${baked.startZ} -> ${baked.endZ})`);
+    assert.ok(baked.endZ > 0.2, `the box fell through the floor to ${baked.endZ}`);
+    assert.equal(baked.rotationChannels, 3, 'rotation was not baked');
+    // A box dropped at an angle onto a floor has to rotate as it settles;
+    // it used to collide as though it were axis-aligned and never would.
+    assert.ok(baked.rotationMoved, 'the box never rotated — the solver is ignoring orientation');
+  });
+
+  test('the path tracer produces an image, not a blank canvas', async () => {
+    await resetScene(page);
+    await page.evaluate(() => {
+      const k = window.kiln, ed = k.editor, S = ed.scene;
+      k.run('add.plane');
+      const floor = S.get(S.active);
+      floor.scale.x = 6;
+      floor.scale.y = 6;
+      k.run('add.uvsphere');
+      S.get(S.active).position.z = 1.2;
+      k.run('add.light.sun');
+      S.get(S.active).position.z = 6;
+      ed.renderSettings.width = 96;
+      ed.renderSettings.height = 64;
+      ed.renderSettings.samples = 8;
+      ed.renderSettings.maxBounces = 3;
+      k.run('render.image');
+    });
+    await page.waitForFunction(
+      () => window.kiln.editor.activeRender && window.kiln.editor.activeRender.samplesDone > 0,
+      null, { timeout: 60_000 },
+    );
+    const image = await page.evaluate(() => {
+      const job = window.kiln.editor.activeRender;
+      const data = job.toImageData();
+      let min = 255, max = 0, sum = 0;
+      const n = data.width * data.height;
+      for (let i = 0; i < n; i++) {
+        const v = 0.2126 * data.data[i * 4] + 0.7152 * data.data[i * 4 + 1] + 0.0722 * data.data[i * 4 + 2];
+        if (v < min) min = v;
+        if (v > max) max = v;
+        sum += v;
+      }
+      const nan = [...data.data].some((v) => !Number.isFinite(v));
+      window.kiln.run('render.cancel');
+      return { samples: job.samplesDone, triangles: job.triangles, min, max, mean: sum / n, nan };
+    });
+    assert.equal(image.nan, false, 'the render contains non-finite pixels');
+    assert.ok(image.triangles > 0, 'the tracer was handed no geometry');
+    // A frame that is one flat tone means nothing was hit, or everything was.
+    assert.ok(
+      image.max - image.min > 30,
+      `the render is a flat field (${image.min.toFixed(0)}..${image.max.toFixed(0)}) — nothing was traced`,
+    );
+    assert.ok(image.mean > 5, `the render came back essentially black (mean ${image.mean.toFixed(1)})`);
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

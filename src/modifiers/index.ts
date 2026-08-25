@@ -158,6 +158,38 @@ export function createModifier(type: ModifierType): Modifier {
   }
 }
 
+/**
+ * Fill in whatever a modifier is missing, or reject it outright.
+ *
+ * A modifier reaching the evaluator is trusted to carry its type's fields, and
+ * inside the app it always does — `createModifier` is the only way to make
+ * one. A scene file is not the app. One written by a newer version, truncated,
+ * hand-edited, or produced by a script gets read straight into the stack, and
+ * an absent field there does not fail loudly: mirror reads `axis[0]` off
+ * undefined and throws, solidify multiplies by an undefined thickness and
+ * quietly fills the mesh with NaN, which then renders as nothing and saves as
+ * a file that is worse than the one it came from.
+ *
+ * Merging over the defaults costs nothing and turns all of that into a
+ * modifier that behaves. An unrecognised type returns null so the caller can
+ * drop it rather than carry something it cannot run.
+ */
+export function normaliseModifier(raw: unknown): Modifier | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const candidate = raw as { type?: unknown };
+  if (typeof candidate.type !== 'string') return null;
+  if (!(candidate.type in MODIFIER_LABELS)) return null;
+  const defaults = createModifier(candidate.type as ModifierType);
+  // The defaults supply every field the evaluator reads; the stored values win
+  // wherever they exist, and `id` is kept so references to it stay valid.
+  const merged = { ...defaults } as Record<string, unknown>;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (value !== undefined && value !== null) merged[key] = value;
+  }
+  merged.type = candidate.type;
+  return merged as unknown as Modifier;
+}
+
 export const MODIFIER_LABELS: Record<ModifierType, string> = {
   subsurf: 'Subdivision Surface',
   mirror: 'Mirror',
@@ -332,6 +364,12 @@ export function applyModifier(
         : resizeSkin(mesh.skin, mesh.positions.length);
       return applySkin(mesh, bound.armature, skin, bound.meshToArmature, bound.armatureToMesh);
     }
+    default:
+      // A type this build does not know about. Returning the mesh untouched
+      // keeps a scene from a newer version openable and editable here, minus
+      // the effect it could not run — far better than a stack that evaluates
+      // to undefined and takes the viewport down with it.
+      return mesh;
   }
 }
 
@@ -344,8 +382,13 @@ export function evaluateStack(
   resolve?: ObjectResolver, rig?: ArmatureResolver,
 ): Mesh {
   let cur = mesh;
-  for (const mod of modifiers) {
-    if (!mod.enabled) continue;
+  for (const raw of modifiers) {
+    // The stack is reachable from the console and from the Build sandbox, so
+    // a modifier here has not necessarily been through `createModifier`. One
+    // spread per modifier is nothing against a subdivision, and it is the
+    // difference between a missing field being a default and being a NaN.
+    const mod = normaliseModifier(raw);
+    if (!mod || !mod.enabled) continue;
     if (editMode && !mod.showInEdit) continue;
     cur = applyModifier(cur, mod, resolve, rig);
   }

@@ -245,3 +245,72 @@ test('recalculate normals stays correct when faces are flipped mid-traversal', (
     assert.ok(t.faceNormals[f].dot(outward) > 0.5, `face ${f} points inward`);
   }
 });
+
+test('a weld never leaves a face visiting the same vertex twice', () => {
+  // Merging two corners of one face pinches its loop: [a, X, c, X, e] is not a
+  // polygon, it is two polygons touching at X. Triangulated as written it
+  // gives slivers with no usable normal, and every operator, export and
+  // renderer downstream inherits that.
+  const mesh = new Mesh(
+    [
+      new Vec3(0, 0, 0), new Vec3(1, 0, 0), new Vec3(2, 0, 0),
+      new Vec3(2, 1, 0), new Vec3(1, 1, 0), new Vec3(0, 1, 0),
+      // Sits within the weld distance of vertex 1, so the two become one.
+      new Vec3(1, 0.0001, 0),
+    ],
+    [[0, 1, 2, 3, 6, 4, 5]],
+  );
+  mergeByDistance(mesh, null, 0.01);
+  for (const face of mesh.faces) {
+    assert.equal(new Set(face).size, face.length, `face ${face} repeats a vertex`);
+    assert.ok(face.length >= 3, `face ${face} is not a polygon`);
+    assert.ok(face.every((v) => v >= 0 && v < mesh.positions.length), `face ${face} indexes out of range`);
+  }
+});
+
+test('a pinched loop is split into both of its halves, not thrown away', () => {
+  // Two quads joined at one vertex. The surface is real; keeping it is the
+  // point, and dropping the whole face would lose half the geometry.
+  const mesh = new Mesh(
+    [
+      new Vec3(0, 0, 0), new Vec3(1, 0, 0), new Vec3(1, 1, 0), new Vec3(0, 1, 0),
+      new Vec3(2, 0, 0), new Vec3(2, -1, 0), new Vec3(1, -1, 0),
+    ],
+    [[0, 1, 2, 3, 1, 6, 5, 4]],
+  );
+  mesh.cleanDegenerate();
+  assert.ok(mesh.faces.length >= 2, `expected the pinch to split, got ${mesh.faces.length} face(s)`);
+  let corners = 0;
+  for (const face of mesh.faces) {
+    assert.equal(new Set(face).size, face.length, `face ${face} still repeats a vertex`);
+    assert.ok(face.length >= 3);
+    corners += face.length;
+  }
+  // Both halves survived rather than one being discarded.
+  assert.ok(corners >= 7, `only ${corners} corners came through`);
+});
+
+test('a face with no repeats is left exactly as it was', () => {
+  const mesh = createCube();
+  const before = mesh.faces.map((f) => f.join(','));
+  mesh.cleanDegenerate();
+  assert.deepEqual(mesh.faces.map((f) => f.join(',')), before, 'a clean mesh was rewritten');
+});
+
+test('UVs follow their corners when a pinched face is split', () => {
+  const mesh = new Mesh(
+    [
+      new Vec3(0, 0, 0), new Vec3(1, 0, 0), new Vec3(1, 1, 0), new Vec3(0, 1, 0),
+      new Vec3(2, 0, 0), new Vec3(2, -1, 0), new Vec3(1, -1, 0),
+    ],
+    [[0, 1, 2, 3, 1, 6, 5, 4]],
+  );
+  mesh.setUV(0, [0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 1, -1, 2, -1, 2, 0]);
+  mesh.cleanDegenerate();
+  for (let f = 0; f < mesh.faceCount; f++) {
+    const uv = mesh.uvFor(f);
+    if (!uv) continue;
+    assert.equal(uv.length, mesh.faces[f].length * 2, `face ${f} has ${uv.length} coordinates for ${mesh.faces[f].length} corners`);
+    assert.ok(uv.every((c) => Number.isFinite(c)), `face ${f} has a non-finite coordinate`);
+  }
+});
