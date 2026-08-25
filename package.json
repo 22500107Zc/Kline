@@ -1,0 +1,148 @@
+{
+  "name": "kiln",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Kiln \u2014 an open source 3D modelling application. Runs in a browser tab or as a desktop app.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "start": "vite build && vite preview --port 4173 --open",
+    "app": "npm run build && electron .",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "app:dev": "vite build && electron .",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:unit && npm run test:app",
+    "test:unit": "esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=.test-build --log-level=warning && node --test '.test-build/*.test.js'",
+    "test:app": "node --test tests/app.test.mjs"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  },
+  "keywords": [
+    "3d",
+    "modelling",
+    "modeling",
+    "mesh",
+    "webgl",
+    "webgl2",
+    "editor",
+    "blender",
+    "gltf",
+    "subdivision"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/22500107zc/yes.git"
+  },
+  "main": "electron/main.cjs",
+  "build": {
+    "appId": "org.kiln.app",
+    "productName": "Kiln",
+    "copyright": "Copyright \u00a9 2026 Kiln contributors",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.cjs"
+    },
+    "fileAssociations": [
+      {
+        "ext": "kiln",
+        "name": "Kiln Scene",
+        "description": "Kiln 3D scene",
+        "role": "Editor",
+        "icon": "build/icon.png"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.graphics-design",
+      "target": [
+        {
+          "target": "pkg",
+          "arch": [
+            "universal"
+          ]
+        },
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "darkModeSupport": true
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Kiln"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Graphics",
+      "icon": "build/icon.png",
+      "desktop": {
+        "StartupWMClass": "Kiln"
+      },
+      "maintainer": "Kiln contributors <noreply@users.noreply.github.com>"
+    },
+    "pkg": {
+      "installLocation": "/Applications",
+      "allowAnywhere": true,
+      "allowCurrentUserHome": true,
+      "isRelocatable": false,
+      "overwriteAction": "upgrade"
+    }
+  },
+  "author": {
+    "name": "Kiln contributors",
+    "email": "noreply@users.noreply.github.com"
+  }
+}

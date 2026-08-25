@@ -1,0 +1,699 @@
+/**
+ * What the user actually sees, asserted against a real browser.
+ *
+ * The suite in `tests/*.test.ts` covers the geometry, the solvers and the file
+ * format, and covers them well — but every one of those tests stops at the
+ * edge of the renderer. Three bugs shipped through that gap: a shadow pass
+ * that silently drew nothing, a click that threw away the selection it had
+ * just confirmed, and an axis whose labels ran together. None of them were
+ * findable from data alone; all three are findable from here.
+ *
+ * Each test below is written against a specific failure that reached a user,
+ * not against the implementation that happens to be there now.
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { launchApp, luma, resetScene, samplePixels, screenPoint } from './app/harness.mjs';
+
+const app = await launchApp();
+
+if (app.skip) {
+  test('viewport and interaction tests', { skip: `${app.skip} — the browser suite did not run` }, () => {});
+} else {
+  test.after(() => app.close());
+
+  const { page, centre } = app;
+
+  /** A floor, a box above it, and a sun: the smallest scene that casts. */
+  const shadowScene = async () => {
+    await resetScene(page);
+    await page.evaluate(() => {
+      const k = window.kiln, ed = k.editor, S = ed.scene;
+      k.run('add.plane');
+      const floor = S.get(S.active);
+      floor.scale.x = 8;
+      floor.scale.y = 8;
+      k.run('add.cube');
+      S.get(S.active).position.z = 2;
+      k.run('add.light.sun');
+      const sun = S.get(S.active);
+      sun.position.z = 8;
+      sun.rotation.x = -0.9;
+      if (sun.light) sun.light.energy = 5;
+      S.selection.clear();
+      S.active = null;
+      for (let i = 0; i < 4 && ed.options.shading !== 'material'; i++) k.run('view.shading');
+      ed.options.showGrid = false;
+      ed.options.showOverlays = false;
+    });
+  };
+
+  /** A lattice of points across the lower half of the frame, where the floor is. */
+  const floorGrid = () => {
+    const pts = [];
+    for (let y = 0.55; y <= 0.92; y += 0.06) {
+      for (let x = 0.12; x <= 0.88; x += 0.06) pts.push([x, y]);
+    }
+    return pts;
+  };
+
+  test('the shadow pass writes depth rather than leaving the map empty', async () => {
+    await shadowScene();
+    const depth = await page.evaluate(() => {
+      const ed = window.kiln.editor;
+      const r = ed.renderer;
+      const gl = r.gl;
+      ed.renderNow();
+      const tex = r.shadowMap;
+      if (!tex) return { error: 'no shadow map was allocated' };
+
+      // The depth attachment cannot be read directly, so it is sampled into a
+      // small colour target through a plain (non-comparison) lookup.
+      const compile = (type, src) => {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+        return s;
+      };
+      const prog = gl.createProgram();
+      gl.attachShader(prog, compile(gl.VERTEX_SHADER, `#version 300 es
+in vec2 aP; out vec2 vT;
+void main(){ vT = aP * 0.5 + 0.5; gl_Position = vec4(aP, 0.0, 1.0); }`));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, `#version 300 es
+precision highp float; uniform sampler2D uD; in vec2 vT; out vec4 o;
+void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return { error: gl.getProgramInfoLog(prog) };
+
+      const N = 128;
+      const colour = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, colour);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, N, N);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      const fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, colour, 0);
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.NONE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+      gl.useProgram(prog);
+      gl.uniform1i(gl.getUniformLocation(prog, 'uD'), 2);
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(prog, 'aP');
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      gl.viewport(0, 0, N, N);
+      gl.disable(gl.DEPTH_TEST);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+      const px = new Uint8Array(N * N * 4);
+      gl.readPixels(0, 0, N, N, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      let min = 255;
+      let occupied = 0;
+      for (let i = 0; i < N * N; i++) {
+        const v = px[i * 4];
+        if (v < min) min = v;
+        if (v < 250) occupied++;
+      }
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.deleteFramebuffer(fbo);
+      gl.deleteTexture(colour);
+      gl.deleteBuffer(buf);
+      gl.deleteProgram(prog);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+      gl.disableVertexAttribArray(loc);
+      window.kiln.editor.requestRender();
+      return { min, occupied, of: N * N };
+    });
+
+    assert.equal(depth.error, undefined, `depth read failed: ${depth.error}`);
+    // An all-white map is a cleared one — the case where every shadow draw was
+    // rejected and the pass produced nothing at all.
+    assert.ok(
+      depth.occupied > 0,
+      `the shadow map is empty: every one of ${depth.of} texels is at the clear value`,
+    );
+  });
+
+  test('a box above a floor casts a visible shadow onto it', async () => {
+    await shadowScene();
+    const points = floorGrid();
+
+    await page.evaluate(() => { window.kiln.editor.options.shadows = true; });
+    const lit = (await samplePixels(page, points)).map(luma);
+
+    await page.evaluate(() => { window.kiln.editor.options.shadows = false; });
+    const flat = (await samplePixels(page, points)).map(luma);
+
+    // Only points that are on the floor at all — the frame also contains the
+    // box itself and the background above the horizon.
+    const onFloor = flat.map((v, i) => [v, i]).filter(([v]) => v > 60).map(([, i]) => i);
+    assert.ok(onFloor.length > 20, `expected a floor to sample, found ${onFloor.length} lit points`);
+
+    const spread = (values) => {
+      const v = onFloor.map((i) => values[i]);
+      return Math.max(...v) - Math.min(...v);
+    };
+
+    // Without shadows the floor is one flat tone; with them, part of it is
+    // markedly darker. The gap between those two spreads is the shadow.
+    assert.ok(
+      spread(flat) < 25,
+      `the unshadowed floor should be near-uniform, but its brightness ranges over ${spread(flat).toFixed(1)}`,
+    );
+    assert.ok(
+      spread(lit) > 40,
+      `no shadow reached the floor: brightness ranges over only ${spread(lit).toFixed(1)}`,
+    );
+
+    await page.evaluate(() => { window.kiln.editor.options.shadows = true; });
+  });
+
+  test('no pass leaves a GL error behind, in any mode', async () => {
+    await resetScene(page);
+    const errors = await page.evaluate(() => {
+      const k = window.kiln, ed = k.editor, S = ed.scene;
+      const gl = ed.renderer.gl;
+      k.run('add.uvsphere');
+      const ball = S.get(S.active);
+      ball.mesh.shadeSmooth = true;
+      ball.mesh.markDirty();
+      k.run('add.light.sun');
+      S.selection = new Set([ball.id]);
+      S.active = ball.id;
+      ed.options.showGrid = true;
+      ed.options.showOverlays = true;
+
+      const found = [];
+      const drain = () => { while (gl.getError() !== gl.NO_ERROR) { /* clear */ } };
+      const frame = (label) => {
+        drain();
+        ed.renderNow();
+        const e = gl.getError();
+        if (e !== gl.NO_ERROR) found.push(`${label}: 0x${e.toString(16)}`);
+      };
+
+      for (const shading of ['solid', 'material', 'wireframe']) {
+        ed.options.shading = shading;
+        frame(`object/${shading}`);
+      }
+      ed.options.shading = 'material';
+      k.run('mode.edit');
+      k.run('select.all');
+      for (const mode of ['vertex', 'edge', 'face']) {
+        ed.setSelectMode(mode);
+        frame(`edit/${mode}`);
+      }
+      // Deleting an object leaves attribute arrays pointing at freed buffers,
+      // which is exactly how the shadow pass came to draw nothing.
+      k.run('mode.object');
+      S.remove(ball.id);
+      frame('after a delete');
+      k.run('add.cube');
+      frame('after a delete then an add');
+      return found;
+    });
+    assert.deepEqual(errors, [], `GL errors were raised during rendering: ${errors.join(', ')}`);
+  });
+
+  test('edit-mode overlays draw through their own vertex layout', async () => {
+    await resetScene(page);
+    // Vertex dots and wires read their attributes from buffers packed far
+    // tighter than a surface vertex. Handing them the surface layout leaves
+    // the stride wrong, and the overlay does not vanish — it scatters, which
+    // is why counting pixels is not enough. Where they land is the test.
+    const check = async (selectMode) => page.evaluate((mode) => {
+      const k = window.kiln, ed = k.editor;
+      ed.setSelectMode(mode);
+      k.run('select.all');
+      ed.options.showOverlays = true;
+      ed.renderNow();
+
+      const gl = ed.renderer.gl;
+      const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+      const px = new Uint8Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+
+      // Where the mesh actually is on screen, from its own bounds.
+      const obj = ed.editObject;
+      const b = obj.mesh.bounds();
+      const model = obj.worldMatrix(ed.scene);
+      const V = ed.camera.target.constructor;
+      let lo = { x: Infinity, y: Infinity }, hi = { x: -Infinity, y: -Infinity };
+      for (let i = 0; i < 8; i++) {
+        const p = model.transformPoint(new V(
+          i & 1 ? b.max.x : b.min.x, i & 2 ? b.max.y : b.min.y, i & 4 ? b.max.z : b.min.z,
+        ));
+        const s = ed.camera.worldToScreen(p, w, h);
+        lo = { x: Math.min(lo.x, s.x), y: Math.min(lo.y, s.y) };
+        hi = { x: Math.max(hi.x, s.x), y: Math.max(hi.y, s.y) };
+      }
+      // Half a dot of slack, plus a little for the projection being coarse.
+      const pad = 14;
+
+      let orange = 0, stray = 0;
+      for (let i = 0; i < w * h; i++) {
+        const r = px[i * 4], g = px[i * 4 + 1], bl = px[i * 4 + 2];
+        if (!(r > 180 && g > 100 && g < 200 && bl < 90)) continue;
+        orange++;
+        const x = i % w;
+        // readPixels counts rows from the bottom; worldToScreen from the top.
+        const y = h - 1 - Math.floor(i / w);
+        if (x < lo.x - pad || x > hi.x + pad || y < lo.y - pad || y > hi.y + pad) stray++;
+      }
+      return { orange, stray, box: [lo.x | 0, lo.y | 0, hi.x | 0, hi.y | 0] };
+    }, selectMode);
+
+    await page.evaluate(() => {
+      const k = window.kiln;
+      k.run('add.uvsphere');
+      k.run('mode.edit');
+    });
+
+    for (const mode of ['vertex', 'edge']) {
+      const r = await check(mode);
+      assert.ok(
+        r.orange > 500,
+        `${mode} overlay is not being drawn: only ${r.orange} overlay pixels in the frame`,
+      );
+      // A mis-strided buffer walks off the end of its data and throws the
+      // overlay across the frame; a correct one keeps it on the mesh.
+      assert.ok(
+        r.stray < r.orange * 0.02,
+        `${mode} overlay is scattered: ${r.stray} of ${r.orange} pixels fall outside `
+        + `the mesh at [${r.box}] — the buffer is being read at the wrong stride`,
+      );
+    }
+  });
+
+  /** Put a cube in edit mode with its top face picked, ready for an operator. */
+  const cubeWithTopFacePicked = async () => {
+    await resetScene(page);
+    await page.evaluate(() => {
+      const k = window.kiln;
+      k.run('add.cube');
+      k.run('mode.edit');
+      k.run('select.face');
+      k.run('select.none');
+    });
+    // The centre of the top face, projected through the app's own camera.
+    const top = await screenPoint(page, [0, 0, 0.5]);
+    await page.mouse.move(top.x, top.y);
+    await page.mouse.click(top.x, top.y);
+    return top;
+  };
+
+  test('confirming a modal with a click keeps the selection', async () => {
+    await cubeWithTopFacePicked();
+    assert.equal(
+      await page.evaluate(() => window.kiln.editor.selection.faces.size), 1,
+      'clicking the top face should select exactly it',
+    );
+
+    // Confirm well below the cube, over empty space. That is the case that
+    // matters: a modal is sized by dragging away from what it acts on, so the
+    // confirming click routinely lands on nothing. Confirming back over the
+    // face hides the bug, because the stray pick simply finds it again.
+    const empty = await screenPoint(page, [0, 0, -3]);
+    await page.keyboard.press('i');
+    await page.mouse.move(empty.x, empty.y - 120);
+    await page.mouse.move(empty.x, empty.y);
+    await page.mouse.down();
+    await page.mouse.up();
+
+    const after = await page.evaluate(() => {
+      const ed = window.kiln.editor;
+      return { faces: ed.selection.faces.size, modal: ed.modal ? ed.modal.type : null };
+    });
+    assert.equal(after.modal, null, 'the click should have confirmed the inset');
+    // The release used to be read as a click on empty space, and deselect.
+    assert.equal(after.faces, 1, 'the inset face should still be selected after confirming');
+  });
+
+  test('inset then extrude chains, which is the whole point of keeping it', async () => {
+    const top = await cubeWithTopFacePicked();
+    const faces = () => page.evaluate(() => window.kiln.editor.editObject.mesh.faceCount);
+    const start = await faces();
+
+    await page.keyboard.press('i');
+    await page.mouse.move(top.x + 40, top.y);
+    await page.mouse.down();
+    await page.mouse.up();
+    const inset = await faces();
+    assert.ok(inset > start, `inset added no geometry (${start} -> ${inset})`);
+
+    await page.keyboard.press('e');
+    await page.mouse.move(top.x, top.y - 60);
+    await page.mouse.down();
+    await page.mouse.up();
+    const extruded = await faces();
+    assert.ok(extruded > inset, `extrude after inset did nothing (${inset} -> ${extruded})`);
+  });
+
+  test('the ordinary ways of selecting still work', async () => {
+    await resetScene(page);
+    await page.evaluate(() => {
+      const k = window.kiln, S = k.editor.scene;
+      k.run('add.cube');
+      S.get(S.active).position.x = -2.2;
+      k.run('add.cube');
+      S.get(S.active).position.x = 2.2;
+      S.selection.clear();
+      S.active = null;
+      k.editor.requestRender();
+    });
+    const count = () => page.evaluate(() => window.kiln.editor.scene.selection.size);
+
+    const left = await screenPoint(page, [-2.2, 0, 0]);
+    await page.mouse.click(left.x, left.y);
+    assert.equal(await count(), 1, 'a click should select the object under it');
+
+    const right = await screenPoint(page, [2.2, 0, 0]);
+    await page.keyboard.down('Shift');
+    await page.mouse.click(right.x, right.y);
+    await page.keyboard.up('Shift');
+    assert.equal(await count(), 2, 'shift-click should extend the selection');
+
+    // The origin: the gap between the two cubes, and dead centre of frame, so
+    // it is certainly on the canvas rather than under a panel.
+    const empty = await screenPoint(page, [0, 0, 0]);
+    await page.mouse.click(empty.x, empty.y);
+    assert.equal(await count(), 0, 'a click on empty space should deselect');
+
+    // A rectangle drawn around both cubes, with room to spare on each side.
+    const pad = 60;
+    await page.mouse.move(Math.min(left.x, right.x) - pad, Math.min(left.y, right.y) - pad);
+    await page.mouse.down();
+    await page.mouse.move(Math.max(left.x, right.x) + pad, Math.max(left.y, right.y) + pad, { steps: 8 });
+    await page.mouse.up();
+    assert.equal(await count(), 2, 'a drag across both objects should select both');
+  });
+
+  test('escape cancels a transform and puts the value back', async () => {
+    await resetScene(page);
+    await page.evaluate(() => {
+      const k = window.kiln, S = k.editor.scene;
+      k.run('add.cube');
+      S.selection = new Set([S.active]);
+      k.editor.requestRender();
+    });
+    const x = () => page.evaluate(
+      () => +window.kiln.editor.scene.get(window.kiln.editor.scene.active).position.x,
+    );
+    const origin = await screenPoint(page, [0, 0, 0]);
+    const before = await x();
+
+    await page.mouse.move(origin.x, origin.y);
+    await page.keyboard.press('g');
+    await page.mouse.move(origin.x + 120, origin.y);
+    await page.keyboard.press('Escape');
+    assert.ok(Math.abs((await x()) - before) < 1e-6, 'escape left the object moved');
+
+    await page.mouse.move(origin.x, origin.y);
+    await page.keyboard.press('g');
+    await page.mouse.move(origin.x + 120, origin.y);
+    await page.mouse.down();
+    await page.mouse.up();
+    assert.ok(Math.abs((await x()) - before) > 0.1, 'a confirmed move did not move anything');
+  });
+
+  /** Drag across the middle of the viewport, the way a stroke is made. */
+  const dragAcross = async (from, steps = 10, dx = 6, dy = 0) => {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    for (let i = 1; i <= steps; i++) {
+      await page.mouse.move(from.x + i * dx, from.y + i * dy);
+      await page.waitForTimeout(20);
+    }
+    await page.mouse.up();
+    await page.waitForTimeout(150);
+  };
+
+  test('a sculpt stroke moves the surface it is dragged over', async () => {
+    await resetScene(page);
+    await page.evaluate(() => {
+      const k = window.kiln, ed = k.editor;
+      k.run('add.uvsphere');
+      k.run('mode.sculpt');
+      ed.sculpt.brush = 'draw';
+      ed.sculpt.radius = 0.5;
+      const o = ed.scene.get(ed.scene.active);
+      window.__before = o.mesh.positions.map((p) => [p.x, p.y, p.z]);
+    });
+    const centre = await screenPoint(page, [0, 0, 0]);
+    await dragAcross({ x: centre.x - 30, y: centre.y });
+
+    const moved = await page.evaluate(() => {
+      const o = window.kiln.editor.scene.get(window.kiln.editor.scene.active);
+      let n = 0, worst = 0, nan = 0;
+      o.mesh.positions.forEach((p, i) => {
+        if (!Number.isFinite(p.x + p.y + p.z)) { nan++; return; }
+        const q = window.__before[i];
+        const d = Math.hypot(p.x - q[0], p.y - q[1], p.z - q[2]);
+        if (d > 1e-6) n++;
+        if (d > worst) worst = d;
+      });
+      return { n, worst, nan };
+    });
+    assert.equal(moved.nan, 0, 'the stroke put NaN into the mesh');
+    assert.ok(moved.n > 10, `the stroke moved only ${moved.n} vertices — it is not reaching the surface`);
+    assert.ok(moved.worst > 0.005, `the stroke barely displaced anything (${moved.worst})`);
+  });
+
+  test('a mask holds back the brush where it was painted', async () => {
+    await resetScene(page);
+    await page.evaluate(() => {
+      const k = window.kiln, ed = k.editor;
+      k.run('add.uvsphere');
+      k.run('mode.sculpt');
+      ed.sculpt.brush = 'mask';
+      ed.sculpt.radius = 0.8;
+      ed.sculpt.strength = 1;
+    });
+    const centre = await screenPoint(page, [0, 0, 0]);
+    // Several passes, so a region actually reaches full mask rather than a
+    // falloff value that is supposed to move a little.
+    for (let i = 0; i < 5; i++) await dragAcross({ x: centre.x - 20, y: centre.y }, 8, 4);
+
+    const painted = await page.evaluate(() => {
+      const ed = window.kiln.editor;
+      const o = ed.scene.get(ed.scene.active);
+      if (!o.mesh.mask) return { held: 0 };
+      window.__mask = [...o.mesh.mask];
+      window.__before = o.mesh.positions.map((p) => [p.x, p.y, p.z]);
+      ed.sculpt.brush = 'draw';
+      return { held: window.__mask.filter((v) => v > 0.9).length };
+    });
+    assert.ok(painted.held > 5, `the mask brush painted only ${painted.held} vertices to full strength`);
+
+    await dragAcross({ x: centre.x - 20, y: centre.y }, 8, 4);
+    const byLevel = await page.evaluate(() => {
+      const o = window.kiln.editor.scene.get(window.kiln.editor.scene.active);
+      const masked = [], partial = [];
+      o.mesh.positions.forEach((p, i) => {
+        const q = window.__before[i];
+        const d = Math.hypot(p.x - q[0], p.y - q[1], p.z - q[2]);
+        const m = window.__mask[i] ?? 0;
+        if (m > 0.9) masked.push(d);
+        else if (m > 0.1) partial.push(d);
+      });
+      const mean = (a) => (a.length ? a.reduce((s, v) => s + v, 0) / a.length : 0);
+      return { masked: mean(masked), partial: mean(partial), partialCount: partial.length };
+    });
+    assert.ok(byLevel.partialCount > 0, 'no partly-masked vertices to compare against');
+    // A mask is a falloff, so the test is the ratio, not that masked is zero.
+    assert.ok(
+      byLevel.masked < byLevel.partial * 0.1,
+      `masked vertices moved ${byLevel.masked.toFixed(5)} against ${byLevel.partial.toFixed(5)} `
+      + 'for partly-masked ones — the mask is not holding them',
+    );
+  });
+
+  test('posing a bound rig changes what is on screen', async () => {
+    await resetScene(page);
+    const bound = await page.evaluate(() => {
+      const k = window.kiln, ed = k.editor, S = ed.scene;
+      k.run('add.cylinder');
+      const tube = S.get(S.active);
+      tube.scale.z = 3;
+      k.run('add.armature');
+      const arm = [...S.objects.values()].find((o) => o.type === 'armature');
+      k.run('rig.extrudeBone');
+      k.run('rig.extrudeBone');
+      S.selection = new Set([tube.id, arm.id]);
+      S.active = arm.id;
+      k.run('rig.bind');
+      window.__tube = tube.id;
+      window.__arm = arm.id;
+      const skin = tube.skin ?? tube.mesh.skin;
+      if (!skin) return { influences: 0 };
+      let influences = 0;
+      for (let i = 0; i < skin.bones.length; i++) if (skin.bones[i] >= 0 && skin.weights[i] > 0) influences++;
+      // Weights are a partition of unity wherever anything is bound at all.
+      const per = skin.bones.length / tube.mesh.positions.length;
+      let badSums = 0;
+      for (let v = 0; v < tube.mesh.positions.length; v++) {
+        let sum = 0;
+        for (let i = 0; i < per; i++) sum += skin.weights[v * per + i];
+        if (sum > 1e-6 && Math.abs(sum - 1) > 1e-4) badSums++;
+      }
+      return { influences, badSums };
+    });
+    assert.ok(bound.influences > 0, 'binding produced no weights at all');
+    assert.equal(bound.badSums, 0, 'some vertices have weights that do not sum to one');
+
+    // Same camera, same everything, only the bone moves — so the mesh must
+    // change, and so must the frame. Whole-frame difference rather than a few
+    // sample points: on a flat-shaded surface two very different silhouettes
+    // can happen to share a colour anywhere you happen to look.
+    const deformed = await page.evaluate(() => {
+      const ed = window.kiln.editor, S = ed.scene;
+      const tube = S.get(window.__tube);
+      const arm = S.get(window.__arm);
+      const gl = ed.renderer.gl;
+      const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+      const frame = () => {
+        ed.renderNow();
+        const px = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        return px;
+      };
+      const rest = tube.evaluated(false).positions.map((p) => [p.x, p.y, p.z]);
+      const restFrame = frame();
+
+      arm.armature.bones[arm.armature.bones.length - 1].rotation = [0, 0.9, 0];
+      tube.invalidate?.();
+      arm.invalidate?.();
+
+      const posed = tube.evaluated(false).positions.map((p) => [p.x, p.y, p.z]);
+      let moved = 0, still = 0, nan = 0;
+      posed.forEach((p, i) => {
+        if (!Number.isFinite(p[0] + p[1] + p[2])) { nan++; return; }
+        const d = Math.hypot(p[0] - rest[i][0], p[1] - rest[i][1], p[2] - rest[i][2]);
+        if (d > 1e-6) moved++; else still++;
+      });
+
+      const posedFrame = frame();
+      let changed = 0;
+      for (let i = 0; i < w * h; i++) {
+        const d = Math.abs(restFrame[i * 4] - posedFrame[i * 4])
+          + Math.abs(restFrame[i * 4 + 1] - posedFrame[i * 4 + 1])
+          + Math.abs(restFrame[i * 4 + 2] - posedFrame[i * 4 + 2]);
+        if (d > 12) changed++;
+      }
+      return { moved, still, nan, changed, pixels: w * h };
+    });
+    assert.equal(deformed.nan, 0, 'posing put NaN into the mesh');
+    assert.ok(deformed.moved > 0, 'posing a bone moved nothing');
+    assert.ok(deformed.still > 0, 'posing one bone moved the entire mesh — the weights are not localised');
+    // The evaluated mesh changing is not enough: a modifier stack returns a
+    // fresh mesh every run, and one keyed only by revision looks identical to
+    // the last, so the viewport went on showing the rest pose.
+    assert.ok(
+      deformed.changed > deformed.pixels * 0.005,
+      `only ${deformed.changed} of ${deformed.pixels} pixels changed — the deformed mesh `
+      + 'is not reaching the screen',
+    );
+  });
+
+  test('a physics bake drops a box onto a floor and keys where it lands', async () => {
+    await resetScene(page);
+    const baked = await page.evaluate(() => {
+      const k = window.kiln, ed = k.editor, S = ed.scene;
+      k.run('add.plane');
+      const floor = S.get(S.active);
+      floor.scale.x = 8;
+      floor.scale.y = 8;
+      floor.physics = { kind: 'passive', mass: 0, shape: 'box', friction: 0.6, restitution: 0.1 };
+      k.run('add.cube');
+      const box = S.get(S.active);
+      box.position.z = 5;
+      box.rotation.x = 0.4;
+      box.rotation.y = 0.3;
+      box.physics = { kind: 'active', mass: 1, shape: 'box', friction: 0.6, restitution: 0.1 };
+      k.run('physics.bake');
+      const z = box.animation.find((c) => c.path === 'position' && c.index === 2);
+      const rot = box.animation.filter((c) => c.path === 'rotation');
+      return {
+        keyed: !!z && z.keys.length > 1,
+        startZ: z ? z.keys[0].value : null,
+        endZ: z ? z.keys[z.keys.length - 1].value : null,
+        rotationChannels: rot.length,
+        rotationMoved: rot.some((c) => Math.abs(c.keys[c.keys.length - 1].value - c.keys[0].value) > 1e-3),
+        status: ed.statusMessage,
+      };
+    });
+    assert.ok(baked.keyed, 'the bake wrote no position keys');
+    assert.ok(baked.endZ < baked.startZ - 2, `the box did not fall (${baked.startZ} -> ${baked.endZ})`);
+    assert.ok(baked.endZ > 0.2, `the box fell through the floor to ${baked.endZ}`);
+    assert.equal(baked.rotationChannels, 3, 'rotation was not baked');
+    // A box dropped at an angle onto a floor has to rotate as it settles;
+    // it used to collide as though it were axis-aligned and never would.
+    assert.ok(baked.rotationMoved, 'the box never rotated — the solver is ignoring orientation');
+  });
+
+  test('the path tracer produces an image, not a blank canvas', async () => {
+    await resetScene(page);
+    await page.evaluate(() => {
+      const k = window.kiln, ed = k.editor, S = ed.scene;
+      k.run('add.plane');
+      const floor = S.get(S.active);
+      floor.scale.x = 6;
+      floor.scale.y = 6;
+      k.run('add.uvsphere');
+      S.get(S.active).position.z = 1.2;
+      k.run('add.light.sun');
+      S.get(S.active).position.z = 6;
+      ed.renderSettings.width = 96;
+      ed.renderSettings.height = 64;
+      ed.renderSettings.samples = 8;
+      ed.renderSettings.maxBounces = 3;
+      k.run('render.image');
+    });
+    await page.waitForFunction(
+      () => window.kiln.editor.activeRender && window.kiln.editor.activeRender.samplesDone > 0,
+      null, { timeout: 60_000 },
+    );
+    const image = await page.evaluate(() => {
+      const job = window.kiln.editor.activeRender;
+      const data = job.toImageData();
+      let min = 255, max = 0, sum = 0;
+      const n = data.width * data.height;
+      for (let i = 0; i < n; i++) {
+        const v = 0.2126 * data.data[i * 4] + 0.7152 * data.data[i * 4 + 1] + 0.0722 * data.data[i * 4 + 2];
+        if (v < min) min = v;
+        if (v > max) max = v;
+        sum += v;
+      }
+      const nan = [...data.data].some((v) => !Number.isFinite(v));
+      window.kiln.run('render.cancel');
+      return { samples: job.samplesDone, triangles: job.triangles, min, max, mean: sum / n, nan };
+    });
+    assert.equal(image.nan, false, 'the render contains non-finite pixels');
+    assert.ok(image.triangles > 0, 'the tracer was handed no geometry');
+    // A frame that is one flat tone means nothing was hit, or everything was.
+    assert.ok(
+      image.max - image.min > 30,
+      `the render is a flat field (${image.min.toFixed(0)}..${image.max.toFixed(0)}) — nothing was traced`,
+    );
+    assert.ok(image.mean > 5, `the render came back essentially black (mean ${image.mean.toFixed(1)})`);
+  });
+
+  test('nothing logged an error to the console along the way', () => {
+    assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
+  });
+}

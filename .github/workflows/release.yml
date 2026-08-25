@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+    # Push a release/* branch to get installers as run artifacts without
+    # cutting a tag; only tags publish an actual GitHub Release.
+    branches: ['release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: --mac
+            artifact: kiln-macos
+          - os: windows-latest
+            target: --win
+            artifact: kiln-windows
+          - os: ubuntu-latest
+            target: --linux
+            artifact: kiln-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build the app bundle
+        # electron-builder only packages dist/; without this it would happily
+        # ship an installer containing an empty window.
+        run: npm run build
+      - name: Verify the bundle exists
+        shell: bash
+        run: test -f dist/index.html
+      - name: Build installers
+        run: npx electron-builder ${{ matrix.target }} --publish never
+        env:
+          # Unsigned builds: skip notarisation rather than failing the job.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            release/*.pkg
+            release/*.zip
+            release/*.dmg
+            release/*.exe
+            release/*.AppImage
+            release/*.deb
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide whether to publish
+        id: gate
+        # Tags cut a real release; a release/* branch publishes the same assets
+        # as a prerelease, so there is always a page where one click gets the
+        # app rather than a zip nested inside a workflow-artifact zip.
+        run: |
+          ref='${{ github.ref }}'
+          if [[ "$ref" == refs/tags/v* || "$ref" == refs/heads/release/* ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.gate.outputs.publish == 'true'
+        continue-on-error: true
+        with:
+          path: artifacts
+      - name: Flatten the artifact directories
+        if: steps.gate.outputs.publish == 'true'
+        run: |
+          mkdir -p dist-assets
+          find artifacts -type f \( -name '*.pkg' -o -name '*.zip' -o -name '*.dmg' \
+            -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' \) \
+            -exec cp {} dist-assets/ \;
+          ls -lh dist-assets
+      - uses: softprops/action-gh-release@v2
+        if: steps.gate.outputs.publish == 'true'
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'kiln-0.1.0' }}
+          # Without this the tag is cut against the default branch, so the
+          # auto-attached "Source code" zip contains that branch, not the code
+          # these installers were actually built from.
+          target_commitish: ${{ github.sha }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Kiln 0.1.0' }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          files: dist-assets/*
+          fail_on_unmatched_files: true
+          body: |
+            **Do not click "Source code" — that is the repository, not the app.**
+            The files you want are listed above it.
+
+            ### macOS — start here
+            **`Kiln-0.1.0-universal.pkg`** — one file, works on both Apple Silicon
+            and Intel. Double-click it and the installer puts **Kiln.app** into
+            your Applications folder. Nothing to unzip, nothing to drag.
+
+            These builds are unsigned, so macOS refuses the very first
+            double-click. Right-click the `.pkg` -> **Open** -> **Open** and it
+            installs. After that Kiln launches from Applications or Spotlight like
+            anything else.
+
+            The `.dmg` and `.zip` files are the same app in other wrappers, if you
+            would rather not run an installer.
+
+            ### Windows
+            **`Kiln Setup 0.1.0.exe`** to install, or **`Kiln 0.1.0.exe`** to run
+            without installing. SmartScreen: **More info** -> **Run anyway**, once.
+
+            ### Linux
+            **`Kiln-0.1.0.AppImage`** (`chmod +x` it first) or **`kiln_0.1.0_amd64.deb`**.

@@ -1,0 +1,413 @@
+import { Editor } from '../editor/Editor';
+import { COMMANDS, KEYMAP, keyChord, lookupKey, runCommand } from '../editor/commands';
+import { Header } from './Header';
+import { Outliner } from './Outliner';
+import { Properties } from './Properties';
+import { StatusBar } from './StatusBar';
+import { Toolbar } from './Toolbar';
+import { clear, h } from './dom';
+import { BuildBar } from './BuildBar';
+import { CommandPalette } from './CommandPalette';
+import { COMMANDS as ALL_COMMANDS } from '../editor/commands';
+import { applyDesktopChrome, desktop } from '../desktop';
+import { Timeline } from './Timeline';
+import { RenderWindow } from './RenderWindow';
+import { UVEditor } from './UVEditor';
+import { GraphEditor } from './GraphEditor';
+import { SculptPanel } from './SculptPanel';
+import { formatAge } from '../editor/recovery';
+
+/** Assembles the shell around the viewport and routes keyboard input. */
+export class App {
+  readonly editor: Editor;
+  private canvas: HTMLCanvasElement;
+  private heatBar = h('div', { class: 'heat-bar' });
+  private boxSelect = h('div', { class: 'box-select' });
+  /** The knife's cut line, drawn over the viewport while the tool is live. */
+  private knifeLine = (() => {
+    // SVG needs its own namespace; `h` only makes HTML elements.
+    const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    el.setAttribute('class', 'knife-line');
+    return el;
+  })();
+  private shortcuts = h('div', { class: 'overlay-panel shortcuts hidden' });
+  private viewportHint = h('div', { class: 'viewport-hint' });
+  private dropVeil = h('div', { class: 'drop-veil' }, [
+    h('p', { text: 'Drop to build geometry from it' }),
+  ]);
+  private properties!: Properties;
+  private palette!: CommandPalette;
+  private buildBar!: BuildBar;
+  private renderWindow!: RenderWindow;
+  private uvEditor!: UVEditor;
+  private graphEditor!: GraphEditor;
+  private recoveryBar = h('div', { class: 'recovery-bar hidden' });
+
+  constructor(private mount: HTMLElement) {
+    this.canvas = h('canvas', { class: 'viewport-canvas' });
+    this.editor = new Editor(this.canvas);
+
+    const header = new Header(this.editor, () => this.toggleShortcuts());
+    const toolbar = new Toolbar(this.editor);
+    const outliner = new Outliner(this.editor);
+    const properties = new Properties(this.editor);
+    this.properties = properties;
+    const status = new StatusBar(this.editor);
+
+    this.buildBar = new BuildBar(this.editor);
+    this.palette = new CommandPalette(this.editor);
+    this.renderWindow = new RenderWindow(this.editor);
+    this.uvEditor = new UVEditor(this.editor);
+    this.graphEditor = new GraphEditor(this.editor);
+    // Registered rather than key-handled here, so both windows reach the View
+    // menu, the command palette and the shortcut list through one definition.
+    this.editor.panels = {
+      toggleUV: () => this.uvEditor.toggle(),
+      toggleGraph: () => this.graphEditor.toggle(),
+    };
+    const sculptPanel = new SculptPanel(this.editor);
+    const timeline = new Timeline(this.editor);
+    const viewport = h('main', { class: 'viewport' }, [
+      this.canvas, this.buildBar.root, this.boxSelect, this.knifeLine, this.viewportHint,
+      sculptPanel.root, this.uvEditor.root, this.graphEditor.root, this.dropVeil, this.shortcuts,
+      this.renderWindow.root, this.palette.root,
+    ]);
+    const right = h('div', { class: 'sidebar' }, [outliner.root, properties.root]);
+
+    mount.append(
+      header.root,
+      this.heatBar,
+      this.recoveryBar,
+      h('div', { class: 'workspace' }, [toolbar.root, viewport, right]),
+      timeline.root,
+      status.root,
+    );
+
+    this.buildShortcuts();
+    this.wireKeyboard();
+    this.wireDesktopShell();
+    this.wireFileDrop();
+    this.editor.loadStoredPreferences();
+    this.offerRecovery();
+    this.editor.renderer.onTexturesReady = () => this.editor.requestRender();
+    window.addEventListener('beforeunload', () => void this.editor.autosaveNow(false));
+    this.editor.on('modal', () => this.syncModalChrome());
+    this.editor.on('change', () => this.syncModalChrome());
+    this.syncModalChrome();
+    this.editor.start();
+    this.editor.setStatus('Ready — Option+drag orbits, Option+Shift+drag pans, scroll zooms');
+  }
+
+  private syncModalChrome(): void {
+    this.heatBar.classList.toggle('live', this.editor.isModal);
+    const rect = this.editor.boxSelectRect;
+    if (rect) {
+      Object.assign(this.boxSelect.style, {
+        display: 'block',
+        left: `${rect.x0}px`,
+        top: `${rect.y0}px`,
+        width: `${rect.x1 - rect.x0}px`,
+        height: `${rect.y1 - rect.y0}px`,
+      });
+    } else {
+      this.boxSelect.style.display = 'none';
+    }
+    const knife = this.editor.knifePath;
+    if (knife && knife.length > 0) {
+      const pts = knife.map(([x, y]) => `${x},${y}`).join(' ');
+      const dots = knife
+        .slice(0, this.editor.knifePointCount)
+        .map(([x, y]) => `<circle cx="${x}" cy="${y}" r="3" />`)
+        .join('');
+      this.knifeLine.innerHTML = `<polyline points="${pts}" />${dots}`;
+      this.knifeLine.style.display = 'block';
+    } else {
+      this.knifeLine.style.display = 'none';
+    }
+
+    const label = this.editor.modalLabel;
+    this.viewportHint.textContent = label ?? '';
+    this.viewportHint.classList.toggle('visible', !!label);
+  }
+
+  private wireKeyboard(): void {
+    document.addEventListener('keydown', (e) => {
+      // The app-wide chords work from anywhere, including inside a text field.
+      const meta = e.ctrlKey || e.metaKey;
+      if (meta && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        this.palette.toggle();
+        return;
+      }
+      // Ctrl/Cmd+B belongs to Bevel, the way it does in every modeller;
+      // the Build prompt takes the Shift variant.
+      if (meta && e.shiftKey && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        this.buildBar.focus();
+        return;
+      }
+
+      const target = e.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+
+      if (!this.shortcuts.classList.contains('hidden') && e.key === 'Escape') {
+        this.toggleShortcuts();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+        e.preventDefault();
+        this.toggleShortcuts();
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (this.renderWindow.visible) {
+          this.renderWindow.hide();
+          e.preventDefault();
+          return;
+        }
+        if (this.uvEditor.visible) {
+          this.uvEditor.hide();
+          e.preventDefault();
+          return;
+        }
+        if (this.graphEditor.visible) {
+          this.graphEditor.hide();
+          e.preventDefault();
+          return;
+        }
+      }
+      if (this.editor.handleKey(e)) {
+        e.preventDefault();
+        return;
+      }
+      const command = lookupKey(keyChord(e), this.editor.mode);
+      if (command) {
+        e.preventDefault();
+        runCommand(this.editor, command);
+      }
+    });
+    // Keep the canvas focused so the keymap always applies.
+    this.mount.addEventListener('pointerdown', (e) => {
+      const target = e.target as HTMLElement;
+      if (!/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(target.tagName)) this.canvas.focus();
+    });
+  }
+
+  /**
+   * Dropping an image or a video anywhere over the window sends it straight to
+   * the Create panel, which turns it into geometry immediately.
+   */
+  private wireFileDrop(): void {
+    let depth = 0;
+    const hasFiles = (e: DragEvent): boolean =>
+      !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
+
+    this.mount.addEventListener('dragenter', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth++;
+      this.dropVeil.classList.add('visible');
+    });
+    this.mount.addEventListener('dragover', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    });
+    this.mount.addEventListener('dragleave', (e) => {
+      if (!hasFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) this.dropVeil.classList.remove('visible');
+    });
+    this.mount.addEventListener('drop', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      this.dropVeil.classList.remove('visible');
+      const file = e.dataTransfer?.files?.[0];
+      if (file) this.properties.openCreate(file);
+    });
+  }
+
+  /** Hand the native menu our command registry and accept its callbacks. */
+  private wireDesktopShell(): void {
+    const bridge = desktop();
+    if (!bridge) return;
+    applyDesktopChrome();
+    bridge.registerCommands(ALL_COMMANDS.map((c) => ({
+      id: c.id, label: c.label, category: c.category, shortcut: c.shortcut,
+    })));
+    bridge.onCommand((id) => runCommand(this.editor, id));
+    bridge.onShowShortcuts(() => this.toggleShortcuts());
+    bridge.onOpenFile((file) => {
+      if (!file) return;
+      try {
+        this.editor.loadSceneJSON(JSON.parse(file.text));
+        this.editor.setStatus(`Opened ${file.name}`);
+      } catch (err) {
+        this.editor.setStatus(`Could not open ${file.name}: ${(err as Error).message}`);
+      }
+    });
+  }
+
+  /**
+   * If the last session left an autosave behind, offer it rather than
+   * restoring silently — the user may well have wanted the blank scene.
+   */
+  private offerRecovery(): void {
+    void this.editor.recovery.list().then((slots) => {
+      const usable = slots.filter((s) => s.objectCount > 0);
+      if (usable.length === 0) return;
+      const newest = usable[0];
+      clear(this.recoveryBar);
+
+      // More than one copy is kept now, and the one you want is often not the
+      // newest — the newest may already contain whatever went wrong.
+      const picker = h('select', { class: 'input' }) as HTMLSelectElement;
+      for (const slot of usable) {
+        picker.append(
+          h('option', {
+            value: String(slot.id),
+            text: `${formatAge(Date.now() - slot.savedAt)} · ${slot.objectCount} object${slot.objectCount === 1 ? '' : 's'}`,
+          }),
+        );
+      }
+      picker.value = String(newest.id);
+
+      this.recoveryBar.append(
+        h('span', { text: 'A scene from your last session is still here.' }),
+        usable.length > 1 ? picker : h('span', {
+          text: `Saved ${formatAge(Date.now() - newest.savedAt)} (${newest.objectCount} objects).`,
+        }),
+        h('button', {
+          class: 'btn primary', text: 'Restore',
+          on: {
+            click: () => {
+              const id = usable.length > 1 ? Number(picker.value) : newest.id;
+              void this.editor.recovery.load(id).then((rec) => {
+                if (!rec) {
+                  this.editor.setStatus('That recovery copy is no longer there');
+                  return;
+                }
+                try {
+                  this.editor.loadSceneJSON(rec.scene);
+                  this.editor.setStatus('Restored the recovered scene');
+                } catch (err) {
+                  this.editor.setStatus(`Could not restore: ${(err as Error).message}`);
+                }
+              });
+              this.recoveryBar.classList.add('hidden');
+            },
+          },
+        }),
+        h('button', {
+          class: 'btn', text: 'Discard',
+          on: {
+            click: () => {
+              void this.editor.recovery.discard();
+              this.recoveryBar.classList.add('hidden');
+            },
+          },
+        }),
+      );
+      this.recoveryBar.classList.remove('hidden');
+    });
+  }
+
+  private toggleShortcuts(): void {
+    this.shortcuts.classList.toggle('hidden');
+  }
+
+  private buildShortcuts(): void {
+    clear(this.shortcuts);
+    const byCommand = new Map(COMMANDS.map((c) => [c.id, c]));
+    const groups = new Map<string, { chord: string; label: string; mode?: string }[]>();
+    for (const binding of KEYMAP) {
+      const cmd = byCommand.get(binding.command);
+      if (!cmd) continue;
+      const list = groups.get(cmd.category) ?? [];
+      list.push({ chord: binding.chord, label: cmd.label, mode: binding.mode });
+      groups.set(cmd.category, list);
+    }
+
+    this.shortcuts.appendChild(h('div', { class: 'overlay-head' }, [
+      h('h2', { text: 'Keyboard' }),
+      h('button', { class: 'icon-btn', text: '✕', title: 'Close', on: { click: () => this.toggleShortcuts() } }),
+    ]));
+
+    const grid = h('div', { class: 'shortcut-grid' });
+    for (const [category, list] of groups) {
+      grid.appendChild(h('div', { class: 'shortcut-group' }, [
+        h('h3', { text: category }),
+        ...list.map((item) => h('div', { class: 'shortcut-row' }, [
+          h('kbd', { text: prettyChord(item.chord) }),
+          h('span', { text: item.label }),
+          item.mode ? h('em', { text: item.mode }) : null,
+        ])),
+      ]));
+    }
+    grid.appendChild(h('div', { class: 'shortcut-group' }, [
+      h('h3', { text: 'Quick keys' }),
+      ...[
+        ['Cmd/Ctrl + K', 'Search every command'],
+        ['Cmd/Ctrl + Shift + B', 'Jump to the Build prompt'],
+        ['Cmd/Ctrl + U', 'UV editor'],
+        ['?', 'This sheet'],
+      ].map(([k, v]) => h('div', { class: 'shortcut-row' }, [h('kbd', { text: k }), h('span', { text: v })])),
+    ]));
+
+    grid.appendChild(h('div', { class: 'shortcut-group' }, [
+      h('h3', { text: 'Sculpt Mode' }),
+      ...[
+        ['Drag', 'Apply the brush'],
+        ['Ctrl + drag', 'Invert the brush'],
+        ['[  ]', 'Smaller / larger brush'],
+        ['Ctrl + scroll', 'Resize the brush'],
+        ['B', 'Next brush'],
+      ].map(([k, v]) => h('div', { class: 'shortcut-row' }, [h('kbd', { text: k }), h('span', { text: v })])),
+    ]));
+
+    grid.appendChild(h('div', { class: 'shortcut-group' }, [
+      h('h3', { text: 'Modal operators' }),
+      ...[
+        ['X / Y / Z', 'Constrain to an axis'],
+        ['Shift + axis', 'Constrain to a plane'],
+        ['Type a number', 'Enter an exact value'],
+        ['Scroll', 'Loop cut count · bevel segments'],
+        ['P', 'Cycle the bevel profile'],
+        ['Shift', 'Precision drag'],
+        ['Ctrl', 'Invert the snap setting'],
+        ['Right click / Esc', 'Cancel'],
+      ].map(([k, v]) => h('div', { class: 'shortcut-row' }, [h('kbd', { text: k }), h('span', { text: v })])),
+    ]));
+
+    grid.appendChild(h('div', { class: 'shortcut-group' }, [
+      h('h3', { text: 'Mouse' }),
+      ...[
+        ['Option + drag', 'Orbit — trackpad friendly'],
+        ['Option + Shift + drag', 'Pan'],
+        ['Scroll / pinch', 'Zoom'],
+        ['Shift + scroll', 'Pan'],
+        ['Middle drag', 'Orbit (with a mouse)'],
+        ['Shift + middle', 'Pan'],
+        ['Left click', 'Select'],
+        ['Left drag', 'Box select'],
+        ['Shift + click', 'Extend selection'],
+        ['Alt + click', 'Select edge ring (Edit Mode)'],
+        ['Shift + right click', 'Place 3D cursor'],
+      ].map(([k, v]) => h('div', { class: 'shortcut-row' }, [h('kbd', { text: k }), h('span', { text: v })])),
+    ]));
+    this.shortcuts.appendChild(grid);
+  }
+}
+
+function prettyChord(chord: string): string {
+  return chord
+    .split('+')
+    .map((part) => {
+      if (part.startsWith('numpad')) return `Numpad ${part.slice(6).replace('decimal', '.')}`;
+      if (part.length === 1) return part.toUpperCase();
+      return part[0].toUpperCase() + part.slice(1);
+    })
+    .join(' + ');
+}
