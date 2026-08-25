@@ -63,16 +63,12 @@
     },
     "fileAssociations": [
       {
-        "ext": "kline",
+        "ext": [
+          "kline",
+          "kiln"
+        ],
         "name": "Kline Scene",
         "description": "Kline 3D scene",
-        "role": "Editor",
-        "icon": "build/icon.png"
-      },
-      {
-        "ext": "kiln",
-        "name": "Kline Scene (legacy)",
-        "description": "Kline 3D scene saved before the rename",
         "role": "Editor",
         "icon": "build/icon.png"
       }

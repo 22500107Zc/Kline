@@ -1,9 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { Scene } from '../src/scene/Scene';
 import { describePlan, executePlan, meshForPart, validatePlan } from '../src/build/plan';
 import { interpret, knownSubjects } from '../src/build/interpreter';
 import { RECIPES, runRecipe } from '../src/build/recipes';
+
+interface FileAssociation { ext: string | string[]; icon?: string }
+interface BuildConfig {
+  appId?: string;
+  productName?: string;
+  extraMetadata?: { main?: string };
+  fileAssociations?: FileAssociation[];
+  mac?: { icon?: string };
+  win?: { icon?: string };
+  linux?: { icon?: string };
+}
+const BUILD: BuildConfig =
+  createRequire(import.meta.url)('../package.json').build ?? {};
 
 const plan = (prompt: string) => {
   const r = interpret(prompt);
@@ -282,4 +299,70 @@ test('a spiral staircase spirals, and a plain one does not', () => {
 
   // The count still comes from the prompt.
   assert.equal(treads(plan('a spiral staircase with 20 steps')).length, 20);
+});
+
+/**
+ * The packaging config, which nothing else in this suite reads.
+ *
+ * It is not application code, so it is easy to treat as inert — but it is the
+ * only thing standing between a working build and no download at all, and it
+ * fails on a machine none of us is sitting at. The rename added a second file
+ * association for legacy `.kiln` scenes and gave it the same icon path as the
+ * first. On macOS, and only on macOS, electron-builder hard-links each
+ * association's icon into the app bundle under its own basename, so two
+ * associations sharing one icon means linking the same destination twice:
+ *
+ *   EEXIST: file already exists, link 'build/icon.png' ->
+ *     'Electron.app/Contents/Resources/icon.png'
+ *
+ * Windows and Linux built and published cleanly through it. The release went
+ * out with no macOS installer on it, which is the platform the app is
+ * developed on.
+ */
+test('the packaging config cannot produce a build that fails only on macOS', () => {
+  const seen = new Set<string>();
+  for (const fa of BUILD.fileAssociations ?? []) {
+    if (!fa.icon) continue;
+    const basename = fa.icon.split('/').pop() as string;
+    assert.ok(
+      !seen.has(basename),
+      `two file associations both link "${basename}" into the macOS bundle, which fails ` +
+      'with EEXIST — give one association every extension it covers, or separate icon files',
+    );
+    seen.add(basename);
+  }
+});
+
+test('scenes saved before the rename still open', () => {
+  // `.kiln` has to stay registered. Dropping it would leave everything saved
+  // before the rename as a file the desktop app no longer recognises.
+  const extensions = new Set(
+    (BUILD.fileAssociations ?? []).flatMap((fa) => (Array.isArray(fa.ext) ? fa.ext : [fa.ext])),
+  );
+  assert.ok(extensions.has('kline'), 'the current extension must be registered');
+  assert.ok(extensions.has('kiln'), 'the pre-rename extension must still be registered');
+});
+
+test('every path the packaging config points at exists', () => {
+  // A missing icon or entry point is not found until a release build runs,
+  // which is the slowest possible place to find it.
+  const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+  const paths = [
+    BUILD.extraMetadata?.main,
+    ...(BUILD.fileAssociations ?? []).map((fa) => fa.icon),
+    BUILD.mac?.icon, BUILD.win?.icon, BUILD.linux?.icon,
+  ].filter((p): p is string => typeof p === 'string');
+  assert.ok(paths.length > 0, 'the config should name some files');
+  for (const p of paths) {
+    assert.ok(existsSync(join(root, p)), `${p} is named by the build config but is not there`);
+  }
+});
+
+test('the app is packaged under the name it is called', () => {
+  assert.equal(BUILD.productName, 'Kline');
+  assert.ok(BUILD.appId?.includes('kline'), `appId ${BUILD.appId} should identify Kline`);
+  // The rename left the old name behind in places that only a release surfaces.
+  const config = JSON.stringify(BUILD);
+  const stale = config.match(/Kiln[a-z]*/gi)?.filter((m) => m !== 'kiln');
+  assert.deepEqual(stale ?? [], [], `the packaging config still says: ${stale?.join(', ')}`);
 });
