@@ -62,7 +62,15 @@ export class BuildBar {
     this.showHint();
   }
 
-  focus(): void {
+  /**
+   * Put the cursor in the box, optionally with something already typed.
+   *
+   * The guide fills it rather than building for you: the point of that card
+   * is to show where the box is and what it accepts, and a scene that appears
+   * by itself teaches neither.
+   */
+  focus(prefill?: string): void {
+    if (prefill !== undefined) this.input.value = prefill;
     this.input.focus();
     this.input.select();
   }

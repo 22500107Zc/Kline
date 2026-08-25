@@ -41,6 +41,14 @@ export interface Preferences {
   renderSamples: number;
   renderWidth: number;
   renderHeight: number;
+  /**
+   * Show the getting-started guide when the application opens.
+   *
+   * True by default so a first run is guided, and turned off by the guide's
+   * own checkbox — which is the only place anyone will look for it, and is
+   * far more likely to be used than a settings page nobody opens.
+   */
+  showGuideOnStart: boolean;
 }
 
 export function defaultPreferences(): Preferences {
@@ -55,6 +63,7 @@ export function defaultPreferences(): Preferences {
     renderSamples: 128,
     renderWidth: 960,
     renderHeight: 540,
+    showGuideOnStart: true,
   };
 }
 

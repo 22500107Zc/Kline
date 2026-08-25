@@ -808,6 +808,135 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     await page.keyboard.press('Escape');
   });
 
+  test('the setup guide opens on a first run and stays shut once dismissed', async () => {
+    // A fresh profile has no stored preference, which is what a genuine first
+    // run looks like.
+    const first = await page.evaluate(() => {
+      const el = document.querySelector('.setup-guide');
+      return {
+        present: !!el,
+        preference: window.kline.editor.preferences.showGuideOnStart,
+      };
+    });
+    assert.ok(first.present, 'the guide is not in the document at all');
+
+    // Open it explicitly, since earlier tests in this file have already been
+    // through the boot sequence.
+    await page.evaluate(() => {
+      const ed = window.kline.editor;
+      ed.applyPreferences({ ...ed.preferences, showGuideOnStart: true });
+      if (!document.querySelector('.setup-guide').classList.contains('hidden')) return;
+      window.kline.run('help.guide');
+    });
+    await page.waitForTimeout(200);
+
+    const opened = await page.evaluate(() => {
+      const el = document.querySelector('.setup-guide');
+      return {
+        open: !el.classList.contains('hidden'),
+        title: el.querySelector('h2')?.textContent,
+        cards: el.querySelectorAll('.setup-dot').length,
+        hasAction: !!el.querySelector('.setup-try'),
+        hasCheckbox: !!el.querySelector('.setup-again input'),
+      };
+    });
+    assert.ok(opened.open, 'the guide did not open');
+    assert.ok(opened.cards >= 3, `only ${opened.cards} cards — that is not a guide`);
+    assert.ok(opened.hasAction, 'the first card has nothing to try');
+    assert.ok(opened.hasCheckbox, 'there is no way to turn it off');
+
+    // The demonstrations have to act on the real scene, or they teach nothing.
+    await page.evaluate(() => {
+      const ed = window.kline.editor;
+      for (const id of [...ed.scene.objects.keys()]) ed.scene.remove(id);
+    });
+    await page.click('.setup-try');
+    await page.waitForTimeout(300);
+    const built = await page.evaluate(() => window.kline.editor.scene.objects.size);
+    assert.ok(built > 0, 'the first card\'s button did nothing to the scene');
+
+    // Ticking the box must persist, not just hide the panel for this session.
+    await page.click('.setup-again input');
+    await page.waitForTimeout(200);
+    const off = await page.evaluate(() => ({
+      preference: window.kline.editor.preferences.showGuideOnStart,
+      stored: JSON.parse(localStorage.getItem('kline.preferences') ?? '{}').showGuideOnStart,
+    }));
+    assert.equal(off.preference, false, 'the checkbox did not change the preference');
+    assert.equal(off.stored, false, 'the choice was not written to storage, so it will come back');
+
+    // And it must still be openable afterwards — onboarding you cannot get
+    // back is a dead end.
+    await page.evaluate(() => {
+      document.querySelector('.setup-guide').classList.add('hidden');
+      window.kline.run('help.guide');
+    });
+    await page.waitForTimeout(200);
+    const reopened = await page.evaluate(
+      () => !document.querySelector('.setup-guide').classList.contains('hidden'),
+    );
+    assert.ok(reopened, 'the guide could not be reopened from the Help command');
+
+    await page.evaluate(() => {
+      document.querySelector('.setup-guide').classList.add('hidden');
+      const ed = window.kline.editor;
+      ed.applyPreferences({ ...ed.preferences, showGuideOnStart: false });
+    });
+  });
+
+  test('a pending crash recovery does not suppress the guide', async () => {
+    // These were mutually exclusive at first, on the theory that a recovery
+    // offer is more urgent. It backfired: closing the tab writes an autosave,
+    // so almost every launch after the first has something to offer, and
+    // anyone who quit without ticking the box never saw the guide again.
+    // They occupy different corners and can both be up.
+    const both = await page.evaluate(() => {
+      const bar = document.querySelector('.recovery-bar');
+      const guide = document.querySelector('.setup-guide');
+      if (!bar || !guide) return { missing: true };
+      // Stand both up the way a boot with a recovery copy would.
+      bar.classList.remove('hidden');
+      guide.classList.remove('hidden');
+      const barBox = bar.getBoundingClientRect();
+      const guideBox = guide.getBoundingClientRect();
+      const overlap = !(barBox.bottom <= guideBox.top || guideBox.bottom <= barBox.top
+        || barBox.right <= guideBox.left || guideBox.right <= barBox.left);
+      bar.classList.add('hidden');
+      guide.classList.add('hidden');
+      return { missing: false, overlap, barHeight: barBox.height, guideTop: guideBox.top };
+    });
+    assert.equal(both.missing, false, 'the recovery bar or the guide is not in the document');
+    assert.equal(both.overlap, false, 'the recovery bar and the guide cover each other');
+  });
+
+  test('walking the guide to the end closes it without touching the preference', async () => {
+    await page.evaluate(() => {
+      const ed = window.kline.editor;
+      ed.applyPreferences({ ...ed.preferences, showGuideOnStart: true });
+      document.querySelector('.setup-guide').classList.add('hidden');
+      window.kline.run('help.guide');
+    });
+    await page.waitForTimeout(200);
+    const cards = await page.evaluate(() => document.querySelectorAll('.setup-dot').length);
+    for (let i = 0; i < cards; i++) {
+      await page.click('.setup-foot .btn.primary');
+      await page.waitForTimeout(120);
+    }
+    const after = await page.evaluate(() => ({
+      open: !document.querySelector('.setup-guide').classList.contains('hidden'),
+      preference: window.kline.editor.preferences.showGuideOnStart,
+    }));
+    assert.equal(after.open, false, 'reaching the last card did not close the guide');
+    // Finishing it is not the same as asking never to see it again; only the
+    // checkbox means that.
+    assert.equal(after.preference, true, 'finishing the guide silently turned it off');
+
+    await page.evaluate(() => {
+      const ed = window.kline.editor;
+      ed.applyPreferences({ ...ed.preferences, showGuideOnStart: false });
+    });
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

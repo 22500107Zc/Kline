@@ -32,7 +32,7 @@ import { pruneSelection } from './selection';
 export interface Command {
   id: string;
   label: string;
-  category: 'File' | 'Edit' | 'Add' | 'Object' | 'Mesh' | 'Rig' | 'Select' | 'View';
+  category: 'File' | 'Edit' | 'Add' | 'Object' | 'Mesh' | 'Rig' | 'Select' | 'View' | 'Help';
   shortcut?: string;
   /** Which mode the command applies to; omitted means every mode. */
   mode?: EditorMode;
@@ -598,6 +598,20 @@ export const COMMANDS: Command[] = [
   {
     id: 'view.compare', label: 'Compare Versions', category: 'View', shortcut: 'Ctrl+D',
     run: (ed) => ed.panels.toggleDiff?.(),
+  },
+  {
+    id: 'help.guide', label: 'Getting Started Guide', category: 'Help',
+    run: (ed) => ed.panels.toggleGuide?.(),
+  },
+  {
+    id: 'help.guideOnStart',
+    label: 'Show The Guide When Kline Opens',
+    category: 'Help',
+    run: (ed) => {
+      const on = !ed.preferences.showGuideOnStart;
+      ed.applyPreferences({ ...ed.preferences, showGuideOnStart: on });
+      ed.setStatus(on ? 'The guide will open with Kline' : 'The guide will stay closed on start');
+    },
   },
   {
     id: 'view.compareLastStep',

@@ -127,7 +127,13 @@ export class Editor {
    * this in at startup; a command calls through it and does not care what is
    * on the other side.
    */
-  panels: { toggleUV?: () => void; toggleGraph?: () => void; toggleDiff?: () => void } = {};
+  panels: {
+    toggleUV?: () => void;
+    toggleGraph?: () => void;
+    toggleDiff?: () => void;
+    toggleGuide?: () => void;
+    focusBuild?: (prefill?: string) => void;
+  } = {};
   private pointer = { x: 0, y: 0, down: false, button: -1, startX: 0, startY: 0, dragging: false };
   /**
    * Set when a press has already been spent on something other than picking.
