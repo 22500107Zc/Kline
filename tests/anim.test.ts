@@ -11,6 +11,7 @@ import { createMaterial } from '../src/scene/Material';
 import { buildPrimitive } from '../src/mesh/primitives';
 import { exportGLTF } from '../src/io/gltf';
 import { Vec3 } from '../src/core/math';
+import { niceStep } from '../src/ui/GraphEditor';
 
 test('keys land sorted no matter what order they arrive in', () => {
   const channels: Channel[] = [];
@@ -272,4 +273,28 @@ test('a held key does not move until the next one', () => {
   setKey(ch, 'position', 0, 11, 10, 'constant');
   assert.equal(sampleChannel(ch[0], 10.9), 0);
   assert.equal(sampleChannel(ch[0], 11), 10);
+});
+
+test('graph axis steps land on 1, 2 or 5 times a power of ten', () => {
+  for (const span of [0.004, 0.05, 0.3, 1, 3.4, 7, 25, 180, 4200]) {
+    for (const target of [3, 5, 8]) {
+      const step = niceStep(span, target);
+      const mantissa = step / Math.pow(10, Math.round(Math.log10(step)));
+      const normalised = step / Math.pow(10, Math.floor(Math.log10(step) + 1e-9));
+      assert.ok(
+        [1, 2, 5].some((m) => Math.abs(normalised - m) < 1e-9),
+        `step ${step} for span ${span} is not a 1/2/5 step (normalised ${normalised}, ${mantissa})`,
+      );
+      // The whole point is a readable number of lines, not an exact count.
+      const lines = span / step;
+      assert.ok(lines >= 1 && lines <= target * 2.5, `span ${span} at target ${target} gives ${lines} lines`);
+    }
+  }
+});
+
+test('a degenerate range still gives a usable step rather than zero or NaN', () => {
+  for (const span of [0, 1e-12, -0]) {
+    const step = niceStep(span, 5);
+    assert.ok(Number.isFinite(step) && step > 0, `span ${span} gave ${step}`);
+  }
 });

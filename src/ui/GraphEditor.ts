@@ -27,6 +27,22 @@ interface Hit {
   keyIndex: number;
 }
 
+/**
+ * A round step that puts roughly `target` gridlines across `span`.
+ *
+ * Powers of ten alone are too coarse a ladder: a range of 3.4 falls to a step
+ * of 0.1, which is thirty-four lines in two hundred pixels and a column of
+ * labels too dense to read. Snapping to 1, 2 or 5 times a power of ten is the
+ * standard fix, and it is the difference between an axis and a smear.
+ */
+export function niceStep(span: number, target: number): number {
+  const raw = Math.max(span, 1e-9) / Math.max(1, target);
+  const magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+  const normalised = raw / magnitude;
+  const multiple = normalised <= 1 ? 1 : normalised <= 2 ? 2 : normalised <= 5 ? 5 : 10;
+  return multiple * magnitude;
+}
+
 export class GraphEditor {
   readonly root = h('div', { class: 'graph-editor hidden' });
   private canvas = h('canvas', { class: 'graph-canvas' }) as HTMLCanvasElement;
@@ -381,7 +397,8 @@ export class GraphEditor {
 
     // Value grid, at a round step for whatever range is on screen.
     const span = this.valueHigh - this.valueLow;
-    const step = Math.pow(10, Math.floor(Math.log10(Math.max(span / 4, 1e-9))));
+    const step = niceStep(span, Math.max(2, Math.round(this.height / 46)));
+    const places = Math.min(3, Math.max(0, Math.ceil(-Math.log10(step) - 1e-9)));
     ctx.strokeStyle = 'rgba(255,255,255,0.07)';
     ctx.fillStyle = 'rgba(148,141,138,0.9)';
     ctx.font = '10px ui-monospace, monospace';
@@ -392,7 +409,8 @@ export class GraphEditor {
       ctx.moveTo(0, y);
       ctx.lineTo(this.width, y);
       ctx.stroke();
-      ctx.fillText(v.toFixed(step < 1 ? 2 : 0), 3, y - 2);
+      // -0 reads as a mistake; it is the same number as 0.
+      ctx.fillText((Object.is(v, -0) ? 0 : v).toFixed(places), 3, y - 2);
     }
 
     // Curves, sampled per pixel through the same function playback uses.

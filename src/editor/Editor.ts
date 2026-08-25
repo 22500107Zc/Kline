@@ -109,6 +109,16 @@ export class Editor {
   private needsRender = true;
   private running = false;
   private pointer = { x: 0, y: 0, down: false, button: -1, startX: 0, startY: 0, dragging: false };
+  /**
+   * Set when a press has already been spent on something other than picking.
+   *
+   * A modal is confirmed on press, which leaves a release with nothing to do —
+   * and a release with nothing to do used to be read as a click on empty
+   * space, so confirming an inset or a move by clicking threw away the very
+   * selection the next operator was meant to act on. Every modelling idiom
+   * that chains two operators depends on this flag.
+   */
+  private pressConsumed = false;
   private keys = { shift: false, ctrl: false, alt: false };
   private hoverPreview: LineSegment[] = [];
 
@@ -1627,11 +1637,13 @@ export class Editor {
   private onPointerDown(e: PointerEvent): void {
     const p = this.localPointer(e);
     this.pointer = { x: p.x, y: p.y, down: true, button: e.button, startX: p.x, startY: p.y, dragging: false };
+    this.pressConsumed = false;
     this.syncModifierKeys(e);
     this.canvas.focus();
     this.canvas.setPointerCapture(e.pointerId);
 
     if (this.modal) {
+      this.pressConsumed = true;
       // The knife collects points on click rather than being confirmed by one.
       if (this.modal.type === 'knife') {
         if (e.button === 0) this.addKnifePoint(p.x, p.y);
@@ -1731,8 +1743,10 @@ export class Editor {
   private onPointerUp(e: PointerEvent): void {
     const wasDown = this.pointer.down;
     const dragging = this.pointer.dragging;
+    const consumed = this.pressConsumed;
     this.pointer.down = false;
     this.pointer.dragging = false;
+    this.pressConsumed = false;
     if (this.stroke) {
       this.endStroke();
       return;
@@ -1744,7 +1758,7 @@ export class Editor {
       this.requestRender();
       return;
     }
-    if (!wasDown || dragging || e.button !== 0) return;
+    if (!wasDown || dragging || consumed || e.button !== 0) return;
 
     const p = this.localPointer(e);
     if (this.mode === 'sculpt') return;
