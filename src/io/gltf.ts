@@ -5,7 +5,7 @@ import { Channel, sampleChannel } from '../anim/animation';
 /**
  * glTF 2.0 export (.gltf with an embedded base64 buffer).
  *
- * Kiln is Z-up, glTF is Y-up, so everything is parented to a root node that
+ * Kline is Z-up, glTF is Y-up, so everything is parented to a root node that
  * carries a -90° X rotation instead of rewriting every vertex.
  */
 
@@ -220,7 +220,7 @@ export function exportGLTF(scene: Scene, selectionOnly = false): string {
   }
   const roots = nodes.map((_, i) => i).filter((i) => !parented.has(i));
   const s = Math.SQRT1_2;
-  nodes.push({ name: 'KilnScene', rotation: [-s, 0, 0, s], children: roots });
+  nodes.push({ name: 'KlineScene', rotation: [-s, 0, 0, s], children: roots });
   const rootIndex = nodes.length - 1;
 
   const cameras = [...scene.objects.values()].some((o) => o.type === 'camera' && o.camera)
@@ -293,7 +293,7 @@ export function exportGLTF(scene: Scene, selectionOnly = false): string {
   }
 
   const gltf: Record<string, unknown> = {
-    asset: { version: '2.0', generator: 'Kiln' },
+    asset: { version: '2.0', generator: 'Kline' },
     scene: 0,
     scenes: [{ name: 'Scene', nodes: [rootIndex] }],
     nodes,
@@ -303,7 +303,7 @@ export function exportGLTF(scene: Scene, selectionOnly = false): string {
     bufferViews,
     buffers: [{ byteLength, uri: `data:application/octet-stream;base64,${base64(totalBytes)}` }],
     animations: animChannels.length
-      ? [{ name: 'KilnAction', channels: animChannels, samplers: animSamplers }]
+      ? [{ name: 'KlineAction', channels: animChannels, samplers: animSamplers }]
       : undefined,
     cameras,
   };

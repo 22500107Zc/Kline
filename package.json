@@ -1,8 +1,8 @@
 {
-  "name": "kiln",
+  "name": "kline",
   "version": "0.1.0",
   "private": false,
-  "description": "Kiln \u2014 an open source 3D modelling application. Runs in a browser tab or as a desktop app.",
+  "description": "Kline \u2014 an open source 3D modelling application. Runs in a browser tab or as a desktop app.",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -46,9 +46,9 @@
   },
   "main": "electron/main.cjs",
   "build": {
-    "appId": "org.kiln.app",
-    "productName": "Kiln",
-    "copyright": "Copyright \u00a9 2026 Kiln contributors",
+    "appId": "org.kline.app",
+    "productName": "Kline",
+    "copyright": "Copyright \u00a9 2026 Kline contributors",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -63,9 +63,16 @@
     },
     "fileAssociations": [
       {
+        "ext": "kline",
+        "name": "Kline Scene",
+        "description": "Kline 3D scene",
+        "role": "Editor",
+        "icon": "build/icon.png"
+      },
+      {
         "ext": "kiln",
-        "name": "Kiln Scene",
-        "description": "Kiln 3D scene",
+        "name": "Kline Scene (legacy)",
+        "description": "Kline 3D scene saved before the rename",
         "role": "Editor",
         "icon": "build/icon.png"
       }
@@ -119,7 +126,7 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "shortcutName": "Kiln"
+      "shortcutName": "Kline"
     },
     "linux": {
       "target": [
@@ -129,7 +136,7 @@
       "category": "Graphics",
       "icon": "build/icon.png",
       "desktop": {
-        "StartupWMClass": "Kiln"
+        "StartupWMClass": "Kline"
       },
       "maintainer": "Kiln contributors <noreply@users.noreply.github.com>"
     },
@@ -142,7 +149,7 @@
     }
   },
   "author": {
-    "name": "Kiln contributors",
+    "name": "Kline contributors",
     "email": "noreply@users.noreply.github.com"
   }
 }

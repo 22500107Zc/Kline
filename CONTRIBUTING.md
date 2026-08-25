@@ -1,6 +1,6 @@
-# Contributing to Kiln
+# Contributing to Kline
 
-Thanks for taking a look. Kiln is small enough that you can read the whole thing
+Thanks for taking a look. Kline is small enough that you can read the whole thing
 before changing it, and the fastest way to get a change merged is to keep it
 that way.
 

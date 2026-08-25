@@ -3,9 +3,11 @@ import { Mesh } from '../mesh/Mesh';
 import { Scene, SceneObject } from '../scene/Scene';
 import { ViewportCamera } from '../scene/ViewportCamera';
 import { posedSegments } from '../anim/armature';
+import { FACE_CHANGE_CODE, SceneDiff } from '../diff';
 import { DynamicBuffer, IndexBuffer, Program, applyAttribs, setupAttribs } from './gl';
 import {
-  LINE_LAYOUT, POINT_LAYOUT, SURFACE_LAYOUT, buildPoints, buildSurface, buildWire,
+  LINE_LAYOUT, LINE_STRIDE, POINT_LAYOUT, SURFACE_LAYOUT,
+  buildPoints, buildSurface, buildWire,
 } from './MeshBuffers';
 import {
   GRID_FRAG, GRID_VERT, LINE_FRAG, LINE_VERT, MAX_LIGHTS, MAX_MATERIALS, MAX_TEXTURES,
@@ -40,6 +42,8 @@ export interface ViewportOptions {
   activeBone?: number;
   /** Cast a shadow from the strongest directional light. Costs one extra pass. */
   shadows?: boolean;
+  /** Tint geometry by how it differs from the version being compared against. */
+  showDiff?: boolean;
 }
 
 export interface LineSegment {
@@ -56,6 +60,8 @@ export interface FrameState {
   options: ViewportOptions;
   edit: EditOverlay | null;
   lines: LineSegment[];
+  /** Per-object face classes and removed loops, when a comparison is open. */
+  diff?: SceneDiff | null;
 }
 
 export const THEME = {
@@ -72,6 +78,13 @@ export const THEME = {
   cursor: [0.95, 0.55, 0.15] as [number, number, number],
   light: [0.95, 0.85, 0.35] as [number, number, number],
   camera: [0.5, 0.85, 0.95] as [number, number, number],
+  // Comparison: green for what this version gained, amber for what shifted,
+  // red for what is gone. Green and red read as add and remove to anyone who
+  // has looked at a diff before, and amber is the one hue left that stays
+  // legible against both a light surface and a dark one.
+  diffAdded: [0.24, 0.78, 0.36] as [number, number, number],
+  diffMoved: [0.98, 0.68, 0.15] as [number, number, number],
+  diffRemoved: [0.93, 0.27, 0.24] as [number, number, number],
 };
 
 interface GeometryEntry {
@@ -99,6 +112,10 @@ export class Renderer {
   /** Light-space matrix of whatever cast the current frame's shadows. */
   private shadowViewProj = new Mat4();
   private shadowLightIndex = -1;
+  /** Bumped whenever the comparison changes, so cached buffers are rebuilt. */
+  private diffVersion = 0;
+  private diffSignature = '';
+  private diffClasses = new Map<number, Uint8Array>();
   private textureArray: WebGLTexture | null = null;
   /** Layers actually allocated, which grows with the scene rather than being fixed. */
   private textureCapacity = 0;
@@ -123,7 +140,7 @@ export class Renderer {
       preserveDrawingBuffer: false,
       powerPreference: 'high-performance',
     });
-    if (!gl) throw new Error('WebGL2 is required — Kiln could not create a rendering context.');
+    if (!gl) throw new Error('WebGL2 is required — Kline could not create a rendering context.');
     this.gl = gl;
 
     this.surfaceProgram = new Program(gl, SURFACE_VERT, SURFACE_FRAG, 'surface');
@@ -157,12 +174,18 @@ export class Renderer {
     return true;
   }
 
-  private geometryFor(obj: SceneObject, mesh: Mesh, edit: EditOverlay | null): GeometryEntry {
+  private geometryFor(
+    obj: SceneObject, mesh: Mesh, edit: EditOverlay | null, diff?: Uint8Array | null,
+  ): GeometryEntry {
     const editing = edit && edit.objectId === obj.id ? edit : null;
     // Identity as well as revision: a modifier stack hands back a new mesh
     // every time it runs, always at revision 1, so a key without the identity
     // matches the previous one and the buffer is never re-uploaded.
-    const key = `${mesh.id}:${mesh.revision}|${editing ? `${editing.version}:${editing.selectMode}` : '-'}`;
+    // The comparison is part of what the buffer holds, so it has to be part of
+    // the key: tinting changes the vertex data without changing the geometry,
+    // and nothing else here would notice.
+    const diffKey = diff ? `${diff.length}:${this.diffVersion}` : '-';
+    const key = `${mesh.id}:${mesh.revision}|${editing ? `${editing.version}:${editing.selectMode}` : '-'}|${diffKey}`;
     let entry = this.cache.get(obj.id);
     if (!entry) {
       entry = {
@@ -177,7 +200,7 @@ export class Renderer {
     if (entry.key === key) return entry;
 
     const faceSel = editing && editing.selectMode === 'face' ? editing.faces : null;
-    const surface = buildSurface(mesh, faceSel);
+    const surface = buildSurface(mesh, faceSel, diff);
     entry.surface.upload(surface.data, surface.count);
     entry.surfaceIndex.upload(surface.indices);
     this.lastVertices = surface.count;
@@ -194,6 +217,66 @@ export class Renderer {
     }
     entry.key = key;
     return entry;
+  }
+
+  /**
+   * Turn a scene comparison into a per-face table the buffer builder can read.
+   *
+   * Rebuilt only when the comparison itself changes — the version counter is
+   * what the geometry cache keys on, so recomputing this every frame would
+   * throw away every surface buffer every frame.
+   */
+  private syncDiff(diff: SceneDiff | null): void {
+    const signature = diff
+      ? diff.objects.map((o) => `${o.id}:${o.mesh ? `${o.mesh.added},${o.mesh.moved},${o.mesh.removed}` : '-'}`).join('|')
+      : '';
+    if (signature === this.diffSignature) return;
+    this.diffSignature = signature;
+    this.diffVersion++;
+    this.diffClasses.clear();
+    if (!diff) return;
+    for (const entry of diff.objects) {
+      if (!entry.mesh) continue;
+      const classes = new Uint8Array(entry.mesh.faces.length);
+      for (let f = 0; f < classes.length; f++) classes[f] = FACE_CHANGE_CODE[entry.mesh.faces[f]];
+      this.diffClasses.set(entry.id, classes);
+    }
+  }
+
+  /**
+   * Outlines where geometry used to be.
+   *
+   * Deleted faces cannot be tinted, because they are not in the mesh any
+   * more — but "what did I remove" is half of what a comparison is for, so
+   * they are drawn as loops floating in the space they used to occupy.
+   */
+  private drawRemovedGeometry(state: FrameState, viewProj: Mat4): void {
+    const diff = state.diff;
+    if (!diff || !state.options.showDiff) return;
+    const segments: number[] = [];
+    const [r, g, b] = THEME.diffRemoved;
+    for (const entry of diff.objects) {
+      const mesh = entry.mesh;
+      if (!mesh || mesh.removedFaces.length === 0) continue;
+      const obj = state.scene.get(entry.id);
+      // A removed object has no transform left to place its ghost with, so it
+      // is drawn where it stood in world space.
+      const model = obj ? obj.worldMatrix(state.scene) : new Mat4();
+      const pos = mesh.removedPositions;
+      for (const loop of mesh.removedFaces) {
+        for (let i = 0; i < loop.length; i++) {
+          const a = loop[i] * 3;
+          const c = loop[(i + 1) % loop.length] * 3;
+          if (a + 2 >= pos.length || c + 2 >= pos.length) continue;
+          const p0 = model.transformPoint(new Vec3(pos[a], pos[a + 1], pos[a + 2]));
+          const p1 = model.transformPoint(new Vec3(pos[c], pos[c + 1], pos[c + 2]));
+          segments.push(p0.x, p0.y, p0.z, r, g, b, p1.x, p1.y, p1.z, r, g, b);
+        }
+      }
+    }
+    if (segments.length === 0) return;
+    this.lineScratch.upload(new Float32Array(segments), segments.length / LINE_STRIDE);
+    this.drawLineBuffer(this.lineScratch, new Mat4(), viewProj, 0.00012, 0.9);
   }
 
   /** Drop cached GPU buffers for objects that no longer exist. */
@@ -235,6 +318,8 @@ export class Renderer {
     gl.disable(gl.BLEND);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
+    this.syncDiff(state.diff ?? null);
+
     const drawables: { obj: SceneObject; mesh: Mesh; model: Mat4; transparent: boolean }[] = [];
     for (const obj of scene.objects.values()) {
       if (!obj.visible || obj.type !== 'mesh') continue;
@@ -267,6 +352,8 @@ export class Renderer {
       gl.disable(gl.POLYGON_OFFSET_FILL);
       gl.disable(gl.CULL_FACE);
     }
+
+    this.drawRemovedGeometry(state, viewProj);
 
     // Selection outlines (object mode only).
     if (options.showOverlays && !edit && options.shading !== 'wireframe') {
@@ -303,7 +390,7 @@ export class Renderer {
   ): void {
     const gl = this.gl;
     const { scene, options, edit } = state;
-    const entry = this.geometryFor(obj, mesh, edit);
+    const entry = this.geometryFor(obj, mesh, edit, this.diffClasses.get(obj.id) ?? null);
     if (entry.surface.count === 0) return;
 
     const p = this.surfaceProgram;
@@ -314,6 +401,9 @@ export class Renderer {
     p.setVec3('uCamPos', eye.x, eye.y, eye.z);
     p.setInt('uShadingMode', options.shading === 'material' ? 1 : 0);
     p.setVec3('uSelectColor', ...THEME.wireSelected);
+    p.setFloat('uDiffMode', options.showDiff && state.diff ? 1 : 0);
+    p.setVec3('uDiffAdded', ...THEME.diffAdded);
+    p.setVec3('uDiffMoved', ...THEME.diffMoved);
     p.setFloat('uObjectSelected', !edit && scene.selection.has(obj.id) ? 1 : 0);
     p.setFloat('uOpacity', opacity * (options.xray ? 0.45 : 1));
 

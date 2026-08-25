@@ -33,7 +33,7 @@ export const PROVIDER_DEFAULTS: Record<ProviderKind, Omit<LLMConfig, 'provider'>
   openai: { baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile', apiKey: '' },
 };
 
-const STORAGE_KEY = 'kiln.build.llm';
+const STORAGE_KEY = 'kline.build.llm';
 
 export function loadConfig(): LLMConfig {
   try {

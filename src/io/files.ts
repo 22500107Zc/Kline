@@ -36,7 +36,7 @@ function downloadBlob(filename: string, blob: Blob): void {
 
 export function openTextFile(accept: string): Promise<{ name: string; text: string } | null> {
   const bridge = desktop();
-  if (bridge && accept.includes('.kiln')) return bridge.openScene();
+  if (bridge && accept.includes('.kline')) return bridge.openScene();
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';

@@ -8,8 +8,27 @@
  * `recovery.ts`, which uses IndexedDB.
  */
 
-const PREFS_KEY = 'kiln.preferences';
-const RECENT_KEY = 'kiln.recent';
+const PREFS_KEY = 'kline.preferences';
+const RECENT_KEY = 'kline.recent';
+/**
+ * What these keys were called before the application was renamed.
+ *
+ * Read once, when the current key is absent, and then written forward under
+ * the new name. A rename is not a reason for someone to lose their settings
+ * and their recent files.
+ */
+const LEGACY_KEYS: Record<string, string> = {
+  [PREFS_KEY]: 'kiln.preferences',
+  [RECENT_KEY]: 'kiln.recent',
+};
+
+/** Read a key, falling back to the name it had before the rename. */
+function readKey(store: Storage, key: string): string | null {
+  const current = store.getItem(key);
+  if (current !== null) return current;
+  const legacy = LEGACY_KEYS[key];
+  return legacy ? store.getItem(legacy) : null;
+}
 
 export interface Preferences {
   theme: 'dark' | 'light';
@@ -43,7 +62,7 @@ function storage(): Storage | null {
   try {
     const s = window.localStorage;
     // Safari in private mode hands back an object that throws on write.
-    const probe = '__kiln_probe__';
+    const probe = '__kline_probe__';
     s.setItem(probe, '1');
     s.removeItem(probe);
     return s;
@@ -56,7 +75,7 @@ export function loadPreferences(): Preferences {
   const s = storage();
   if (!s) return defaultPreferences();
   try {
-    const raw = s.getItem(PREFS_KEY);
+    const raw = readKey(s, PREFS_KEY);
     if (!raw) return defaultPreferences();
     return { ...defaultPreferences(), ...JSON.parse(raw) };
   } catch {
@@ -83,7 +102,7 @@ export function recentFiles(): RecentEntry[] {
   const s = storage();
   if (!s) return [];
   try {
-    const raw = s.getItem(RECENT_KEY);
+    const raw = readKey(s, RECENT_KEY);
     return raw ? (JSON.parse(raw) as RecentEntry[]) : [];
   } catch {
     return [];

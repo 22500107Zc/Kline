@@ -86,16 +86,16 @@ export const COMMANDS: Command[] = [
     },
   },
   {
-    id: 'file.save', label: 'Save Scene (.kiln)', category: 'File', shortcut: 'Ctrl+S',
+    id: 'file.save', label: 'Save Scene (.kline)', category: 'File', shortcut: 'Ctrl+S',
     run: (ed) => {
-      downloadText('scene.kiln', JSON.stringify(ed.scene.toJSON(), null, 1), 'application/json');
-      ed.setStatus('Saved scene.kiln');
+      downloadText('scene.kline', JSON.stringify(ed.scene.toJSON(), null, 1), 'application/json');
+      ed.setStatus('Saved scene.kline');
     },
   },
   {
-    id: 'file.open', label: 'Open Scene (.kiln)', category: 'File', shortcut: 'Ctrl+O',
+    id: 'file.open', label: 'Open Scene (.kline)', category: 'File', shortcut: 'Ctrl+O',
     run: async (ed) => {
-      const file = await openTextFile('.kiln,application/json');
+      const file = await openTextFile('.kline,.kiln,application/json');
       if (!file) return;
       try {
         ed.loadSceneJSON(JSON.parse(file.text));
@@ -594,6 +594,25 @@ export const COMMANDS: Command[] = [
   {
     id: 'view.graphEditor', label: 'Graph Editor', category: 'View', shortcut: 'Ctrl+G',
     run: (ed) => ed.panels.toggleGraph?.(),
+  },
+  {
+    id: 'view.compare', label: 'Compare Versions', category: 'View', shortcut: 'Ctrl+D',
+    run: (ed) => ed.panels.toggleDiff?.(),
+  },
+  {
+    id: 'view.compareLastStep',
+    label: 'Compare With Before The Last Operation',
+    category: 'View',
+    run: (ed) => {
+      const steps = ed.history.steps();
+      const last = steps[steps.length - 1];
+      if (!last) {
+        ed.setStatus('Nothing has been done yet to compare against');
+        return;
+      }
+      ed.panels.toggleDiff?.();
+      ed.compareAgainst(last.scene, `before ${last.label}`);
+    },
   },
   {
     id: 'view.grid', label: 'Toggle Grid', category: 'View',
@@ -1330,6 +1349,7 @@ export const KEYMAP: KeyBinding[] = [
   { chord: 'alt+a', command: 'select.none' },
   { chord: 'ctrl+u', command: 'view.uvEditor' },
   { chord: 'ctrl+g', command: 'view.graphEditor' },
+  { chord: 'ctrl+d', command: 'view.compare' },
   { chord: 'ctrl+i', command: 'select.invert' },
   { chord: 'ctrl+l', command: 'select.linked', mode: 'edit' },
   { chord: '1', command: 'select.vertex', mode: 'edit' },

@@ -167,10 +167,10 @@ export class RenderWindow {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'kiln-render.png';
+      a.download = 'kline-render.png';
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 5000);
-      this.editor.setStatus('Saved kiln-render.png');
+      this.editor.setStatus('Saved kline-render.png');
     }, 'image/png');
   }
 }

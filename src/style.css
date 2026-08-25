@@ -1,5 +1,5 @@
 /*
- * Kiln shell.
+ * Kline shell.
  *
  * Palette: warm graphite chrome with a single ember accent. The ember is not a
  * decorative choice — it is the exact colour the viewport uses for selected
@@ -1904,3 +1904,134 @@ button:disabled {
   min-width: 46px;
   text-align: right;
 }
+
+/* ---------------------------------------------------------- compare versions */
+
+.diff-panel {
+  position: absolute;
+  top: 24px;
+  right: 12px;
+  z-index: 36;
+  width: 340px;
+  max-height: calc(100vh - 140px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: rgba(20, 19, 22, 0.97);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
+}
+
+.diff-panel.hidden {
+  display: none;
+}
+
+.diff-sources {
+  display: grid;
+  /* The history dropdown carries long labels ("6 steps back — before Inset"),
+     so it gets the full width and the two buttons share the row beneath. */
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.diff-sources .diff-select {
+  grid-column: 1 / -1;
+}
+
+.diff-select {
+  min-width: 0;
+  background: var(--sunken);
+  color: var(--text);
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 11px;
+}
+
+.diff-headline {
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.diff-body {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 40px;
+}
+
+.diff-row {
+  display: flex;
+  align-items: center;
+  /* Notes take a line of their own beneath the name, so a long list of them
+     cannot squeeze the name it belongs to down to an ellipsis. */
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  /* A left bar carries the status, so the row reads at a glance without
+     colouring the text itself, which would fight the counts beside it. */
+  border-left: 3px solid transparent;
+}
+
+.diff-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.diff-row.diff-added { border-left-color: #3ec75c; }
+.diff-row.diff-removed { border-left-color: #ee453e; }
+.diff-row.diff-changed { border-left-color: #fbae26; }
+
+.diff-status {
+  width: 12px;
+  color: var(--dim);
+  font-weight: 700;
+}
+
+.diff-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.diff-added-text { color: #3ec75c; }
+.diff-removed-text { color: #ee453e; }
+.diff-moved-text { color: #fbae26; }
+
+.diff-notes {
+  flex-basis: 100%;
+  padding-left: 18px;
+}
+
+.diff-legend {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--dim);
+  flex-wrap: wrap;
+}
+
+.diff-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.diff-swatch.diff-added { background: #3ec75c; }
+.diff-swatch.diff-moved { background: #fbae26; }
+.diff-swatch.diff-removed { background: #ee453e; }

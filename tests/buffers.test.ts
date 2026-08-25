@@ -52,7 +52,9 @@ test('the indexed buffer expands to exactly the corners it replaced', () => {
           const want = [
             p.x, p.y, p.z, nrm.x, nrm.y, nrm.z,
             uv ? uv[c * 2] : 0, uv ? uv[c * 2 + 1] : 0,
-            0, m.faceMaterial[f] ?? 0, 1, 1, 1,
+            // flags, material, then unpainted white, then the comparison
+            // class, which is zero with no comparison open.
+            0, m.faceMaterial[f] ?? 0, 1, 1, 1, 0,
           ];
           const got = corners[k++];
           for (let j = 0; j < SURFACE_STRIDE; j++) {
