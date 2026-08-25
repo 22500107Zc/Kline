@@ -11,6 +11,7 @@ import { RECIPES, runRecipe } from '../src/build/recipes';
 
 interface FileAssociation { ext: string | string[]; icon?: string }
 interface BuildConfig {
+  afterPack?: string;
   appId?: string;
   productName?: string;
   extraMetadata?: { main?: string };
@@ -370,6 +371,7 @@ test('every path the packaging config points at exists', () => {
   const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
   const paths = [
     BUILD.extraMetadata?.main,
+    BUILD.afterPack,
     ...(BUILD.fileAssociations ?? []).map((fa) => fa.icon),
     BUILD.mac?.icon, BUILD.win?.icon, BUILD.linux?.icon,
   ].filter((p): p is string => typeof p === 'string');
@@ -386,4 +388,44 @@ test('the app is packaged under the name it is called', () => {
   const config = JSON.stringify(BUILD);
   const stale = config.match(/Kiln[a-z]*/gi)?.filter((m) => m !== 'kiln');
   assert.deepEqual(stale ?? [], [], `the packaging config still says: ${stale?.join(', ')}`);
+});
+
+/**
+ * Ad-hoc signing, without which the macOS build does not launch at all.
+ *
+ * On Apple Silicon the kernel refuses to execute a binary with no signature —
+ * not a Gatekeeper warning that can be clicked through, but the loader
+ * rejecting the app outright with "Kline is damaged and can't be opened."
+ * electron-builder signs only when it finds a real Developer ID certificate,
+ * so without an Apple account every macOS build shipped unsigned and dead.
+ */
+test('the macOS build is ad-hoc signed', () => {
+  assert.equal(
+    BUILD.afterPack, 'build/adhoc-sign.cjs',
+    'without the afterPack hook nothing signs the app and Apple Silicon will not run it',
+  );
+  const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+  const hook = join(root, BUILD.afterPack as string);
+  assert.ok(existsSync(hook), `${BUILD.afterPack} is configured but missing`);
+
+  const loaded = createRequire(import.meta.url)(hook);
+  assert.equal(typeof loaded.default, 'function', 'the hook must export a function');
+});
+
+test('the signing hook leaves every other platform alone', async () => {
+  // It shells out to `codesign`, which exists only on macOS — so on Windows
+  // and Linux it has to return before touching anything, or it takes those
+  // builds down with it.
+  const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+  const hook = createRequire(import.meta.url)(join(root, BUILD.afterPack as string));
+  for (const platform of ['linux', 'win32']) {
+    await hook.default({
+      electronPlatformName: platform,
+      // Deliberately unusable: reaching for any of this on a non-macOS build
+      // is itself the bug, so it should throw rather than quietly work.
+      appOutDir: null,
+      packager: null,
+      arch: 1,
+    });
+  }
 });

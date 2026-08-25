@@ -1,6 +1,6 @@
 {
   "name": "kline",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": false,
   "description": "Kline \u2014 an open source 3D modelling application. Runs in a browser tab or as a desktop app.",
   "license": "MIT",
@@ -61,6 +61,7 @@
     "extraMetadata": {
       "main": "electron/main.cjs"
     },
+    "afterPack": "build/adhoc-sign.cjs",
     "fileAssociations": [
       {
         "ext": "kline",
