@@ -6,7 +6,21 @@ on:
     # Push a release/* branch to get installers as run artifacts without
     # cutting a tag; only tags publish an actual GitHub Release.
     branches: ['release/**']
+  # Releasing by hand from the Actions tab. This exists because pushing a tag
+  # is not always available — some environments the repository is worked on
+  # from cannot push tag refs at all — and "the installers cannot be published
+  # from here" is a bad reason for there to be no download.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to publish, e.g. v0.2.0. Leave empty to build without releasing.'
+        required: false
+        type: string
+      prerelease:
+        description: 'Mark the release as a prerelease'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -70,7 +84,8 @@ jobs:
         # app rather than a zip nested inside a workflow-artifact zip.
         run: |
           ref='${{ github.ref }}'
-          if [[ "$ref" == refs/tags/v* || "$ref" == refs/heads/release/* ]]; then
+          tag='${{ inputs.tag }}'
+          if [[ "$ref" == refs/tags/v* || "$ref" == refs/heads/release/* || -n "$tag" ]]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"
@@ -91,13 +106,13 @@ jobs:
       - uses: softprops/action-gh-release@v2
         if: steps.gate.outputs.publish == 'true'
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('kline-{0}', github.sha) }}
+          tag_name: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || format('kline-{0}', github.sha) }}
           # Without this the tag is cut against the default branch, so the
           # auto-attached "Source code" zip contains that branch, not the code
           # these installers were actually built from.
           target_commitish: ${{ github.sha }}
-          name: ${{ startsWith(github.ref, 'refs/tags/') && format('Kline {0}', github.ref_name) || 'Kline (unreleased build)' }}
-          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          name: ${{ (inputs.tag && format('Kline {0}', inputs.tag)) || (startsWith(github.ref, 'refs/tags/') && format('Kline {0}', github.ref_name)) || 'Kline (unreleased build)' }}
+          prerelease: ${{ inputs.tag && inputs.prerelease || !startsWith(github.ref, 'refs/tags/') }}
           files: dist-assets/*
           fail_on_unmatched_files: true
           body: |
