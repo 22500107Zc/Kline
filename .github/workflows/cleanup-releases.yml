@@ -1,0 +1,68 @@
+name: Delete releases
+
+# Tidying the releases page by hand, from the Actions tab.
+#
+# A run of broken builds leaves a page where most of the entries are traps:
+# a version missing the macOS installer, one missing Linux, one whose macOS
+# app will not launch. Someone arriving at that page has no way to tell which
+# download is the good one, and the most likely outcome is that they take a
+# broken one and conclude the app does not work.
+#
+# The tags are deliberately left behind. They cost nothing, they keep every
+# commit that was ever released reachable, and they do not appear on the
+# releases page — so removing them would destroy history to fix an appearance.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: 'Tags to delete, space separated. Nothing else is touched.'
+        required: true
+        type: string
+      confirm:
+        description: 'Type DELETE to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete the named releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAGS: ${{ inputs.tags }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -uo pipefail
+
+          # There is no "delete everything" path here on purpose: this only
+          # ever removes tags that were typed in, one at a time.
+          if [ "$CONFIRM" != "DELETE" ]; then
+            echo "confirm was '$CONFIRM', expected DELETE — nothing deleted"
+            exit 1
+          fi
+
+          failed=0
+          for tag in $TAGS; do
+            if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "skip   $tag — no such release"
+              continue
+            fi
+            # The release entry goes; the tag stays, so the commit it was cut
+            # from is still reachable and can be rebuilt.
+            if gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes; then
+              echo "delete $tag"
+            else
+              echo "FAILED $tag"
+              failed=1
+            fi
+          done
+
+          echo
+          echo "what is left:"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 50
+          exit "$failed"
