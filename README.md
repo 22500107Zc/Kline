@@ -13,27 +13,44 @@ your machine.
 Kline runs two ways: as a **desktop app** you double-click, or as a page in a
 browser tab. Same code either way.
 
-### Get the desktop app
+## Download
 
-Grab the build for your platform from the
-[Releases page](https://github.com/22500107zc/yes/releases):
+Click your platform. The file downloads straight away — these links always
+point at the newest release, so they never go stale.
 
-- **macOS** — `Kline-0.1.0-universal.pkg`, one file for both Apple Silicon and
-  Intel, which installs Kline straight into Applications. (A `.dmg` and a zipped
-  `Kline.app` are there too, if you prefer.)
-- **Windows** — an `.exe` installer, or a portable `.exe` that needs no install.
-- **Linux** — `.AppImage` or `.deb`. Kline gets a Dock/Start-menu entry and a desktop shortcut, opens
-`.kiln` files on double-click, and has a real menu bar with native Open and
-Save dialogs.
+| | |
+|---|---|
+| **macOS — Apple Silicon** (M1/M2/M3/M4) | **[Download Kline-arm64.dmg](https://github.com/22500107zc/yes/releases/latest/download/Kline-arm64.dmg)** |
+| **macOS — Intel** | **[Download Kline-x64.dmg](https://github.com/22500107zc/yes/releases/latest/download/Kline-x64.dmg)** |
+| **macOS — installer** (either chip) | [Kline-universal.pkg](https://github.com/22500107zc/yes/releases/latest/download/Kline-universal.pkg) |
+| **Windows** | **[Download Kline-Setup.exe](https://github.com/22500107zc/yes/releases/latest/download/Kline-Setup.exe)** · [portable](https://github.com/22500107zc/yes/releases/latest/download/Kline-portable.exe) |
+| **Linux** | **[Download Kline.AppImage](https://github.com/22500107zc/yes/releases/latest/download/Kline.AppImage)** · [.deb](https://github.com/22500107zc/yes/releases/latest/download/Kline.deb) |
 
-These builds are **unsigned**, so the first launch needs one extra step:
+Not sure which Mac you have?  ▸ **About This Mac**. "Apple M1/M2/M3/M4" means
+Apple Silicon; "Intel" means Intel.
 
-- **macOS** — right-click the `.pkg` (or the app) ▸ **Open** ▸ **Open**, once.
-  (If it says the app is damaged, run
-  `xattr -dr com.apple.quarantine /Applications/Kline.app`.)
+### First launch
+
+These builds are not signed by a paid Apple or Microsoft developer account, so
+each system asks once whether you meant it. Once, not every time.
+
+- **macOS** — open the `.dmg`, drag Kline to Applications, then **right-click
+  Kline ▸ Open ▸ Open**. Double-clicking will not work the first time; the
+  right-click is what offers the Open button.
+  If it says the app **"is damaged and can't be opened"**, that is the
+  quarantine flag macOS puts on downloaded unsigned apps, not a broken file:
+
+  ```
+  xattr -dr com.apple.quarantine /Applications/Kline.app
+  ```
+
 - **Windows** — SmartScreen shows "Windows protected your PC" ▸ **More info** ▸
-  **Run anyway**, once.
-- **Linux** — `chmod +x Kline-*.AppImage`, then run it.
+  **Run anyway**.
+- **Linux** — `chmod +x Kline.AppImage`, then run it.
+
+Kline gets a Dock or Start-menu entry, opens `.kline` files on double-click
+(and `.kiln` files saved before the rename), and has a real menu bar with
+native Open and Save dialogs.
 
 ### Or build it yourself
 

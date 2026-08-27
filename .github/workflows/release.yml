@@ -164,6 +164,47 @@ jobs:
           # Three jobs write to one release, so each must add its own files
           # rather than replace what the others put there.
           append_body: false
+          # Restructuring this step lost the notes once, and a release page
+          # with no instructions on it sends people to the "Source code" link
+          # — which is the repository, not the app.
+          body: |
+            ## Download
+
+            **Do not click "Source code" at the bottom — that is the
+            repository, not the app.**
+
+            | | |
+            |---|---|
+            | **macOS - Apple Silicon** (M1/M2/M3/M4) | **[Kline-arm64.dmg](https://github.com/22500107zc/yes/releases/latest/download/Kline-arm64.dmg)** |
+            | **macOS - Intel** | **[Kline-x64.dmg](https://github.com/22500107zc/yes/releases/latest/download/Kline-x64.dmg)** |
+            | **macOS - installer** (either chip) | [Kline-universal.pkg](https://github.com/22500107zc/yes/releases/latest/download/Kline-universal.pkg) |
+            | **Windows** | **[Kline-Setup.exe](https://github.com/22500107zc/yes/releases/latest/download/Kline-Setup.exe)** - [portable](https://github.com/22500107zc/yes/releases/latest/download/Kline-portable.exe) |
+            | **Linux** | **[Kline.AppImage](https://github.com/22500107zc/yes/releases/latest/download/Kline.AppImage)** - [.deb](https://github.com/22500107zc/yes/releases/latest/download/Kline.deb) |
+
+            ### First launch
+
+            These are not signed by a paid developer account, so each system
+            asks once whether you meant it. Once, not every time.
+
+            **macOS** - open the `.dmg`, drag Kline to Applications, then
+            **right-click Kline -> Open -> Open**. Double-clicking will not
+            work the first time; the right-click is what offers the Open
+            button. If it says the app **"is damaged and can't be opened"**,
+            that is the quarantine flag macOS puts on downloaded unsigned
+            apps, not a broken file:
+
+            ```
+            xattr -dr com.apple.quarantine /Applications/Kline.app
+            ```
+
+            **Windows** - SmartScreen: **More info** -> **Run anyway**.
+
+            **Linux** - `chmod +x Kline.AppImage`, then run it.
+
+            ### Scene files
+
+            Kline saves `.kline` files, and still opens the `.kiln` files
+            written before the rename.
           files: ${{ matrix.files }}
           # Each job asks only for its own platform's files, so an empty match
           # means that platform silently produced nothing — worth failing over.
