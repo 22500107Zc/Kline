@@ -60,6 +60,71 @@ jobs:
         env:
           # Unsigned builds: skip notarisation rather than failing the job.
           CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      # The macOS app shipped for months without ever being launched, because
+      # nothing here could launch it: it is built on a machine nobody looks at
+      # and downloaded by someone else entirely. An arm64 binary with no
+      # signature is refused by the kernel outright — "Kline is damaged and
+      # can't be opened" — and that was invisible from the build log, which
+      # said "success". These runners are real Macs, so the app is now made to
+      # start on one before anybody is offered it.
+      - name: Prove the macOS app actually launches
+        if: matrix.os == 'macos-latest'
+        run: |
+          set -euo pipefail
+          fail=0
+          for app in release/mac-arm64/Kline.app release/mac/Kline.app release/mac-universal/Kline.app; do
+            [ -d "$app" ] || continue
+            echo "===================================================== $app"
+
+            # A signature has to be present and internally consistent. --strict
+            # is the part that catches a bundle signed before something else
+            # was written into it.
+            codesign --verify --deep --strict --verbose=2 "$app" || { echo "SIGNATURE INVALID"; fail=1; }
+            codesign --display --verbose=2 "$app" 2>&1 | sed 's/^/    /' || true
+
+            # What Gatekeeper thinks. An ad-hoc signature is expected to be
+            # rejected here — that is the one-time right-click -> Open — so
+            # this is reported rather than enforced.
+            spctl --assess --type execute --verbose=4 "$app" 2>&1 | sed 's/^/    /' || true
+
+            # The part that matters: does it run. The app boots, screenshots
+            # itself and exits; no screenshot means it never got that far.
+            shot="$RUNNER_TEMP/$(basename "$(dirname "$app")").png"
+            binary="$app/Contents/MacOS/Kline"
+            [ -x "$binary" ] || { echo "NO EXECUTABLE AT $binary"; fail=1; continue; }
+            arch_of=$(lipo -archs "$binary" 2>/dev/null || echo unknown)
+            echo "    architectures: $arch_of"
+
+            # These runners are arm64 and have no Rosetta, so an x64-only build
+            # cannot be started here. Reporting that as a failure would be the
+            # test lying about the app, so it is checked as far as it can be
+            # and then left; the universal and arm64 builds are the ones an
+            # Apple Silicon user actually runs.
+            if ! echo "$arch_of" | grep -qE 'arm64|$(uname -m)'; then
+              echo "    not runnable on this $(uname -m) runner — signature checked only"
+              continue
+            fi
+
+            if KLINE_SMOKE="$shot" "$binary" 2>&1 | sed 's/^/    /'; then
+              if [ -s "$shot" ]; then
+                echo "    LAUNCHED — rendered $(wc -c < "$shot") bytes"
+              else
+                echo "    STARTED BUT NEVER RENDERED"; fail=1
+              fi
+            else
+              echo "    FAILED TO LAUNCH"; fail=1
+            fi
+          done
+          exit "$fail"
+
+      - name: Keep the screenshots the macOS app took of itself
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-launch-proof
+          path: ${{ runner.temp }}/*.png
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}

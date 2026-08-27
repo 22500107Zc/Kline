@@ -98,13 +98,17 @@ function createWindow() {
 
   mainWindow.loadURL('kline://app/');
 
-  // Smoke-test hook: `KILN_SMOKE=<png path> electron .` boots the shell, saves a
-  // screenshot and exits, so CI can prove the desktop build actually renders.
-  if (process.env.KILN_SMOKE) {
+  // Smoke-test hook: `KLINE_SMOKE=<png path> electron .` boots the shell, saves
+  // a screenshot and exits, so CI can prove the desktop build actually renders
+  // — including the packaged app, on a real machine of that platform.
+  // KILN_SMOKE is the pre-rename name, still honoured so an older workflow or
+  // a script someone has locally keeps working.
+  const smokeTarget = process.env.KLINE_SMOKE || process.env.KILN_SMOKE;
+  if (smokeTarget) {
     mainWindow.webContents.once('did-finish-load', () => {
       setTimeout(async () => {
         const image = await mainWindow.webContents.capturePage();
-        fs.writeFileSync(process.env.KILN_SMOKE, image.toPNG());
+        fs.writeFileSync(smokeTarget, image.toPNG());
         const menu = Menu.getApplicationMenu();
         console.log(JSON.stringify({
           menus: menu ? menu.items.map((i) => i.label) : [],
