@@ -33,13 +33,23 @@ jobs:
         include:
           - os: macos-latest
             target: --mac
-            artifact: kline-macos
+            # What this platform is expected to produce. Listing every
+            # platform's patterns everywhere would mean each job either
+            # tolerating files that are missing because another job makes
+            # them, or failing on them.
+            files: |
+              release/*.pkg
+              release/*.dmg
+              release/*.zip
           - os: windows-latest
             target: --win
-            artifact: kline-windows
+            files: |
+              release/*.exe
           - os: ubuntu-latest
             target: --linux
-            artifact: kline-linux
+            files: |
+              release/*.AppImage
+              release/*.deb
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -120,56 +130,29 @@ jobs:
 
       - name: Keep the screenshots the macOS app took of itself
         if: matrix.os == 'macos-latest'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: macos-launch-proof
           path: ${{ runner.temp }}/*.png
           if-no-files-found: warn
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: |
-            release/*.pkg
-            release/*.zip
-            release/*.dmg
-            release/*.exe
-            release/*.AppImage
-            release/*.deb
-          if-no-files-found: error
-
-  publish:
-    needs: build
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Decide whether to publish
-        id: gate
-        # Tags cut a real release; a release/* branch publishes the same assets
-        # as a prerelease, so there is always a page where one click gets the
-        # app rather than a zip nested inside a workflow-artifact zip.
-        run: |
-          ref='${{ github.ref }}'
-          tag='${{ inputs.tag }}'
-          if [[ "$ref" == refs/tags/v* || "$ref" == refs/heads/release/* || -n "$tag" ]]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions/download-artifact@v4
-        if: steps.gate.outputs.publish == 'true'
-        continue-on-error: true
-        with:
-          path: artifacts
-      - name: Flatten the artifact directories
-        if: steps.gate.outputs.publish == 'true'
-        run: |
-          mkdir -p dist-assets
-          find artifacts -type f \( -name '*.pkg' -o -name '*.zip' -o -name '*.dmg' \
-            -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' \) \
-            -exec cp {} dist-assets/ \;
-          ls -lh dist-assets
-      - uses: softprops/action-gh-release@v2
-        if: steps.gate.outputs.publish == 'true'
+          retention-days: 7
+      # Each platform uploads its own installers straight to the release.
+      #
+      # These used to go into workflow artifacts for a separate job to collect
+      # and re-upload, which stored every installer twice — once as an artifact
+      # and once as a release asset — for a set of files that is well over half
+      # a gigabyte per run. A few builds in one evening was enough to exhaust
+      # the account's artifact storage, at which point every job failed on the
+      # upload and no release came out at all, however well the app itself had
+      # built. Publishing from here keeps one copy, in the place people
+      # actually download from.
+      - name: Publish the installers
+        if: >-
+          startsWith(github.ref, 'refs/tags/v')
+          || startsWith(github.ref, 'refs/heads/release/')
+          || inputs.tag != ''
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || format('kline-{0}', github.sha) }}
           # Without this the tag is cut against the default branch, so the
@@ -178,45 +161,11 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: ${{ (inputs.tag && format('Kline {0}', inputs.tag)) || (startsWith(github.ref, 'refs/tags/') && format('Kline {0}', github.ref_name)) || 'Kline (unreleased build)' }}
           prerelease: ${{ inputs.tag && inputs.prerelease || !startsWith(github.ref, 'refs/tags/') }}
-          files: dist-assets/*
+          # Three jobs write to one release, so each must add its own files
+          # rather than replace what the others put there.
+          append_body: false
+          files: ${{ matrix.files }}
+          # Each job asks only for its own platform's files, so an empty match
+          # means that platform silently produced nothing — worth failing over.
           fail_on_unmatched_files: true
-          body: |
-            **Do not click "Source code" — that is the repository, not the app.**
-            The files you want are listed above it.
 
-            ### macOS — Apple Silicon (M1/M2/M3/M4)
-            Download **`Kline-<version>-arm64.dmg`**, open it, drag Kline to
-            Applications.
-
-            Then, the first time only, **right-click Kline in Applications ->
-            Open -> Open**. Double-clicking will not work the first time: these
-            builds are not signed by a paid Apple developer account, so macOS
-            wants you to say once that you meant it.
-
-            If macOS says the app **"is damaged and can't be opened"**, that is
-            the quarantine flag on a downloaded unsigned app, not a broken
-            file. Clear it once:
-
-            ```
-            xattr -dr com.apple.quarantine /Applications/Kline.app
-            ```
-
-            ### macOS — Intel
-            **`Kline-<version>.dmg`**, same first-launch steps as above.
-
-            The **`.pkg`** is a universal installer that puts Kline straight
-            into Applications without dragging, and the **`.zip`** files are the
-            plain app if you would rather not mount a disk image. On Apple
-            Silicon the `.dmg` above is the one to reach for first.
-
-            ### Windows
-            **`Kline Setup ....exe`** to install, or the plain **`Kline ....exe`**
-            to run without installing. SmartScreen: **More info** -> **Run
-            anyway**, once.
-
-            ### Linux
-            The **`.AppImage`** (`chmod +x` it first) or the **`.deb`**.
-
-            ### Scene files
-            Kline saves `.kline` files, and still opens the `.kiln` files
-            written before the rename.
