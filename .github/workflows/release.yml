@@ -160,7 +160,16 @@ jobs:
           # these installers were actually built from.
           target_commitish: ${{ github.sha }}
           name: ${{ (inputs.tag && format('Kline {0}', inputs.tag)) || (startsWith(github.ref, 'refs/tags/') && format('Kline {0}', github.ref_name)) || 'Kline (unreleased build)' }}
-          prerelease: ${{ inputs.tag && inputs.prerelease || !startsWith(github.ref, 'refs/tags/') }}
+          # `A && B || C` reads as "B if A, else C", so asking for a full
+          # release from the Actions tab made B false and handed the decision
+          # to C — which is true on a branch — and published it as a
+          # prerelease anyway. That matters more than it looks: GitHub's
+          # /releases/latest/ endpoint skips prereleases, so the permanent
+          # download links in the README resolve to nothing until a release
+          # is marked full.
+          prerelease: >-
+            ${{ (inputs.tag != '' && inputs.prerelease)
+                || (inputs.tag == '' && !startsWith(github.ref, 'refs/tags/')) }}
           # Three jobs write to one release, so each must add its own files
           # rather than replace what the others put there.
           append_body: false
