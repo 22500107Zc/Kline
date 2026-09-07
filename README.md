@@ -20,11 +20,11 @@ point at the newest release, so they never go stale.
 
 | | |
 |---|---|
-| **macOS — Apple Silicon** (M1/M2/M3/M4) | **[Download Kline-arm64.dmg](https://github.com/22500107zc/yes/releases/latest/download/Kline-arm64.dmg)** |
-| **macOS — Intel** | **[Download Kline-x64.dmg](https://github.com/22500107zc/yes/releases/latest/download/Kline-x64.dmg)** |
-| **macOS — installer** (either chip) | [Kline-universal.pkg](https://github.com/22500107zc/yes/releases/latest/download/Kline-universal.pkg) |
-| **Windows** | **[Download Kline-Setup.exe](https://github.com/22500107zc/yes/releases/latest/download/Kline-Setup.exe)** · [portable](https://github.com/22500107zc/yes/releases/latest/download/Kline-portable.exe) |
-| **Linux** | **[Download Kline.AppImage](https://github.com/22500107zc/yes/releases/latest/download/Kline.AppImage)** · [.deb](https://github.com/22500107zc/yes/releases/latest/download/Kline.deb) |
+| **macOS — Apple Silicon** (M1/M2/M3/M4) | **[Download Kline-arm64.dmg](https://github.com/22500107Zc/Kline/releases/latest/download/Kline-arm64.dmg)** |
+| **macOS — Intel** | **[Download Kline-x64.dmg](https://github.com/22500107Zc/Kline/releases/latest/download/Kline-x64.dmg)** |
+| **macOS — installer** (either chip) | [Kline-universal.pkg](https://github.com/22500107Zc/Kline/releases/latest/download/Kline-universal.pkg) |
+| **Windows** | **[Download Kline-Setup.exe](https://github.com/22500107Zc/Kline/releases/latest/download/Kline-Setup.exe)** · [portable](https://github.com/22500107Zc/Kline/releases/latest/download/Kline-portable.exe) |
+| **Linux** | **[Download Kline.AppImage](https://github.com/22500107Zc/Kline/releases/latest/download/Kline.AppImage)** · [.deb](https://github.com/22500107Zc/Kline/releases/latest/download/Kline.deb) |
 
 Not sure which Mac you have?  ▸ **About This Mac**. "Apple M1/M2/M3/M4" means
 Apple Silicon; "Intel" means Intel.
@@ -55,8 +55,8 @@ native Open and Save dialogs.
 ### Or build it yourself
 
 ```bash
-git clone https://github.com/22500107zc/yes.git kiln
-cd kiln
+git clone https://github.com/22500107Zc/Kline.git
+cd Kline
 npm install
 
 npm run app     # build and launch the desktop app

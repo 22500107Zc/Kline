@@ -183,7 +183,7 @@ function buildMenu(commands) {
       { type: 'separator' },
       {
         label: 'Kline on GitHub',
-        click: () => shell.openExternal('https://github.com/22500107zc/yes'),
+        click: () => shell.openExternal('https://github.com/22500107Zc/Kline'),
       },
     ],
   });

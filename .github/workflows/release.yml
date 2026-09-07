@@ -184,11 +184,11 @@ jobs:
 
             | | |
             |---|---|
-            | **macOS - Apple Silicon** (M1/M2/M3/M4) | **[Kline-arm64.dmg](https://github.com/22500107zc/yes/releases/latest/download/Kline-arm64.dmg)** |
-            | **macOS - Intel** | **[Kline-x64.dmg](https://github.com/22500107zc/yes/releases/latest/download/Kline-x64.dmg)** |
-            | **macOS - installer** (either chip) | [Kline-universal.pkg](https://github.com/22500107zc/yes/releases/latest/download/Kline-universal.pkg) |
-            | **Windows** | **[Kline-Setup.exe](https://github.com/22500107zc/yes/releases/latest/download/Kline-Setup.exe)** - [portable](https://github.com/22500107zc/yes/releases/latest/download/Kline-portable.exe) |
-            | **Linux** | **[Kline.AppImage](https://github.com/22500107zc/yes/releases/latest/download/Kline.AppImage)** - [.deb](https://github.com/22500107zc/yes/releases/latest/download/Kline.deb) |
+            | **macOS - Apple Silicon** (M1/M2/M3/M4) | **[Kline-arm64.dmg](https://github.com/22500107Zc/Kline/releases/latest/download/Kline-arm64.dmg)** |
+            | **macOS - Intel** | **[Kline-x64.dmg](https://github.com/22500107Zc/Kline/releases/latest/download/Kline-x64.dmg)** |
+            | **macOS - installer** (either chip) | [Kline-universal.pkg](https://github.com/22500107Zc/Kline/releases/latest/download/Kline-universal.pkg) |
+            | **Windows** | **[Kline-Setup.exe](https://github.com/22500107Zc/Kline/releases/latest/download/Kline-Setup.exe)** - [portable](https://github.com/22500107Zc/Kline/releases/latest/download/Kline-portable.exe) |
+            | **Linux** | **[Kline.AppImage](https://github.com/22500107Zc/Kline/releases/latest/download/Kline.AppImage)** - [.deb](https://github.com/22500107Zc/Kline/releases/latest/download/Kline.deb) |
 
             ### First launch
 
