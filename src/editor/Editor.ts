@@ -546,6 +546,26 @@ export class Editor {
     this.changed();
   }
 
+  /**
+   * Start an empty document, keeping the undo history.
+   *
+   * File > New used to remove the objects and stop there, so the materials and
+   * the embedded images of whatever had been open stayed behind — and were
+   * written into the next file saved. Somebody who opened a photo model,
+   * started something new and saved it shipped the old photograph inside it.
+   *
+   * Not loadSceneJSON, which clears the history: starting a new document is
+   * one of the things people most want to undo.
+   */
+  newScene(): void {
+    for (const id of this.scene.objects.keys()) this.renderer.invalidate(id);
+    this.scene.adopt(new Scene());
+    this.mode = 'object';
+    this.editObjectId = null;
+    this.clearElementSelection();
+    this.changed();
+  }
+
   /** Replace the whole scene from a parsed .kline document. */
   loadSceneJSON(data: SerializedScene): void {
     const restored = Scene.fromJSON(data);

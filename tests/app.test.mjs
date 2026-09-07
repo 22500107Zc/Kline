@@ -1379,6 +1379,157 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     assert.equal(counts.saved, counts.before, 'the leftover images would have been written into the saved file');
   });
 
+  test('the whole journey: photo in, model out, saved, reopened, edited, exported', async () => {
+    // Each step of this has a test of its own. This one is the chain, because
+    // the chain is what somebody actually does, and every fault found in this
+    // session lived in a seam between two steps that each worked.
+    await resetScene(page);
+    const journey = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const settle = (ms = 150) => new Promise((ok) => setTimeout(ok, ms));
+
+      // 1. Drop a photograph on the window.
+      const c = document.createElement('canvas');
+      c.width = 160; c.height = 220;
+      const g = c.getContext('2d');
+      const img = g.createImageData(c.width, c.height);
+      for (let y = 0; y < c.height; y++) {
+        for (let x = 0; x < c.width; x++) {
+          const o = (y * c.width + x) * 4;
+          const inside = ((x - 80) / 48) ** 2 + ((y - 110) / 78) ** 2 < 1;
+          const n = ((x * 7 + y * 13) % 29) - 14;
+          img.data[o] = (inside ? 60 : 150) + n;
+          img.data[o + 1] = (inside ? 80 : 70) + n;
+          img.data[o + 2] = (inside ? 200 : 40) + n;
+          img.data[o + 3] = 255;
+        }
+      }
+      g.putImageData(img, 0, 0);
+      const blob = await new Promise((ok) => c.toBlob(ok, 'image/png'));
+      window.kline.app.properties.openCreate(new File([blob], 'thing.png', { type: 'image/png' }));
+      for (let i = 0; i < 200 && ed.scene.objects.size === 0; i++) await settle(50);
+      const built = {
+        faces: [...ed.scene.objects.values()][0]?.mesh?.faceCount ?? 0,
+        textures: ed.scene.textures.length,
+      };
+
+      // 2. Save it.
+      const file = JSON.parse(JSON.stringify(ed.scene.toJSON()));
+
+      // 3. Do something else, then reopen it — the seam that was broken.
+      ed.loadSceneJSON({ objects: [], order: [], materials: [], textures: [] });
+      await settle();
+      window.kline.run('add.cube');
+      window.kline.run('material.checker');
+      await settle();
+      ed.loadSceneJSON(file);
+      await settle(250);
+
+      const object = [...ed.scene.objects.values()].find((o) => o.type === 'mesh');
+      const material = ed.scene.materials[object.materialSlots[0] ?? 0];
+      const reopened = {
+        faces: object.mesh.faceCount,
+        hasUV: object.mesh.hasUV,
+        textures: ed.scene.textures.length,
+        textureName: ed.scene.textures[0]?.name,
+        materialTexture: material?.baseColorTexture ?? null,
+        dangling: material && material.baseColorTexture !== null
+          && !ed.scene.textures.some((t) => t.id === material.baseColorTexture),
+      };
+
+      // 4. Edit it, the way the header button does.
+      ed.selectObject(null);
+      ed.setMode('edit');
+      const editing = { mode: ed.mode, selected: ed.scene.selection.size };
+      window.kline.run('select.all');
+      window.kline.run('mesh.subdivide');
+      await settle();
+      const subdivided = ed.editMesh?.faceCount ?? 0;
+      window.kline.run('edit.undo');
+      await settle();
+      const afterUndo = ed.editMesh?.faceCount ?? 0;
+      ed.setMode('object');
+
+      // 5. Export it, through the real command, and read what it wrote.
+      const written = [];
+      const realCreate = URL.createObjectURL;
+      URL.createObjectURL = (blob) => { written.push(blob); return realCreate.call(URL, blob); };
+      const realClick = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function () {};
+      window.kline.run('file.exportGltf');
+      await settle();
+      URL.createObjectURL = realCreate;
+      HTMLAnchorElement.prototype.click = realClick;
+      const gltf = JSON.parse(await written[written.length - 1].text());
+      return {
+        built, reopened, editing, subdivided, afterUndo,
+        gltf: {
+          images: gltf.images?.length ?? 0,
+          uv: gltf.meshes?.[0]?.primitives?.[0]?.attributes?.TEXCOORD_0 !== undefined,
+          // Whichever material carries the picture — the default one is
+          // still in the list and is not it.
+          usesTexture: (gltf.materials ?? [])
+            .map((m) => m.pbrMetallicRoughness?.baseColorTexture?.index)
+            .find((i) => i !== undefined),
+          materials: gltf.materials?.length ?? 0,
+        },
+      };
+    });
+
+    assert.ok(journey.built.faces > 500, `the photograph produced ${journey.built.faces} faces`);
+    assert.equal(journey.built.textures, 1, 'the photograph was not stored with the model');
+
+    assert.equal(journey.reopened.faces, journey.built.faces, 'reopening changed the model');
+    assert.equal(journey.reopened.hasUV, true, 'reopening lost the texture coordinates');
+    assert.equal(journey.reopened.textures, 1, `reopening left ${journey.reopened.textures} images in a one-image scene`);
+    assert.equal(journey.reopened.textureName, 'thing', 'the reopened model is wearing the wrong picture');
+    assert.equal(journey.reopened.dangling, false, 'the material points at an image that is not there');
+
+    assert.equal(journey.editing.mode, 'edit', 'Edit Mode refused the model that was just opened');
+    assert.ok(journey.subdivided > journey.built.faces, 'subdividing did nothing');
+    assert.equal(journey.afterUndo, journey.built.faces, 'undo did not put the model back');
+
+    assert.equal(journey.gltf.images, 1, 'the export dropped the photograph');
+    assert.equal(journey.gltf.uv, true, 'the export dropped the texture coordinates');
+    assert.equal(
+      journey.gltf.usesTexture, 0,
+      `none of the ${journey.gltf.materials} exported materials uses the photograph`,
+    );
+  });
+
+  test('New Scene leaves nothing of the last one behind', async () => {
+    // It removed the objects and stopped, so the materials and the embedded
+    // images of whatever had been open stayed — and went into the next file
+    // saved. Start something new after a photo model and you shipped the old
+    // photograph inside it.
+    const after = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      window.kline.run('add.cube');
+      window.kline.run('material.checker');
+      await new Promise((ok) => setTimeout(ok, 120));
+      const loaded = { materials: ed.scene.materials.length, textures: ed.scene.textures.length };
+      window.kline.run('file.new');
+      await new Promise((ok) => setTimeout(ok, 120));
+      const doc = ed.scene.toJSON();
+      return {
+        loaded,
+        objects: ed.scene.objects.size,
+        materials: ed.scene.materials.length,
+        textures: ed.scene.textures.length,
+        savedTextures: doc.textures.length,
+        undoable: ed.history.steps().length > 0,
+      };
+    });
+
+    assert.ok(after.loaded.textures > 0, 'the scene under test had no image to leave behind');
+    assert.equal(after.objects, 0);
+    assert.equal(after.textures, 0, `New Scene kept ${after.textures} image(s) from the previous one`);
+    assert.equal(after.materials, 0, `New Scene kept ${after.materials} material(s) from the previous one`);
+    assert.equal(after.savedTextures, 0, 'those images would have been written into the next file saved');
+    // Starting a new document is one of the things people most want to undo.
+    assert.equal(after.undoable, true, 'New Scene cannot be undone');
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

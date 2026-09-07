@@ -202,6 +202,9 @@ export async function resetScene(page) {
     ed.selectObject(null);
     ed.requestRender();
   });
+  // A genuinely empty document, materials and embedded images included —
+  // otherwise each test starts wearing whatever the last one left behind.
+  await page.evaluate(() => window.kline.editor.newScene());
 }
 
 /**

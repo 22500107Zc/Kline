@@ -146,13 +146,7 @@ export const COMMANDS: Command[] = [
     id: 'file.new', label: 'New Scene', category: 'File',
     run: (ed) => {
       ed.beginUndo('New scene');
-      const scene = ed.scene;
-      for (const id of [...scene.objects.keys()]) scene.remove(id);
-      scene.cursor = new Vec3();
-      ed.mode = 'object';
-      ed.editObjectId = null;
-      ed.emit('change');
-      ed.requestRender();
+      ed.newScene();
       ed.setStatus('New scene');
     },
   },
