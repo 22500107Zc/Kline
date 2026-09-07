@@ -494,10 +494,14 @@ the UI are all in this repository, and each piece is readable on its own.
 
 ### Moving around the viewport
 
+`Option` on a Mac is `Alt` on Windows and Linux, and `Cmd` is `Ctrl`. Kline
+reads both, and the hints it shows in the application use whichever names the
+machine it is running on has.
+
 | Trackpad | Mouse | |
 |---|---|---|
 | `Option` + two-finger scroll, or `Option` + drag | Middle-drag | Orbit |
-| `Option`+`Shift` + scroll or drag | `Shift` + middle-drag | Pan |
+| `Shift` + scroll, or `Option`+`Shift` + drag | `Shift` + middle-drag | Pan |
 | Pinch, or two-finger scroll | Wheel | Zoom towards the cursor |
 | `Option`+`Cmd` + drag | `Ctrl` + middle-drag | Zoom |
 

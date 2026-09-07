@@ -1,5 +1,6 @@
 import { Editor } from '../editor/Editor';
 import { h } from './dom';
+import { altKeyName, isMac, navigationHint, scrollPhrase } from './platform';
 
 /**
  * The first thing a new user sees.
@@ -48,9 +49,10 @@ const CARDS: Card[] = [
   },
   {
     title: 'Turning the view',
-    body: 'Hold Option and scroll with two fingers to turn the model round. Option and Shift '
-      + 'together slide it sideways, pinch to zoom. All of it works from a laptop trackpad — '
-      + 'no middle mouse button, no second hand. With a mouse, the middle button does the same.',
+    body: `Hold ${altKeyName()} and ${scrollPhrase()} to turn the model round. Shift and `
+      + `${scrollPhrase()} slides it sideways, and ${isMac() ? 'pinch or scroll' : 'the wheel'} `
+      + 'zooms. All of it works from a laptop trackpad — no middle mouse button, no second '
+      + 'hand. With a mouse, the middle button does the same.',
     action: {
       label: 'Show me from another angle',
       run: (editor) => {
@@ -58,7 +60,7 @@ const CARDS: Card[] = [
         editor.frameSelected();
         editor.camera.nudge(-45 * (Math.PI / 180), 12 * (Math.PI / 180));
         editor.requestRender();
-        editor.setStatus('Option + two-finger scroll turns the view · Option + Shift slides it · pinch zooms');
+        editor.setStatus(navigationHint());
       },
     },
   },

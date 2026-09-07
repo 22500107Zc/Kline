@@ -9,6 +9,7 @@ import { defaultPreferences } from '../src/editor/persistence';
 import { AABB, Vec3 } from '../src/core/math';
 import { ViewportCamera } from '../src/scene/ViewportCamera';
 import { navModeForPress, pressGesture, wheelGesture, wheelPixels } from '../src/editor/navigation';
+import { altKeyName, ctrlKeyName, navigationHint } from '../src/ui/platform';
 
 test('every falloff runs from 1 to 0 and stays in range', () => {
   const types = ['smooth', 'sphere', 'root', 'inverseSquare', 'sharp', 'linear'] as const;
@@ -364,5 +365,40 @@ test('one bad number cannot wedge the camera for the rest of the session', () =>
     assert.ok(cam.distance < before, `the camera stopped zooming after being handed ${v}`);
     cam.orbit(0.2, 0.1);
     assert.notEqual(cam.yaw, -43 * (Math.PI / 180));
+  }
+});
+
+test('the same two keys mean the same thing scrolled and dragged', () => {
+  // Option and Shift together used to slide the view when held with a button
+  // and turn it when scrolled, because a press reads Shift first and a scroll
+  // read Option first. Two hands, two answers, and the hint on screen — which
+  // said it slid — was wrong for the gesture a laptop user actually has.
+  const both = { alt: true, shift: true, ctrl: false };
+  assert.equal(navModeForPress(0, both), 'pan');
+  assert.equal(wheelGesture({ deltaX: 0, deltaY: 40, deltaMode: 0 }, both, 800).kind, 'pan');
+  // And each on its own still does what it did.
+  assert.equal(wheelGesture({ deltaX: 0, deltaY: 40, deltaMode: 0 },
+    { alt: true, shift: false, ctrl: false }, 800).kind, 'orbit');
+  assert.equal(wheelGesture({ deltaX: 0, deltaY: 40, deltaMode: 0 },
+    { alt: false, shift: true, ctrl: false }, 800).kind, 'pan');
+});
+
+test('the keys are named the way the machine names them', () => {
+  // Every hint in the application was written on a Mac. A Windows laptop has
+  // no Option key, so the one instruction telling somebody how to turn the
+  // view was an instruction they could not follow — and nothing here runs on
+  // Windows, which is why it stood.
+  assert.equal(altKeyName(true), 'Option');
+  assert.equal(altKeyName(false), 'Alt');
+  assert.equal(ctrlKeyName(true), 'Cmd');
+  assert.equal(ctrlKeyName(false), 'Ctrl');
+  assert.match(navigationHint(true), /Option/);
+  assert.match(navigationHint(false), /Alt/);
+  // A desktop mouse has no second finger to scroll with.
+  assert.doesNotMatch(navigationHint(false), /finger|pinch/i);
+  assert.match(navigationHint(false), /wheel/);
+  // Both name the key that actually pans, which is Shift.
+  for (const hint of [navigationHint(true), navigationHint(false)]) {
+    assert.match(hint, /Shift[^·]*slides/);
   }
 });

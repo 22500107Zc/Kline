@@ -108,13 +108,20 @@ export function wheelGesture(
 ): NavGesture {
   const p = wheelPixels(e, viewportHeight);
 
+  // Shift is read before Option, the same order a press is read in.
+  //
+  // It used to be the other way round here and this way round for a press, so
+  // Option and Shift together slid the view when held with a button and
+  // turned it when scrolled — the same two keys doing two different things
+  // depending on which hand was moving. The on-screen hint said it slid,
+  // which made the hint wrong for the gesture a laptop user has.
+  if (m.shift) return { kind: 'pan', dx: -p.x, dy: -p.y };
   // Option with a two-finger scroll orbits. This is the gesture that makes a
   // laptop enough on its own: no button to hold down, no second hand, and it
   // works the same on a pad that clicks and one that does not.
   if (m.alt) {
     return { kind: 'orbit', dx: -p.x * ORBIT_PER_SCROLL_PIXEL, dy: -p.y * ORBIT_PER_SCROLL_PIXEL };
   }
-  if (m.shift) return { kind: 'pan', dx: -p.x, dy: -p.y };
   if (m.ctrl) {
     // A trackpad pinch reaches the page as a wheel event with ctrlKey set,
     // reporting a few units per frame rather than a detent's hundred.

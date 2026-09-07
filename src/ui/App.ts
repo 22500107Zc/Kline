@@ -18,6 +18,7 @@ import { DiffPanel } from './DiffPanel';
 import { SetupGuide } from './SetupGuide';
 import { SculptPanel } from './SculptPanel';
 import { formatAge } from '../editor/recovery';
+import { altKeyName, ctrlKeyName, isMac, navigationHint, scrollPhrase } from './platform';
 
 /** Assembles the shell around the viewport and routes keyboard input. */
 export class App {
@@ -121,10 +122,7 @@ export class App {
     this.editor.on('change', () => this.syncModalChrome());
     this.syncModalChrome();
     this.editor.start();
-    this.editor.setStatus(
-      'Ready — hold Option and scroll with two fingers to turn the view · '
-      + 'Option+Shift slides it · pinch zooms · Ctrl+K finds everything else',
-    );
+    this.editor.setStatus(`Ready — ${navigationHint()} · Ctrl+K finds everything else`);
   }
 
   private syncModalChrome(): void {
@@ -424,13 +422,13 @@ export class App {
     grid.appendChild(h('div', { class: 'shortcut-group' }, [
       h('h3', { text: 'Trackpad and mouse' }),
       ...[
-        ['Option + two-finger scroll', 'Orbit — no button to hold'],
-        ['Option + Shift + scroll', 'Pan'],
-        ['Pinch', 'Zoom towards the cursor'],
-        ['Two-finger scroll', 'Zoom towards the cursor'],
-        ['Option + drag', 'Orbit'],
-        ['Option + Shift + drag', 'Pan'],
-        ['Option + Cmd + drag', 'Zoom'],
+        [`${altKeyName()} + ${scrollPhrase()}`, 'Orbit — no button to hold'],
+        [`Shift + ${scrollPhrase()}`, 'Pan'],
+        ...(isMac() ? [['Pinch', 'Zoom towards the cursor']] : []),
+        [scrollPhrase().replace(/^s/, 'S'), 'Zoom towards the cursor'],
+        [`${altKeyName()} + drag`, 'Orbit'],
+        [`${altKeyName()} + Shift + drag`, 'Pan'],
+        [`${altKeyName()} + ${ctrlKeyName()} + drag`, 'Zoom'],
         ['Middle drag', 'Orbit (with a mouse)'],
         ['Shift + middle', 'Pan'],
         ['Left click', 'Select'],
