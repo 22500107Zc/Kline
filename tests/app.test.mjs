@@ -1305,6 +1305,80 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     assert.equal(result.objects, 0, 'an empty prompt built something anyway');
   });
 
+  test('opening a file gives you that file, not the last one mixed into it', async () => {
+    // Undo and File > Open both replaced the whole scene by assigning a
+    // remembered list of fields, and both lists were missing textures and the
+    // timeline. So opening a file kept the previous scene's images and threw
+    // the file's away — and because a material names its texture by id,
+    // opening a photo model while a checker happened to hold id 1 put the
+    // checker on the model.
+    await resetScene(page);
+    const result = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const settle = () => new Promise((ok) => setTimeout(ok, 120));
+
+      window.kline.run('add.cube');
+      window.kline.run('material.checker');
+      await settle();
+      ed.scene.timeline.end = 90;
+      const file = JSON.parse(JSON.stringify(ed.scene.toJSON()));
+
+      // Work on something else in between, as anyone would.
+      ed.loadSceneJSON({ objects: [], order: [], materials: [], textures: [] });
+      await settle();
+      window.kline.run('add.uvsphere');
+      window.kline.run('material.checker');
+      await settle();
+      // Two more images than the file carries, pushed straight in so the test
+      // is about what opening a file does rather than about which command
+      // happens to create a texture.
+      ed.scene.textures.push(
+        { id: 900, name: 'leftover A', url: 'data:image/png;base64,AAAA', width: 8, height: 8 },
+        { id: 901, name: 'leftover B', url: 'data:image/png;base64,BBBB', width: 8, height: 8 },
+      );
+      const between = ed.scene.textures.length;
+
+      ed.loadSceneJSON(file);
+      await settle();
+      return {
+        between,
+        fileTextures: file.textures.length,
+        fileTimelineEnd: file.timeline.end,
+        openedTextures: ed.scene.textures.length,
+        openedNames: ed.scene.textures.map((t) => t.name),
+        openedTimelineEnd: ed.scene.timeline.end,
+        danglingMaterials: ed.scene.materials.filter(
+          (m) => m.baseColorTexture !== null && !ed.scene.textures.some((t) => t.id === m.baseColorTexture),
+        ).length,
+      };
+    });
+
+    assert.ok(result.between > result.fileTextures, 'the in-between scene needs more images than the file for this to test anything');
+    assert.equal(result.openedTextures, result.fileTextures, `opened a ${result.fileTextures}-image file and got ${result.openedTextures} images`);
+    assert.equal(result.danglingMaterials, 0, 'a material points at an image that is not in the scene — that surface renders untextured');
+    assert.equal(result.openedTimelineEnd, result.fileTimelineEnd, 'the previous scene\'s frame range survived the open');
+  });
+
+  test('undoing a texture takes the texture with it', async () => {
+    // Adding a UV checker and undoing left a 33 KB embedded PNG in the
+    // document for good, and in every save from then on.
+    await resetScene(page);
+    const counts = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      window.kline.run('add.cube');
+      const before = ed.scene.textures.length;
+      for (let i = 0; i < 3; i++) {
+        window.kline.run('material.checker');
+        await new Promise((ok) => setTimeout(ok, 80));
+        window.kline.run('edit.undo');
+        await new Promise((ok) => setTimeout(ok, 80));
+      }
+      return { before, after: ed.scene.textures.length, saved: ed.scene.toJSON().textures.length };
+    });
+    assert.equal(counts.after, counts.before, `three add-and-undo cycles left ${counts.after - counts.before} images behind`);
+    assert.equal(counts.saved, counts.before, 'the leftover images would have been written into the saved file');
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

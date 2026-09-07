@@ -536,14 +536,7 @@ export class Editor {
   }
 
   private restore(s: EditorSnapshot): void {
-    const restored = Scene.fromJSON(s.scene);
-    this.scene.objects = restored.objects;
-    this.scene.order = restored.order;
-    this.scene.materials = restored.materials;
-    this.scene.world = restored.world;
-    this.scene.cursor = restored.cursor;
-    this.scene.selection = restored.selection;
-    this.scene.active = restored.active;
+    this.scene.adopt(Scene.fromJSON(s.scene));
     this.mode = s.mode;
     this.editObjectId = s.editObject;
     this.selectMode = s.selectMode;
@@ -558,13 +551,7 @@ export class Editor {
     const restored = Scene.fromJSON(data);
     this.history.clear();
     for (const id of this.scene.objects.keys()) this.renderer.invalidate(id);
-    this.scene.objects = restored.objects;
-    this.scene.order = restored.order;
-    this.scene.materials = restored.materials;
-    this.scene.world = restored.world;
-    this.scene.cursor = restored.cursor;
-    this.scene.selection = restored.selection;
-    this.scene.active = restored.active;
+    this.scene.adopt(restored);
     this.mode = 'object';
     this.editObjectId = null;
     this.clearElementSelection();

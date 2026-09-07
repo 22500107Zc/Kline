@@ -1,6 +1,6 @@
 {
   "name": "kline",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": false,
   "description": "Kline \u2014 an open source 3D modelling application. Runs in a browser tab or as a desktop app.",
   "license": "MIT",

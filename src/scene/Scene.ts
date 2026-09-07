@@ -271,6 +271,43 @@ export class Scene {
   private nextId = 1;
   private nameCounts = new Map<string, number>();
 
+  /**
+   * Take over every piece of state from another scene, in one place.
+   *
+   * Undo and File > Open both replace the whole scene, and both used to do it
+   * by assigning the fields they remembered to list — objects, order,
+   * materials, world, cursor, selection, active. Both lists were missing the
+   * same two things, and had been for as long as the two lists existed:
+   * `textures` and `timeline`.
+   *
+   * What that cost: opening a file kept the previous scene's images and threw
+   * the file's own away. Since a material names its texture by id, opening a
+   * photo model while a UV checker happened to hold id 1 put the checker on
+   * the model. The discarded images were never freed either, so every file
+   * opened added its predecessor's embedded PNGs to the next save. Undo had
+   * the same hole from the other side: adding a texture and undoing left the
+   * image in the document for good.
+   *
+   * Two lists that have to agree will not stay agreeing. There is one now, and
+   * it lives next to the fields it copies.
+   */
+  adopt(other: Scene): void {
+    this.objects = other.objects;
+    this.order = other.order;
+    this.materials = other.materials;
+    this.textures = other.textures;
+    this.world = other.world;
+    this.cursor = other.cursor;
+    this.selection = other.selection;
+    this.active = other.active;
+    this.timeline = other.timeline;
+    // Never counted backwards. Undo restores the objects that held the old
+    // ids, so rewinding the counter would hand a live id to the next object
+    // added — and anything still pointing at the first one would silently
+    // follow the second.
+    this.nextId = Math.max(this.nextId, other.nextId);
+  }
+
   uniqueName(base: string): string {
     const used = new Set([...this.objects.values()].map((o) => o.name));
     if (!used.has(base)) {

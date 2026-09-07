@@ -5,6 +5,7 @@ import { Scene } from '../src/scene/Scene';
 import { createCube, createPlane, createUVSphere } from '../src/mesh/primitives';
 import { MODIFIER_LABELS, createModifier, evaluateStack, normaliseModifier } from '../src/modifiers';
 import { createMaterial, hexToLinear, linearToHex } from '../src/scene/Material';
+import { createTexture } from '../src/scene/Texture';
 
 test('matrix decomposition round-trips through compose', () => {
   const position = new Vec3(1.5, -2, 0.25);
@@ -349,4 +350,70 @@ test('a scale the file forgot to write defaults to one, not zero', () => {
   delete doc.objects[0].scale;
   const obj = [...Scene.fromJSON(doc).objects.values()][0];
   assert.deepEqual([obj.scale.x, obj.scale.y, obj.scale.z], [1, 1, 1]);
+});
+
+
+// ------------------------------------------- replacing the whole scene
+
+test('adopting a scene takes over every field it has, not a remembered list', () => {
+  // Undo and File > Open both replace the whole scene, and both used to do it
+  // by assigning the fields someone had listed. Both lists were missing the
+  // same two — textures and timeline — so opening a file kept the previous
+  // scene's images and threw the file's own away, and since a material names
+  // its texture by id, opening a photo model while a checker held id 1 put the
+  // checker on the model.
+  //
+  // This test is the reason there is one list now: it fails if a field is
+  // added to Scene and not to adopt().
+  const live = new Scene();
+  live.add('mesh', 'Old', createCube());
+  live.materials.push(createMaterial({ name: 'Old material' }));
+  live.textures.push(createTexture('Old image', 'data:image/png;base64,AAAA', 8, 8));
+  live.timeline.end = 55;
+  live.cursor = new Vec3(9, 9, 9);
+  live.world.ambient = 0.9;
+
+  const incoming = new Scene();
+  const obj = incoming.add('mesh', 'New', createCube());
+  incoming.materials.push(createMaterial({ name: 'New material' }));
+  incoming.textures.push(createTexture('New image', 'data:image/png;base64,BBBB', 16, 16));
+  incoming.timeline.end = 120;
+  incoming.cursor = new Vec3(1, 2, 3);
+  incoming.world.ambient = 0.25;
+  incoming.selection = new Set([obj.id]);
+  incoming.active = obj.id;
+
+  live.adopt(incoming);
+
+  // Every own field of a Scene, compared without naming them one by one —
+  // which is the mistake this replaces.
+  for (const key of Object.keys(incoming) as (keyof Scene)[]) {
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(live[key] ?? null)),
+      JSON.parse(JSON.stringify(incoming[key] ?? null)),
+      `adopt() left "${String(key)}" behind — every field of a Scene has to come across`,
+    );
+  }
+
+  // Named explicitly too, because these are the two that were missing and the
+  // loop above would not say which if it broke.
+  assert.equal(live.textures.length, 1);
+  assert.equal(live.textures[0].name, 'New image', 'the previous scene\'s image survived the swap');
+  assert.equal(live.timeline.end, 120, 'the previous scene\'s frame range survived the swap');
+});
+
+test('adopting never rewinds the id counter', () => {
+  // Undo restores the objects that held the old ids. Counting the id counter
+  // back would hand a live id to the next object added, and anything still
+  // pointing at the first would silently follow the second.
+  const live = new Scene();
+  for (let i = 0; i < 5; i++) live.add('mesh', `Thing ${i}`, createCube());
+  const highest = Math.max(...[...live.objects.keys()]);
+
+  const earlier = new Scene();
+  earlier.add('mesh', 'Only', createCube());
+  live.adopt(earlier);
+
+  const next = live.add('mesh', 'After', createCube());
+  assert.ok(next.id > highest, `a new object took id ${next.id}, which was already used`);
 });
