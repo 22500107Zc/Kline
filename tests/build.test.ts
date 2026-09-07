@@ -17,6 +17,11 @@ interface BuildConfig {
   extraMetadata?: { main?: string };
   fileAssociations?: FileAssociation[];
   mac?: { icon?: string };
+  dmg?: {
+    window?: { width?: number; height?: number };
+    iconSize?: number;
+    contents?: { x: number; y: number; type?: string; path?: string }[];
+  };
   win?: { icon?: string };
   linux?: { icon?: string };
 }
@@ -451,4 +456,42 @@ test('signing skips the universal halves and signs everything else', () => {
   assert.equal(isUniversalHalf('release/mac-universal'), false);
   assert.equal(isUniversalHalf('release/mac'), false);
   assert.equal(isUniversalHalf('release/mac-arm64'), false);
+});
+
+
+test('the disk image opens onto the app and the Applications folder, and nothing else', () => {
+  // The first thing anybody sees. Without this block electron-builder still
+  // makes a usable image, but nothing here says what it should contain, and
+  // the layout that decides where the two icons sit is written into a
+  // .DS_Store inside the image where no test can reach it. So the intent is
+  // asserted where it is declared; the release workflow mounts the finished
+  // image on a real Mac and checks the same three things about the result.
+  const dmg = BUILD.dmg;
+  assert.ok(dmg, 'no dmg block — the disk image window is left to whatever the defaults do');
+
+  const contents = dmg!.contents ?? [];
+  assert.equal(contents.length, 2, `the window would show ${contents.length} things; it should show two`);
+
+  const app = contents.find((c) => (c.type ?? 'file') === 'file');
+  const applications = contents.find((c) => c.type === 'link');
+  assert.ok(app, 'nothing in the window is the application to drag');
+  assert.ok(applications, 'nothing in the window is the Applications folder to drag onto');
+  assert.equal(applications!.path, '/Applications', 'the shortcut does not point at Applications');
+
+  // Side by side, the way every other Mac application does it, so the drag
+  // reads as a drag. Stacked or overlapping icons do not.
+  assert.notEqual(app!.x, applications!.x, 'both icons sit in the same column');
+  assert.equal(app!.y, applications!.y, 'the two icons are not on the same line');
+  assert.ok(app!.x < applications!.x, 'the application should sit to the left of the folder it is dragged into');
+
+  // Both have to be inside the window, with room for a 128px icon and its
+  // label. An icon placed outside is simply not visible.
+  const width = dmg!.window?.width ?? 0;
+  const height = dmg!.window?.height ?? 0;
+  const icon = dmg!.iconSize ?? 80;
+  assert.ok(width > 0 && height > 0, 'the window has no size, so the icon positions mean nothing');
+  for (const c of contents) {
+    assert.ok(c.x - icon / 2 > 0 && c.x + icon / 2 < width, `an icon at x=${c.x} falls outside a ${width}px window`);
+    assert.ok(c.y - icon / 2 > 0 && c.y + icon / 2 < height, `an icon at y=${c.y} falls outside a ${height}px window`);
+  }
 });

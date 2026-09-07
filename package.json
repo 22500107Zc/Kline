@@ -1,6 +1,6 @@
 {
   "name": "kline",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "private": false,
   "description": "Kline \u2014 an open source 3D modelling application. Runs in a browser tab or as a desktop app.",
   "license": "MIT",
@@ -105,6 +105,28 @@
       ],
       "icon": "build/icon.png",
       "darkModeSupport": true
+    },
+    "dmg": {
+      "title": "Kline",
+      "artifactName": "${productName}-${arch}.${ext}",
+      "iconSize": 128,
+      "window": {
+        "width": 560,
+        "height": 380
+      },
+      "contents": [
+        {
+          "x": 150,
+          "y": 190,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 190,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
     },
     "win": {
       "target": [

@@ -128,6 +128,48 @@ jobs:
           done
           exit "$fail"
 
+      # What opening the .dmg actually shows.
+      #
+      # This is the first thing anybody sees, and until now nothing checked
+      # it: the layout is written into a .DS_Store inside the image, and the
+      # only way to know what ended up there is to mount the image and look.
+      # A disk image that opens onto the wrong things is not a small problem —
+      # it is the step where somebody decides the application is broken and
+      # stops, and the last time it went wrong the person downloaded the
+      # source code zip instead and could not understand why nothing ran.
+      - name: Prove the disk image opens onto the app and Applications
+        if: matrix.os == 'macos-latest'
+        run: |
+          set -euo pipefail
+          fail=0
+          shopt -s nullglob
+          for dmg in release/*.dmg; do
+            echo "===================================================== $dmg"
+            mount="$(mktemp -d)"
+            # -nobrowse so the runner's Finder does not take an interest and
+            # hold the volume open when we come to unmount it.
+            hdiutil attach -nobrowse -readonly -noautoopen "$dmg" -mountpoint "$mount" >/dev/null
+
+            visible=()
+            while IFS= read -r line; do visible+=("$line"); done < <(ls "$mount" | sort)
+            echo "    window shows: ${visible[*]}"
+            echo "    everything:   $(ls -A "$mount" | sort | tr '\n' ' ')"
+
+            if [ "${#visible[@]}" -ne 2 ]; then
+              echo "    WRONG: ${#visible[@]} things in the window, expected exactly 2"; fail=1
+            fi
+            [ -d "$mount/Kline.app" ] || { echo "    WRONG: no Kline.app to drag"; fail=1; }
+            [ -L "$mount/Applications" ] || { echo "    WRONG: no Applications shortcut to drag onto"; fail=1; }
+            target="$(readlink "$mount/Applications" 2>/dev/null || true)"
+            [ "$target" = "/Applications" ] || { echo "    WRONG: Applications points at '$target'"; fail=1; }
+            # The icon positions live here. No .DS_Store means the window opens
+            # on whatever Finder feels like rather than the two-icon layout.
+            [ -f "$mount/.DS_Store" ] || { echo "    WRONG: no layout was written into the image"; fail=1; }
+
+            hdiutil detach "$mount" -quiet || hdiutil detach "$mount" -force -quiet || true
+          done
+          exit "$fail"
+
       - name: Keep the screenshots the macOS app took of itself
         if: matrix.os == 'macos-latest'
         continue-on-error: true
