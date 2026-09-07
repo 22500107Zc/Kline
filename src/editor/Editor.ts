@@ -610,7 +610,10 @@ export class Editor {
       return;
     }
     if (mode === 'edit') {
-      if (this.mode === 'sculpt') this.mode = 'object';
+      // Via Object Mode rather than a bare assignment, so the sculpt brush
+      // cursor is cleared on the way through instead of being left hanging
+      // over the mesh in Edit Mode.
+      if (this.mode === 'sculpt') this.setMode('object');
       if (this.mode === 'object') this.toggleEditMode();
       return;
     }
@@ -622,17 +625,49 @@ export class Editor {
     this.changed();
   }
 
+  /**
+   * The object an Edit or Sculpt switch would act on.
+   *
+   * The active object when there is one — and otherwise the only mesh in the
+   * scene, if there is exactly one, because then there is no question about
+   * what was meant. Kline starts with nothing active and clicking empty space
+   * puts it back there, so without this the Edit and Sculpt buttons are dead
+   * on launch: they refuse, they look no different from a button that works,
+   * and the only word about it is a line at the bottom of a crowded status
+   * bar. "The buttons don't do anything" is exactly how that reads.
+   */
+  meshForModeChange(): SceneObject | null {
+    const active = this.scene.activeObject;
+    if (active && active.type === 'mesh' && active.mesh) return active;
+    const meshes = [...this.scene.objects.values()].filter(
+      (o) => o.type === 'mesh' && o.mesh && o.visible,
+    );
+    return meshes.length === 1 ? meshes[0] : null;
+  }
+
+  /** Why Edit and Sculpt cannot be entered, or null when they can. */
+  meshModeBlocker(): string | null {
+    if (this.meshForModeChange()) return null;
+    const meshes = [...this.scene.objects.values()].filter((o) => o.type === 'mesh' && o.mesh);
+    if (meshes.length === 0) return 'Add a mesh first — press Shift+A, or drop a photo on the window';
+    return 'Click the object you want to work on first';
+  }
+
   toggleEditMode(): void {
     if (this.mode === 'sculpt') {
       this.setMode('object');
       return;
     }
     if (this.mode === 'object') {
-      const obj = this.scene.activeObject;
-      if (!obj || obj.type !== 'mesh' || !obj.mesh) {
-        this.setStatus('Select a mesh object to edit');
+      const obj = this.meshForModeChange();
+      if (!obj) {
+        this.setStatus(this.meshModeBlocker() ?? 'Select a mesh object to edit');
         return;
       }
+      // Picked for them, so select it too — otherwise leaving Edit Mode would
+      // drop them back into a scene with nothing selected, and the button
+      // would be dead again.
+      if (this.scene.active !== obj.id) this.selectObject(obj.id);
       this.mode = 'edit';
       this.editObjectId = obj.id;
       this.clearElementSelection();
@@ -1210,11 +1245,12 @@ export class Editor {
   }
 
   enterSculptMode(): void {
-    const obj = this.scene.activeObject;
-    if (!obj || obj.type !== 'mesh' || !obj.mesh) {
-      this.setStatus('Select a mesh object to sculpt');
+    const obj = this.meshForModeChange();
+    if (!obj) {
+      this.setStatus(this.meshModeBlocker() ?? 'Select a mesh object to sculpt');
       return;
     }
+    if (this.scene.active !== obj.id) this.selectObject(obj.id);
     this.mode = 'sculpt';
     this.editObjectId = null;
     this.clearElementSelection();

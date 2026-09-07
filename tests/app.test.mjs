@@ -1204,6 +1204,107 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     assert.ok(counts.textured !== null, 'the model lost its texture while being rebuilt');
   });
 
+  // ------------------------------------------------ the mode buttons work
+
+  const modeButtons = () => page.evaluate(() => [...document.querySelectorAll('.mode-opt')].map((b) => ({
+    label: b.textContent.trim(),
+    active: b.classList.contains('active'),
+    dimmed: b.classList.contains('unavailable'),
+    title: b.title,
+  })));
+  const clickMode = async (label) => {
+    await page.evaluate((l) => {
+      const b = [...document.querySelectorAll('.mode-opt')].find((x) => x.textContent.trim() === l);
+      if (!b) throw new Error(`no ${l} button`);
+      b.click();
+    }, label);
+    await page.waitForTimeout(150);
+  };
+
+  test('Edit and Sculpt work on the one object in the scene without selecting it first', async () => {
+    // Reported as "these buttons don't work". They were wired correctly and
+    // did nothing, because Kline starts with nothing active and clicking empty
+    // space puts it back there — and with nothing active they refused, looked
+    // exactly like buttons that work, and said so only in a line at the bottom
+    // of a crowded status bar.
+    await resetScene(page);
+    await page.evaluate(() => window.kline.run('add.cube'));
+    await page.waitForTimeout(120);
+    // Deselect, the way clicking empty space does.
+    await page.evaluate(() => {
+      const ed = window.kline.editor;
+      ed.scene.selection.clear();
+      ed.scene.active = null;
+      ed.changed();
+    });
+    await page.waitForTimeout(120);
+
+    assert.deepEqual(
+      (await modeButtons()).map((b) => b.dimmed),
+      [false, false, false],
+      'the buttons look unavailable when there is an obvious object to use',
+    );
+
+    await clickMode('Edit');
+    assert.equal(await page.evaluate(() => window.kline.editor.mode), 'edit', 'Edit did nothing');
+    // And it selected what it chose, so leaving Edit Mode does not drop back
+    // into a scene with nothing selected and a dead button again.
+    assert.equal(await page.evaluate(() => window.kline.editor.scene.selection.size), 1);
+
+    await clickMode('Sculpt');
+    assert.equal(await page.evaluate(() => window.kline.editor.mode), 'sculpt', 'Sculpt did nothing');
+    await clickMode('Object');
+    assert.equal(await page.evaluate(() => window.kline.editor.mode), 'object');
+  });
+
+  test('a button that cannot act looks like it and says why', async () => {
+    await resetScene(page);
+    const empty = await modeButtons();
+    assert.equal(empty.find((b) => b.label === 'Edit').dimmed, true, 'Edit looks usable with an empty scene');
+    assert.equal(empty.find((b) => b.label === 'Sculpt').dimmed, true);
+    assert.equal(empty.find((b) => b.label === 'Object').dimmed, false, 'Object Mode is always available');
+    assert.match(empty.find((b) => b.label === 'Edit').title, /Add a mesh first/);
+
+    // Clicking anyway still answers, rather than swallowing the press: a
+    // disabled button would explain nothing to the one person who tries it.
+    await clickMode('Edit');
+    assert.equal(await page.evaluate(() => window.kline.editor.mode), 'object');
+    assert.match(
+      await page.evaluate(() => window.kline.editor.statusMessage ?? ''),
+      /Add a mesh first/,
+    );
+
+    // Two meshes and nothing selected is a real question, so it is asked.
+    await page.evaluate(() => {
+      const ed = window.kline.editor;
+      window.kline.run('add.cube');
+      window.kline.run('add.uvsphere');
+      ed.scene.selection.clear();
+      ed.scene.active = null;
+      ed.changed();
+    });
+    await page.waitForTimeout(150);
+    const ambiguous = await modeButtons();
+    assert.equal(ambiguous.find((b) => b.label === 'Edit').dimmed, true, 'two candidates should not be guessed between');
+    assert.match(ambiguous.find((b) => b.label === 'Edit').title, /Click the object/);
+    await clickMode('Edit');
+    assert.equal(await page.evaluate(() => window.kline.editor.mode), 'object');
+  });
+
+  test('an empty Build box asks for a sentence instead of doing nothing', async () => {
+    await resetScene(page);
+    const result = await page.evaluate(() => {
+      const ed = window.kline.editor;
+      const input = document.querySelector('.build-bar input, input.build-input');
+      if (input) input.value = '';
+      document.querySelector('button.build-go')?.click();
+      return { status: ed.statusMessage, focused: document.activeElement === input, objects: ed.scene.objects.size };
+    });
+    assert.match(result.status, /Say what to build/, 'Go with an empty box said nothing');
+    assert.equal(result.focused, true, 'the cursor was not put where the words go');
+    assert.equal(result.objects, 0, 'an empty prompt built something anyway');
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

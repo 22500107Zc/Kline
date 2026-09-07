@@ -195,6 +195,11 @@ export async function resetScene(page) {
     c.pitch = 27 * (Math.PI / 180);
     c.orthographic = false;
     c.lockedMatrix = null;
+    // Through the editor's own API rather than just asking for a frame: the
+    // objects were removed by reaching straight into the scene, so nothing has
+    // told the interface that the selection it is drawing no longer exists.
+    // Without this the header still shows whatever the previous test left.
+    ed.selectObject(null);
     ed.requestRender();
   });
 }

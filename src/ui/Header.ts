@@ -117,13 +117,27 @@ export class Header {
       { id: 'sculpt', label: 'Sculpt' },
     ];
     const modeGroup = h('div', { class: `mode-switch ${ed.mode}` });
+    // Edit and Sculpt need something to work on, and a button that refuses
+    // has to look like one. These used to sit there looking perfectly normal,
+    // do nothing at all when clicked, and explain themselves only in a line
+    // at the bottom of a crowded status bar — which reads as an application
+    // whose buttons are broken.
+    const blocker = ed.meshModeBlocker();
     for (const m of editorModes) {
-      modeGroup.appendChild(h('button', {
-        class: `mode-opt${ed.mode === m.id ? ' active' : ''}`,
+      const needsMesh = m.id !== 'object';
+      const unavailable = needsMesh && blocker !== null && ed.mode === 'object';
+      const button = h('button', {
+        class: `mode-opt${ed.mode === m.id ? ' active' : ''}${unavailable ? ' unavailable' : ''}`,
         text: m.label,
-        title: m.id === 'edit' ? 'Edit Mode (Tab)' : `${m.label} Mode`,
+        title: unavailable
+          ? `${m.label} Mode — ${blocker}`
+          : m.id === 'edit' ? 'Edit Mode (Tab)' : `${m.label} Mode`,
         on: { click: () => ed.setMode(m.id) },
-      }));
+      }) as HTMLButtonElement;
+      // Dimmed but still clickable, so the reason reaches anyone who presses
+      // it anyway; a disabled button swallows the click and says nothing.
+      button.setAttribute('aria-disabled', unavailable ? 'true' : 'false');
+      modeGroup.appendChild(button);
     }
     this.modeArea.appendChild(modeGroup);
 

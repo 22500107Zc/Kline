@@ -120,7 +120,14 @@ export class BuildBar {
 
   private async run(): Promise<void> {
     const prompt = this.input.value.trim();
-    if (!prompt) return;
+    if (!prompt) {
+      // Pressing Go with an empty box used to do nothing and say nothing,
+      // which reads as a broken button rather than as a missing sentence.
+      // Put the cursor where the words go and ask for them.
+      this.input.focus();
+      this.editor.setStatus('Say what to build — "a spiral staircase with 20 steps", "12 cubes in a circle"');
+      return;
+    }
     if (this.running) {
       this.running.abort();
       return;
