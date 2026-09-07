@@ -4,8 +4,10 @@ import { Vec3 } from '../src/core/math';
 import { Scene } from '../src/scene/Scene';
 import { createCube, createUVSphere } from '../src/mesh/primitives';
 import { createMaterial } from '../src/scene/Material';
+import { createTexture } from '../src/scene/Texture';
+import { meshFromPhoto } from '../src/imaging/photo';
 import { createModifier } from '../src/modifiers';
-import { exportOBJ, importOBJ } from '../src/io/obj';
+import { MTL_FILENAME, exportMTL, exportOBJ, importOBJ, texturesForMTL } from '../src/io/obj';
 import { exportSTL } from '../src/io/stl';
 import { exportGLTF } from '../src/io/gltf';
 
@@ -157,4 +159,133 @@ test('a readable OBJ still imports everything it should', () => {
   const partial = importOBJ('v 5 nope 7\nv 1 0 0\nv 0 1 0\nf 1 2 3\n');
   assert.equal(partial[0].mesh.positions.length, 3, 'the vertex still exists');
   assert.equal(partial[0].mesh.faces[0].length, 3, 'and the face still finds it');
+});
+
+
+// ------------------------------------------------- taking a texture with you
+
+/** A photograph, its model, and the texture, wired up the way the panel does. */
+function texturedPhotoScene(): { scene: Scene; textureId: number } {
+  const w = 72;
+  const h = 96;
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      const inside = ((x - 36) / 20) ** 2 + ((y - 48) / 32) ** 2 < 1;
+      data[o] = inside ? 60 : 175;
+      data[o + 1] = inside ? 95 : 80;
+      data[o + 2] = inside ? 205 : 45;
+      data[o + 3] = 255;
+    }
+  }
+  const { mesh } = meshFromPhoto({ width: w, height: h, data }, { resolution: 56 });
+  const scene = new Scene();
+  const texture = createTexture('holiday photo', 'data:image/png;base64,iVBORw0KGgo=', w, h);
+  scene.textures.push(texture);
+  const slot = scene.addMaterial(createMaterial({ name: 'photo surface', baseColorTexture: texture.id }));
+  const obj = scene.add('mesh', 'Photo', mesh);
+  obj.materialSlots = [slot];
+  return { scene, textureId: texture.id };
+}
+
+test('an exported OBJ points at its material file and its texture', () => {
+  // The .obj never named the .mtl, so every importer ignored the material file
+  // the app had just written beside it — and the .mtl never named the image,
+  // so a model built from a photograph arrived somewhere else as a grey shape
+  // with nothing in the files to say what had been lost.
+  const { scene } = texturedPhotoScene();
+  const obj = exportOBJ(scene);
+  const mtl = exportMTL(scene);
+
+  assert.ok(obj.split('\n').includes(`mtllib ${MTL_FILENAME}`), 'the .obj does not name the .mtl');
+  assert.ok(obj.includes('usemtl photo_surface'), 'no material is selected for the faces');
+  assert.ok(mtl.includes('newmtl photo_surface'));
+
+  const images = texturesForMTL(scene);
+  assert.equal(images.length, 1, 'the texture was not offered for saving beside the .obj');
+  assert.ok(mtl.includes(`map_Kd ${images[0].filename}`), `the .mtl does not point at ${images[0].filename}`);
+  assert.ok(images[0].url.startsWith('data:image'), 'no bytes to write for the image');
+
+  // A texture nothing uses is not written out.
+  const spare = createTexture('unused', 'data:image/png;base64,iVBORw0KGgo=', 4, 4);
+  scene.textures.push(spare);
+  assert.equal(texturesForMTL(scene).length, 1, 'an unreferenced texture was written out anyway');
+});
+
+test('OBJ survives a round trip through Kline with its coordinates', () => {
+  // Kline read back its own export and dropped the texture coordinates every
+  // time: the file had them written in it and the importer walked past them.
+  const { scene } = texturedPhotoScene();
+  const original = [...scene.objects.values()][0].mesh!;
+  const back = importOBJ(exportOBJ(scene));
+
+  assert.equal(back.length, 1);
+  const mesh = back[0].mesh;
+  assert.equal(mesh.faceCount, original.faceCount, 'faces were lost on the way back in');
+  assert.equal(mesh.hasUV, true, 'the coordinates did not survive the round trip');
+
+  let worst = 0;
+  for (let f = 0; f < original.faces.length; f++) {
+    const a = original.uvFor(f);
+    const b = mesh.uvFor(f);
+    assert.ok(a && b && a.length === b.length, `face ${f} lost its coordinates`);
+    for (let i = 0; i < a!.length; i++) worst = Math.max(worst, Math.abs(a![i] - b![i]));
+  }
+  // The export rounds to six decimals; anything beyond that is a real drift.
+  assert.ok(worst < 1e-5, `coordinates drifted by ${worst}`);
+});
+
+test('a face with no coordinates stays a face with no coordinates', () => {
+  // `v//vn` is legal OBJ and means this corner has no texture coordinate.
+  // Inventing one puts a corner of the image somewhere it was never meant to
+  // be, which is worse than having none.
+  const text = [
+    'v 0 0 0', 'v 1 0 0', 'v 1 1 0', 'v 0 1 0',
+    'vt 0 0', 'vt 1 0', 'vt 1 1',
+    'o Mixed',
+    'f 1//1 2//2 3//3',
+    'f 1/1/1 2/2/2 3/3/3',
+    // A coordinate index past the end of the table is a corrupt file, not a
+    // coordinate.
+    'f 1/1/1 2/2/2 4/99/3',
+  ].join('\n');
+  const [imported] = importOBJ(text);
+  assert.equal(imported.mesh.faceCount, 3);
+  assert.equal(imported.mesh.uvFor(0), null, 'a face with no coordinates was given some');
+  assert.deepEqual(imported.mesh.uvFor(1), [0, 0, 1, 0, 1, 1]);
+  assert.equal(imported.mesh.uvFor(2), null, 'an out-of-range coordinate index was used anyway');
+});
+
+test('glTF carries the picture, not just the coordinates', () => {
+  // TEXCOORD_0 and a material and no image at all: the model arrived in
+  // Blender or a game engine grey, and glTF is the format people actually
+  // move models with.
+  const { scene, textureId } = texturedPhotoScene();
+  const doc = JSON.parse(exportGLTF(scene));
+
+  assert.equal(doc.images?.length, 1, 'no image in the glTF');
+  assert.ok(String(doc.images[0].uri).startsWith('data:image'), 'the image is a reference to a file that will not be there');
+  assert.equal(doc.textures?.length, 1);
+  assert.equal(doc.samplers?.length, 1);
+  assert.equal(doc.textures[0].source, 0);
+
+  const pbr = doc.materials[0].pbrMetallicRoughness;
+  assert.equal(pbr.baseColorTexture?.index, 0, 'the material does not use the texture');
+  assert.ok(doc.meshes[0].primitives[0].attributes.TEXCOORD_0 !== undefined);
+
+  // Tiling is not part of a plain glTF texture reference, so it has to be
+  // declared rather than exported silently as something else.
+  assert.equal(doc.extensionsUsed?.includes('KHR_texture_transform') ?? false, false);
+  scene.materials[0].uvScale = [3, 3];
+  const tiled = JSON.parse(exportGLTF(scene));
+  assert.ok(tiled.extensionsUsed.includes('KHR_texture_transform'), 'tiling was exported silently');
+  assert.deepEqual(tiled.materials[0].pbrMetallicRoughness.baseColorTexture.extensions.KHR_texture_transform.scale, [3, 3]);
+
+  // A scene with no textures should not grow empty arrays for them.
+  const plain = JSON.parse(exportGLTF(sceneWithCube()));
+  assert.equal(plain.images, undefined);
+  assert.equal(plain.textures, undefined);
+  assert.equal(plain.samplers, undefined);
+  assert.ok(textureId > 0);
 });

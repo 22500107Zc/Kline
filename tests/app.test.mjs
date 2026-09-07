@@ -1173,6 +1173,37 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     );
   });
 
+  test('rebuilding a photo does not pile up materials and textures', async () => {
+    // The object is rebuilt on every settings change, and the texture is
+    // applied on every rebuild. Making a fresh material each time meant one
+    // per slider event — hundreds of identical orphans in the material list
+    // and every one of them written into the saved file.
+    const counts = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const panel = window.kline.app.properties.create;
+      const before = { materials: ed.scene.materials.length, textures: ed.scene.textures.length };
+      for (let i = 0; i < 12; i++) {
+        panel.photo.depthScale = 0.5 + i * 0.05;
+        panel.generate(true);
+      }
+      await new Promise((ok) => setTimeout(ok, 400));
+      const object = [...ed.scene.objects.values()].find((o) => o.type === 'mesh');
+      const material = ed.scene.materials[object.materialSlots[0]];
+      return {
+        before,
+        after: { materials: ed.scene.materials.length, textures: ed.scene.textures.length },
+        slots: object.materialSlots.length,
+        textured: material ? material.baseColorTexture : null,
+      };
+    });
+
+    assert.equal(counts.after.materials, counts.before.materials, `twelve rebuilds added ${counts.after.materials - counts.before.materials} materials`);
+    assert.equal(counts.after.textures, counts.before.textures, `twelve rebuilds added ${counts.after.textures - counts.before.textures} textures`);
+    // And the model still wears the photograph after all of that.
+    assert.equal(counts.slots, 1);
+    assert.ok(counts.textured !== null, 'the model lost its texture while being rebuilt');
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

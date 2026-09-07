@@ -23,7 +23,7 @@ import { BRUSH_LABELS, SculptBrush } from '../sculpt/sculpt';
 import { pickFile } from '../io/files';
 import { preserveUV, transferUV } from '../uv/transfer';
 import { downloadBinary, downloadText, openTextFile } from '../io/files';
-import { exportMTL, exportOBJ, importOBJ } from '../io/obj';
+import { MTL_FILENAME, exportMTL, exportOBJ, importOBJ, texturesForMTL } from '../io/obj';
 import { exportSTL } from '../io/stl';
 import { exportGLTF } from '../io/gltf';
 import { Editor, EditorMode } from './Editor';
@@ -65,6 +65,26 @@ const hasObjectSelection = (ed: Editor): boolean => ed.scene.selection.size > 0;
  * where the tab is in danger, so the operator that would cross it is refused
  * with a message instead of taking an hour of unsaved work down with it.
  */
+/**
+ * The bytes behind a `data:` URL, or null if it is not one.
+ *
+ * Textures are stored as data URLs so a saved scene is self-contained; writing
+ * one beside an .obj means turning it back into a file.
+ */
+function dataUrlToBytes(url: string): ArrayBuffer | null {
+  const comma = url.indexOf(',');
+  if (!url.startsWith('data:') || comma < 0) return null;
+  if (!url.slice(0, comma).includes(';base64')) return null;
+  try {
+    const binary = atob(url.slice(comma + 1));
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out.buffer;
+  } catch {
+    return null;
+  }
+}
+
 export const MAX_EDITABLE_FACES = 1_000_000;
 
 /**
@@ -181,7 +201,13 @@ export const COMMANDS: Command[] = [
     id: 'file.exportObj', label: 'Export OBJ', category: 'File',
     run: (ed) => {
       downloadText('scene.obj', exportOBJ(ed.scene), 'text/plain');
-      downloadText('scene.mtl', exportMTL(ed.scene), 'text/plain');
+      downloadText(MTL_FILENAME, exportMTL(ed.scene), 'text/plain');
+      // MTL can only name an image file sitting next to it, so the images
+      // have to come out too. glTF embeds them and needs none of this.
+      for (const t of texturesForMTL(ed.scene)) {
+        const bytes = dataUrlToBytes(t.url);
+        if (bytes) downloadBinary(t.filename, bytes, 'image/png');
+      }
       ed.setStatus('Exported scene.obj + scene.mtl');
     },
   },

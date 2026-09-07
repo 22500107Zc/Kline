@@ -6,7 +6,7 @@ import { falloffWeight, proportionalWeights } from '../src/editor/proportional';
 import { defaultSnap, snapToGrid } from '../src/editor/snapping';
 import { COMMANDS, COMMANDS_BY_ID, KEYMAP, lookupKey } from '../src/editor/commands';
 import { defaultPreferences } from '../src/editor/persistence';
-import { Vec3 } from '../src/core/math';
+import { AABB, Vec3 } from '../src/core/math';
 import { ViewportCamera } from '../src/scene/ViewportCamera';
 import { navModeForPress, pressGesture, wheelGesture, wheelPixels } from '../src/editor/navigation';
 
@@ -327,4 +327,42 @@ test('zooming at the middle is still a plain zoom', () => {
   cam.zoomAt(1, 0, 0, 1.5);
   assert.ok(cam.distance < 11);
   assert.ok(cam.target.distanceTo(target) < 1e-9, 'zooming at the centre moved the pivot');
+});
+
+test('one bad number cannot wedge the camera for the rest of the session', () => {
+  // NaN in a camera is not a bad frame, it is the end of the session: it
+  // spreads through the view matrix in one step, the viewport goes blank, and
+  // no gesture puts it back because every gesture is relative to the value
+  // that is now NaN. clamp() does not catch it either — every comparison
+  // against NaN is false, so it passes straight through the range check it
+  // looks like it is guarded by.
+  const rubbish = [NaN, Infinity, -Infinity];
+  for (const v of rubbish) {
+    const cam = new ViewportCamera();
+    cam.orbit(v, v);
+    cam.pan(v, v, v);
+    cam.zoom(v);
+    cam.dolly(v);
+    cam.nudge(v, v);
+    cam.zoomAt(v, v, v, v);
+    cam.zoomAt(1, 0.5, 0.5, v);
+
+    // A box can hold a NaN and still be "valid" — one vertex that went wrong
+    // upstream is enough — so framing has to check what it worked out.
+    const box = new AABB();
+    box.expand(new Vec3(v, v, v));
+    cam.frame(box);
+
+    for (const n of [cam.distance, cam.yaw, cam.pitch, cam.target.x, cam.target.y, cam.target.z]) {
+      assert.ok(Number.isFinite(n), `${v} left ${n} in the camera`);
+    }
+    for (const n of cam.viewProjection(1.6).m) assert.ok(Number.isFinite(n), `${v} reached the view matrix`);
+
+    // Refusing rubbish must not also refuse the next real gesture.
+    const before = cam.distance;
+    cam.zoom(1);
+    assert.ok(cam.distance < before, `the camera stopped zooming after being handed ${v}`);
+    cam.orbit(0.2, 0.1);
+    assert.notEqual(cam.yaw, -43 * (Math.PI / 180));
+  }
 });

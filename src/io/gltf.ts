@@ -65,17 +65,56 @@ export function exportGLTF(scene: Scene, selectionOnly = false): string {
     return bufferViews.length - 1;
   };
 
-  const materials = scene.materials.map((m) => ({
-    name: m.name,
-    pbrMetallicRoughness: {
+  // Images, and the textures that point at them.
+  //
+  // Kline stores a texture as a data URL so a saved scene is self-contained,
+  // and glTF accepts a data URL as an image `uri` — so the picture travels
+  // inside the .gltf too. Without this the export carried TEXCOORD_0 and a
+  // material and no image at all: every model built from a photograph arrived
+  // in Blender or a game engine as a grey lump, with nothing in the file to
+  // say the photograph had ever been on it.
+  const imageOfTexture = new Map<number, number>();
+  const images: { uri: string; name?: string }[] = [];
+  const textures: { source: number; sampler: number }[] = [];
+  for (const t of scene.textures) {
+    if (!t?.url || imageOfTexture.has(t.id)) continue;
+    imageOfTexture.set(t.id, textures.length);
+    images.push({ uri: t.url, name: t.name });
+    textures.push({ source: images.length - 1, sampler: 0 });
+  }
+  const usesTextures = textures.length > 0;
+  const textureTransforms: string[] = [];
+
+  const materials = scene.materials.map((m) => {
+    const index = m.baseColorTexture == null ? undefined : imageOfTexture.get(m.baseColorTexture);
+    const pbr: Record<string, unknown> = {
       baseColorFactor: [...m.color, m.alpha],
       metallicFactor: m.metallic,
       roughnessFactor: m.roughness,
-    },
-    emissiveFactor: m.emission.map((c) => Math.min(1, c * Math.max(m.emissionStrength, 0))),
-    alphaMode: m.alpha < 0.999 ? 'BLEND' : 'OPAQUE',
-    doubleSided: true,
-  }));
+    };
+    if (index !== undefined) {
+      const base: Record<string, unknown> = { index };
+      // Tiling and offset are not part of a plain glTF texture reference, so
+      // exporting them silently would mean the model arrives with its picture
+      // stretched differently from how it looks here.
+      const tiled = m.uvScale[0] !== 1 || m.uvScale[1] !== 1
+        || m.uvOffset[0] !== 0 || m.uvOffset[1] !== 0;
+      if (tiled) {
+        base.extensions = {
+          KHR_texture_transform: { scale: [...m.uvScale], offset: [...m.uvOffset] },
+        };
+        if (!textureTransforms.length) textureTransforms.push('KHR_texture_transform');
+      }
+      pbr.baseColorTexture = base;
+    }
+    return {
+      name: m.name,
+      pbrMetallicRoughness: pbr,
+      emissiveFactor: m.emission.map((c) => Math.min(1, c * Math.max(m.emissionStrength, 0))),
+      alphaMode: m.alpha < 0.999 ? 'BLEND' : 'OPAQUE',
+      doubleSided: true,
+    };
+  });
 
   const meshes: unknown[] = [];
   const nodes: Record<string, unknown>[] = [];
@@ -299,6 +338,13 @@ export function exportGLTF(scene: Scene, selectionOnly = false): string {
     nodes,
     meshes,
     materials: materials.length ? materials : undefined,
+    images: usesTextures ? images : undefined,
+    textures: usesTextures ? textures : undefined,
+    // One sampler for everything: Kline wraps and filters every texture the
+    // same way, so a per-texture sampler would be the same object repeated.
+    samplers: usesTextures
+      ? [{ magFilter: 9729, minFilter: 9987, wrapS: 10497, wrapT: 10497 }]
+      : undefined,
     accessors,
     bufferViews,
     buffers: [{ byteLength, uri: `data:application/octet-stream;base64,${base64(totalBytes)}` }],
@@ -307,9 +353,8 @@ export function exportGLTF(scene: Scene, selectionOnly = false): string {
       : undefined,
     cameras,
   };
-  if (lights.length) {
-    gltf.extensionsUsed = ['KHR_lights_punctual'];
-    gltf.extensions = { KHR_lights_punctual: { lights } };
-  }
+  const extensions = [...(lights.length ? ['KHR_lights_punctual'] : []), ...textureTransforms];
+  if (extensions.length) gltf.extensionsUsed = extensions;
+  if (lights.length) gltf.extensions = { KHR_lights_punctual: { lights } };
   return JSON.stringify(gltf, null, 2);
 }

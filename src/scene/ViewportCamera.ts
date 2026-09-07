@@ -6,6 +6,23 @@ export type AxisView = 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom';
  * Orbit camera for the 3D viewport. Z-up spherical coordinates around a pivot,
  * with a perspective/orthographic toggle that preserves apparent zoom.
  */
+/**
+ * Every number that reaches a camera move comes from somewhere else — a wheel
+ * event, a saved file, a line typed into the console — and one NaN among them
+ * is not a bad frame, it is the end of the session. NaN spreads through the
+ * view matrix in a single step, the viewport goes blank, and no gesture can
+ * put it back, because every gesture is relative to the value that is now
+ * NaN. The only way out is reloading and losing the work.
+ *
+ * `clamp` does not catch it either: every comparison against NaN is false, so
+ * it passes straight through the range check it looks like it is guarded by.
+ * Refusing the input costs one comparison and cannot make anything worse.
+ */
+function usable(...values: number[]): boolean {
+  for (const v of values) if (!Number.isFinite(v)) return false;
+  return true;
+}
+
 export class ViewportCamera {
   target = new Vec3(0, 0, 0);
   distance = 11;
@@ -69,6 +86,7 @@ export class ViewportCamera {
   }
 
   orbit(dx: number, dy: number): void {
+    if (!usable(dx, dy)) return;
     this.lockedMatrix = null;
     this.yaw -= dx;
     this.pitch = clamp(this.pitch + dy, -Math.PI / 2 + 0.001, Math.PI / 2 - 0.001);
@@ -76,6 +94,7 @@ export class ViewportCamera {
 
   /** Pan in screen space; `dx`/`dy` are pixel deltas. */
   pan(dx: number, dy: number, viewportHeight: number): void {
+    if (!usable(dx, dy, viewportHeight)) return;
     this.lockedMatrix = null;
     const worldPerPixel = (2 * this.orthoHalfHeight()) / Math.max(1, viewportHeight);
     this.target = this.target
@@ -85,6 +104,7 @@ export class ViewportCamera {
 
   /** `amount` > 0 zooms in. */
   zoom(amount: number): void {
+    if (!usable(amount)) return;
     this.lockedMatrix = null;
     this.distance = clamp(this.distance * Math.pow(0.9, amount), 0.01, 20000);
   }
@@ -98,6 +118,7 @@ export class ViewportCamera {
    * pan gesture — which is most of what makes a viewport feel like work.
    */
   zoomAt(amount: number, ndcX: number, ndcY: number, aspect: number): void {
+    if (!usable(amount, ndcX, ndcY, aspect)) return;
     const before = this.orthoHalfHeight();
     this.zoom(amount);
     const shift = before - this.orthoHalfHeight();
@@ -113,16 +134,23 @@ export class ViewportCamera {
 
   /** Dolly the pivot forward/back, keeping the orbit distance (Blender's Ctrl+MMB feel). */
   dolly(amount: number): void {
+    if (!usable(amount)) return;
     this.lockedMatrix = null;
     this.target = this.target.add(this.forward().scale(amount * this.distance * 0.1));
   }
 
   frame(box: AABB, padding = 1.4): void {
-    if (!box.valid) return;
-    this.lockedMatrix = null;
-    this.target = box.center();
+    if (!box.valid || !usable(padding)) return;
+    const centre = box.center();
     const radius = Math.max(box.radius(), 0.15);
-    this.distance = clamp((radius * padding) / Math.tan(this.fov / 2), 0.05, 20000);
+    const distance = clamp((radius * padding) / Math.tan(this.fov / 2), 0.05, 20000);
+    // A box holding a NaN is still "valid" as far as the flag goes — one
+    // vertex that went wrong upstream is enough — so the framing is worked out
+    // first and only committed once it is a place the camera can actually be.
+    if (!usable(centre.x, centre.y, centre.z, distance)) return;
+    this.lockedMatrix = null;
+    this.target = centre;
+    this.distance = distance;
   }
 
   setAxisView(view: AxisView): void {

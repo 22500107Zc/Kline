@@ -80,6 +80,15 @@ export class CreatePanel {
   private depthField: { key: string; value: DepthField } | null = null;
   /** The texture id already made for this reference, so retries do not pile up copies. */
   private photoTexture: { key: string; id: number } | null = null;
+  /**
+   * The material slot this panel made, and which object it made it for.
+   *
+   * Kept because the object is rebuilt on every settings change, and a fresh
+   * material each time would mean one per slider event — hundreds of them in
+   * the material list and in the saved file, all identical, all but one
+   * unused.
+   */
+  private photoMaterial: { objectId: number; slot: number } | null = null;
   /** Fraction of the frame the last photo build found as subject. */
   private lastCoverage = 0;
   /** Pending debounced photo rebuild, if a slider is mid-drag. */
@@ -678,21 +687,41 @@ export class CreatePanel {
       try {
         const { url, width, height } = textureFromReference(ref);
         const texture = createTexture(ref.name.replace(/\.[^.]+$/, ''), url, width, height);
+        const stale = this.photoTexture?.id ?? null;
         scene.textures.push(texture);
         this.photoTexture = { key, id: texture.id };
+        // The previous frame's copy goes, unless something else has taken it
+        // up in the meantime. A texture is an embedded PNG; scrubbing a video
+        // would otherwise put one in the file per frame anyone looked at.
+        if (stale !== null && !scene.materials.some((m) => m.baseColorTexture === stale)) {
+          const at = scene.textures.findIndex((t) => t.id === stale);
+          if (at >= 0) scene.textures.splice(at, 1);
+        }
       } catch (err) {
         this.editor.setStatus(`The model was built, but the photo could not be used as a texture: ${(err as Error).message}`);
         return;
       }
     }
-    const slot = scene.addMaterial(createMaterial({
+
+    const settings = {
       name: `${object.name} surface`,
       baseColorTexture: this.photoTexture.id,
       // A photograph already contains its own highlights; a shiny material on
       // top of one reads as plastic wrap.
       roughness: 0.85,
       metallic: 0,
-    }));
+    };
+    // One material for this object, updated in place. A new one per rebuild
+    // would leave the material list full of identical orphans, and every one
+    // of them would be written into the saved scene.
+    const existing = this.photoMaterial;
+    if (existing && existing.objectId === object.id && scene.materials[existing.slot]) {
+      Object.assign(scene.materials[existing.slot], settings);
+      object.materialSlots = [existing.slot];
+      return;
+    }
+    const slot = scene.addMaterial(createMaterial(settings));
+    this.photoMaterial = { objectId: object.id, slot };
     object.materialSlots = [slot];
   }
 
