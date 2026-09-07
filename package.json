@@ -1,6 +1,6 @@
 {
   "name": "kline",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "private": false,
   "description": "Kline \u2014 an open source 3D modelling application. Runs in a browser tab or as a desktop app.",
   "license": "MIT",
@@ -107,7 +107,7 @@
       "darkModeSupport": true
     },
     "dmg": {
-      "title": "Kline",
+      "title": "Kline ${arch}",
       "artifactName": "${productName}-${arch}.${ext}",
       "iconSize": 128,
       "window": {

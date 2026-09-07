@@ -18,6 +18,7 @@ interface BuildConfig {
   fileAssociations?: FileAssociation[];
   mac?: { icon?: string };
   dmg?: {
+    title?: string;
     window?: { width?: number; height?: number };
     iconSize?: number;
     contents?: { x: number; y: number; type?: string; path?: string }[];
@@ -483,6 +484,28 @@ test('the disk image opens onto the app and the Applications folder, and nothing
   assert.notEqual(app!.x, applications!.x, 'both icons sit in the same column');
   assert.equal(app!.y, applications!.y, 'the two icons are not on the same line');
   assert.ok(app!.x < applications!.x, 'the application should sit to the left of the folder it is dragged into');
+
+  // The volume name has to differ per architecture.
+  //
+  // electron-builder builds the x64 and arm64 images at the same time, and
+  // each one is customised by mounting it and writing the layout into the
+  // volume. With one name for both, the two mount as "Kline" and "Kline 1"
+  // at the same moment and the layout goes into whichever the system handed
+  // over — so one image came out with its icons placed and the other with no
+  // .DS_Store, no background and, worst of all, no Applications folder to
+  // drag onto. It was the arm64 image that lost, which is the one every
+  // Apple Silicon Mac downloads: they opened it and found a single icon and
+  // nowhere to put it.
+  //
+  // The default title is "${productName} ${version}", which collides exactly
+  // the same way, so this is not something the default would have got right.
+  assert.ok(dmg!.title, 'the disk image has no volume name of its own');
+  assert.match(
+    dmg!.title!,
+    /\$\{arch\}/,
+    `the volume name "${dmg!.title}" is the same for both architectures, so the two images `
+    + 'are mounted under one name at the same time and one loses its layout',
+  );
 
   // Both have to be inside the window, with room for a 128px icon and its
   // label. An icon placed outside is simply not visible.
