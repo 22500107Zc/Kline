@@ -133,6 +133,7 @@ export class Editor {
     toggleGraph?: () => void;
     toggleDiff?: () => void;
     toggleGuide?: () => void;
+    openCreate?: () => void;
     focusBuild?: (prefill?: string) => void;
   } = {};
   private pointer = { x: 0, y: 0, down: false, button: -1, startX: 0, startY: 0, dragging: false };

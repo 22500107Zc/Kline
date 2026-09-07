@@ -227,9 +227,23 @@ void main() {
   int mi = clamp(vMat, 0, ${MAX_MATERIALS - 1});
   vec3 albedo = uMatColor[mi];
   vec2 uv = vUV * uMatUV[mi].xy + uMatUV[mi].zw;
+  // Worked out here, at the top of main, and handed to textureGrad below.
+  //
+  // A plain texture() inside the branch has undefined derivatives: the branch
+  // is not uniform across a quad of fragments, because a quad can straddle
+  // two materials where only one is textured. A driver is then free to pick
+  // any mip level it likes, and the failure it produces — a texture that
+  // renders as one flat averaged colour — reports no error and looks like a
+  // broken image rather than a broken sampler. Taking the derivatives out
+  // where every fragment computes them makes the choice defined.
+  vec2 uvDX = dFdx(uv);
+  vec2 uvDY = dFdy(uv);
   float layer = uMatTexLayer[mi];
   if (layer >= 0.0) {
-    vec4 tex = texture(uTextures, vec3(fract(uv), layer));
+    // fract() so a texture can tile, but never for the mip choice: the
+    // sawtooth's derivative spikes at every wrap and would blur a seam
+    // across the model there.
+    vec4 tex = textureGrad(uTextures, vec3(fract(uv), layer), uvDX, uvDY);
     // Textures are authored in sRGB; shading happens in linear.
     vec3 lin = mix(pow((tex.rgb + 0.055) / 1.055, vec3(2.4)), tex.rgb / 12.92, step(tex.rgb, vec3(0.04045)));
     albedo *= lin;

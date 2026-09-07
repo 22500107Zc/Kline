@@ -1030,6 +1030,127 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     );
   });
 
+  // ----------------------------------------------------- photograph to model
+
+  test('a photograph comes out as a closed, textured, three-dimensional model', async () => {
+    await resetScene(page);
+    const built = await page.evaluate(async () => {
+      // A blue object on a warm floor, mixed so the two are the same
+      // brightness to within a point. No threshold anywhere separates them —
+      // the only thing that tells them apart is colour, which is exactly the
+      // photograph the old mask could not do anything with.
+      const c = document.createElement('canvas');
+      c.width = 240;
+      c.height = 300;
+      const g = c.getContext('2d');
+      const image = g.createImageData(c.width, c.height);
+      for (let y = 0; y < c.height; y++) {
+        for (let x = 0; x < c.width; x++) {
+          const o = (y * c.width + x) * 4;
+          const inside = ((x - 120) / 70) ** 2 + ((y - 150) / 100) ** 2 < 1;
+          const n = ((x * 7 + y * 13) % 29) - 14;
+          image.data[o] = (inside ? 60 : 150) + n;
+          image.data[o + 1] = (inside ? 80 : 70) + n;
+          image.data[o + 2] = (inside ? 200 : 40) + n;
+          image.data[o + 3] = 255;
+        }
+      }
+      g.putImageData(image, 0, 0);
+      const blob = await new Promise((ok) => c.toBlob(ok, 'image/png'));
+      const file = new File([blob], 'subject.png', { type: 'image/png' });
+      window.kline.app.properties.openCreate(file);
+
+      const editor = window.kline.editor;
+      for (let i = 0; i < 200 && editor.scene.objects.size === 0; i++) {
+        await new Promise((ok) => setTimeout(ok, 50));
+      }
+      const object = [...editor.scene.objects.values()][0];
+      if (!object || !object.mesh) return { ok: false };
+      const mesh = object.mesh;
+      const box = mesh.bounds();
+
+      // Every edge shared by exactly two faces: a shell that only looks solid
+      // fails at the first boolean or export.
+      const edges = new Map();
+      for (const loop of mesh.faces) {
+        for (let i = 0; i < loop.length; i++) {
+          const a = loop[i];
+          const b = loop[(i + 1) % loop.length];
+          if (a === b) continue;
+          const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+          edges.set(key, (edges.get(key) ?? 0) + 1);
+        }
+      }
+      const material = editor.scene.materials[object.materialSlots[0] ?? 0];
+      return {
+        ok: true,
+        faces: mesh.faceCount,
+        hasUV: mesh.hasUV,
+        openEdges: [...edges.values()].filter((n) => n !== 2).length,
+        depth: box.max.y - box.min.y,
+        height: box.max.z - box.min.z,
+        width: box.max.x - box.min.x,
+        floor: box.min.z,
+        textures: editor.scene.textures.length,
+        texture: material ? material.baseColorTexture : null,
+      };
+    });
+
+    assert.equal(built.ok, true, 'no object was created from the photograph');
+    assert.ok(built.faces > 500, `only ${built.faces} faces came out of the photograph`);
+    assert.equal(built.hasUV, true, 'the model has no texture coordinates, so the photo cannot go on it');
+    assert.equal(built.openEdges, 0, `${built.openEdges} edges are not shared by exactly two faces`);
+    assert.equal(built.textures, 1, 'the photograph was not stored as a texture');
+    assert.ok(built.texture !== null, 'the material is not using the photograph');
+    // A cut-out would be flat. This has to have depth, and it has to come
+    // from the subject's own width rather than a number someone typed.
+    assert.ok(built.depth > 0.3, `the model is ${built.depth.toFixed(3)} deep, which is a sticker`);
+    // Upright and on the floor: the scene is Z-up and its front view looks
+    // along +Y, so a photograph has to stand rather than lie face up.
+    assert.ok(Math.abs(built.height - 2) < 0.01, `the model stands ${built.height}, not the 2 asked for`);
+    assert.ok(built.height > built.width, 'a subject taller than it is wide came out lying down');
+    assert.ok(Math.abs(built.floor) < 1e-6, 'the model is not standing on the floor');
+  });
+
+  test('the photographed model actually renders, with the photograph on it', async () => {
+    // The mesh existing and the mesh being drawn are different claims, and
+    // the texture path in particular can fail without saying anything.
+    await page.evaluate(() => {
+      const ed = window.kline.editor;
+      // Material shading is the only mode that shows a texture, and it lights
+      // the scene from the scene's own lights — of which a wiped scene has
+      // none. Both are set here rather than assumed: this test is about what
+      // is on the surface, so it is lit flat by ambient and the question is
+      // only whether the photograph's own colours come through.
+      ed.options.shading = 'material';
+      ed.options.showDiff = false;
+      ed.options.xray = false;
+      ed.stopComparing();
+      ed.scene.world.ambient = 1;
+      // Framed on the model, then deselected: the selection outline is drawn
+      // over the model and would otherwise be what got sampled.
+      const model = [...ed.scene.objects.values()].find((o) => o.type === 'mesh');
+      ed.selectObject(model.id);
+      ed.frameSelected();
+      ed.scene.selection.clear();
+      ed.scene.active = null;
+      ed.requestRender();
+    });
+    await page.waitForTimeout(400);
+    const [middle, left, corner] = await samplePixels(page, [[0.5, 0.5], [0.44, 0.52], [0.03, 0.04]]);
+    assert.ok(
+      luma(middle) > luma(corner) + 12 || luma(left) > luma(corner) + 12,
+      `nothing drew where the model should be: ${JSON.stringify({ middle, left, corner })}`,
+    );
+    // The subject in the photograph is strongly blue. A model wearing its own
+    // photograph comes out blue; one that dropped the texture comes out the
+    // default grey, where the channels sit on top of each other.
+    assert.ok(
+      middle[2] > middle[0] * 1.3,
+      `the model rendered ${JSON.stringify(middle)}, which is not the blue of the photograph`,
+    );
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

@@ -209,21 +209,59 @@ reporting it as both would be true and useless.
 
 ![A traced mug reference extruded into a solid, hole and all](docs/reference-to-mesh.png)
 
-Drag an image or a video anywhere onto the window. Kline reads it locally, traces
-it, and builds a mesh straight away — then rebuilds that same object as you
-adjust the settings, with the detected outline drawn over your reference so the
-threshold is something you can see rather than guess. Videos are scrubbable, so
-any frame can be the source.
+Drag an image or a video anywhere onto the window. Kline reads it locally and
+builds a mesh straight away — then rebuilds that same object as you adjust the
+settings, with what it found drawn over your reference so the result is
+something you can see rather than guess at. Videos are scrubbable, so any frame
+can be the source.
 
 | Mode | What it does | Good for |
 |---|---|---|
-| **Cut Out** | Traces the outline and extrudes it into a solid, holes included | Logos, signage, silhouettes, flat parts |
+| **Photo** | Finds the subject by colour, inflates it to its own thickness, and projects the photograph on as a texture | Photographs of real objects |
+| **Cut Out** | Traces the outline and extrudes it into a flat solid, holes included | Logos, signage, silhouettes, flat parts |
 | **Turn** | Revolves the profile around a vertical axis | Vases, bottles, turned legs, anything round |
 | **Relief** | Displaces a grid by image brightness | Carvings, terrain, depth maps, stamps |
 
 These are deterministic geometry, not a model: no weights to download, no GPU,
-no network, a few milliseconds per rebuild. What comes out is an ordinary
-editable mesh — press Tab and keep modelling.
+no network, a few hundred milliseconds for a photograph and a few for the rest.
+What comes out is an ordinary editable mesh — press Tab and keep modelling.
+
+### What Photo mode actually does
+
+Three things, and the first is why the other generators fall over on real
+photographs:
+
+**It finds the subject by colour.** A band around the edge of the frame is
+taken as definitely background and the middle as probably subject; each gets a
+small set of colour clusters in CIELAB, every pixel goes to whichever set
+explains it better, and the whole thing runs again from the result, sharpened
+each pass against the image's own colour edges. That is a cut-down GrabCut, and
+it is the difference between a photograph working and not — a single brightness
+threshold is right for a logo on white and useless for a shoe on a floor.
+Speckles elsewhere in the frame are dropped and enclosed dark details are
+filled, so a buckle does not punch a hole through the model.
+
+**It inflates the outline to its own thickness.** Solving ∇²h = -4 across the
+inside of the silhouette and taking √h gives exactly a hemisphere over a
+circle, and everywhere else gives a thickness that follows the *local* width.
+A wide body comes out deep and a thin strap comes out thin, from one solve.
+That is the part a distance-to-the-outline inflation gets wrong, and it is why
+inflated silhouettes usually look like inflated silhouettes. Shading inside the
+subject, with its broad lighting gradient removed, is added on top for creases
+and seams, and the whole field is smoothed along the image's colour edges.
+
+**It puts the photograph on the model.** Per-corner coordinates, projected from
+the camera the photo was taken from, with the image embedded in the scene. A
+grey lump in the right outline is not what anyone wanted.
+
+The result stands upright on the floor, is closed and watertight — every edge
+shared by exactly two faces, so it booleans, prints and exports — and is an
+ordinary mesh you can sculpt, cut and re-topologise.
+
+One thing it cannot do is see the back, and it does not pretend to: the far
+side is the near side, shallower, with a **Back fullness** slider from mirrored
+to flat. For a real reconstruction of the unseen half you need a model with a
+learned prior, which is the next section.
 
 ### Hooking up a local AI model
 
@@ -280,8 +318,10 @@ the UI are all in this repository, and each piece is readable on its own.
 
 **From a reference**
 - Drop an image or video anywhere in the window; scrub a video to pick a frame
+- **Photo** mode: colour segmentation, Poisson inflation and the photograph
+  projected back on as a texture — a closed, watertight, upright model
 - Cut Out, Turn and Relief generators, rebuilt live as you tune them
-- Automatic subject detection by brightness, transparency or a single channel
+- Automatic subject detection by colour, brightness, transparency or a channel
 - Optional bridge to a local image-to-3D model server
 
 **Modelling**
@@ -446,9 +486,15 @@ the UI are all in this repository, and each piece is readable on its own.
 
 | Trackpad | Mouse | |
 |---|---|---|
-| `Option` + drag | Middle-drag | Orbit |
-| `Option`+`Shift` + drag, or `Shift` + two-finger scroll | `Shift` + middle-drag | Pan |
-| Two-finger scroll, or pinch | Wheel | Zoom |
+| `Option` + two-finger scroll, or `Option` + drag | Middle-drag | Orbit |
+| `Option`+`Shift` + scroll or drag | `Shift` + middle-drag | Pan |
+| Pinch, or two-finger scroll | Wheel | Zoom |
+| `Option`+`Cmd` + drag | `Ctrl` + middle-drag | Zoom |
+
+Holding `Option` and scrolling with two fingers turns the view: nothing to hold
+down, no second hand, and no middle mouse button — which a laptop does not
+have. Gestures are measured in pixels of finger travel rather than in wheel
+clicks, so a trackpad glides where a wheel steps.
 
 `Shift` + right click places the 3D cursor. `.` frames what is selected and
 `Home` frames everything — handy when you have lost the object off screen. The

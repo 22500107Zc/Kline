@@ -1,22 +1,34 @@
 import { Vec3 } from '../core/math';
 import { Editor } from '../editor/Editor';
+import { SceneObject } from '../scene/Scene';
 import { Mesh } from '../mesh/Mesh';
 import { Bitmap, MaskChannel, MaskOptions, denoiseMask, maskFromBitmap, splitComponents, suggestMaskOptions, traceContours, simplifyContours } from '../imaging/contour';
 import {
   HeightfieldOptions, LatheOptions, SilhouetteOptions,
   meshFromHeightfield, meshFromLathe, meshFromSilhouette,
 } from '../imaging/generate';
+import { PhotoOptions, PhotoResult, meshFromPhoto } from '../imaging/photo';
+import { DepthField, DepthOptions, depthFromPhoto } from '../imaging/depth';
+import { MIN_SEPARATION, Matte, segmentSubject } from '../imaging/segment';
+import { createTexture } from '../scene/Texture';
+import { createMaterial } from '../scene/Material';
 import {
   Reference, bitmapFromReference, blobFromReference, drawReferenceInto, isSupportedFile,
-  loadReference, releaseReference, seekVideo,
+  loadReference, releaseReference, seekVideo, textureFromReference,
 } from '../imaging/load';
 import { BackendInfo, generateMesh, probeBackend, storeEndpoint, storedEndpoint } from '../ai/client';
 import { button, checkbox, clear, h, numberField, row, select } from './dom';
 
-type Mode = 'silhouette' | 'lathe' | 'relief';
+type Mode = 'photo' | 'silhouette' | 'lathe' | 'relief';
 
 const MODES: { id: Mode; label: string; blurb: string }[] = [
-  { id: 'silhouette', label: 'Cut Out', blurb: 'Trace the outline and extrude it into a solid.' },
+  {
+    id: 'photo',
+    label: 'Photo',
+    blurb: 'Find the subject by colour, inflate it to its own thickness, and project the photo back on. '
+      + 'The far side is the near side, shallower — a photograph does not contain the back.',
+  },
+  { id: 'silhouette', label: 'Cut Out', blurb: 'Trace the outline and extrude it into a flat solid.' },
   { id: 'lathe', label: 'Turn', blurb: 'Spin the profile around a vertical axis.' },
   { id: 'relief', label: 'Relief', blurb: 'Raise the surface by image brightness.' },
 ];
@@ -33,7 +45,7 @@ export class CreatePanel {
 
   private reference: Reference | null = null;
   private bitmap: Bitmap | null = null;
-  private mode: Mode = 'silhouette';
+  private mode: Mode = 'photo';
   private targetId: number | null = null;
   /** The name this panel gave the target, so a user rename is never clobbered. */
   private assignedName = '';
@@ -53,6 +65,22 @@ export class CreatePanel {
   private relief: Required<Pick<HeightfieldOptions, 'resolution' | 'size' | 'height' | 'invert' | 'solid' | 'smooth'>> = {
     resolution: 128, size: 2, height: 0.35, invert: false, solid: false, smooth: true,
   };
+  private photo: Required<Pick<PhotoOptions, 'resolution' | 'targetHeight' | 'depthScale' | 'back'>>
+    & Required<Pick<DepthOptions, 'volume' | 'detail'>> & { texture: boolean } = {
+      resolution: 160, targetHeight: 2, depthScale: 1, back: 0.8, volume: 1, detail: 0.35, texture: true,
+    };
+  /**
+   * Finding the subject and solving its thickness cost a few hundred
+   * milliseconds and depend on neither the grid resolution nor the target
+   * height. Cached against the settings that do change them, so dragging a
+   * slider rebuilds the mesh and nothing else.
+   */
+  private matte: { key: string; value: Matte } | null = null;
+  private depthField: { key: string; value: DepthField } | null = null;
+  /** The texture id already made for this reference, so retries do not pile up copies. */
+  private photoTexture: { key: string; id: number } | null = null;
+  /** Fraction of the frame the last photo build found as subject. */
+  private lastCoverage = 0;
 
   private endpoint = storedEndpoint();
   private backend: BackendInfo | null = null;
@@ -114,6 +142,8 @@ export class CreatePanel {
   private sampleFrame(): void {
     if (!this.reference) return;
     this.bitmap = bitmapFromReference(this.reference, this.mode === 'relief' ? 512 : 384);
+    this.matte = null;
+    this.depthField = null;
   }
 
   // ------------------------------------------------------------------- build
@@ -247,7 +277,7 @@ export class CreatePanel {
       section.appendChild(checkbox(label, value, (v) => { set(v); this.generate(true); }));
     };
 
-    if (this.mode !== 'relief') {
+    if (this.mode !== 'relief' && this.mode !== 'photo') {
       section.appendChild(row('Detect', select(
         [
           { value: 'luma', label: 'Brightness' },
@@ -263,7 +293,15 @@ export class CreatePanel {
       toggle('Subject is darker', this.mask.invert, (v) => { this.mask.invert = v; });
     }
 
-    if (this.mode === 'silhouette') {
+    if (this.mode === 'photo') {
+      num('Detail', this.photo.resolution, 8, (v) => { this.photo.resolution = Math.round(v); }, { min: 24, max: 400, precision: 0 });
+      num('Height', this.photo.targetHeight, 0.05, (v) => { this.photo.targetHeight = v; }, { min: 0.01 });
+      num('Roundness', this.photo.volume, 0.05, (v) => { this.photo.volume = v; }, { min: 0, max: 2 });
+      num('Surface relief', this.photo.detail, 0.05, (v) => { this.photo.detail = v; }, { min: 0, max: 1 });
+      num('Thickness', this.photo.depthScale, 0.05, (v) => { this.photo.depthScale = v; }, { min: 0.02, max: 4 });
+      num('Back fullness', this.photo.back, 0.05, (v) => { this.photo.back = v; }, { min: 0, max: 1 });
+      toggle('Project the photo on as a texture', this.photo.texture, (v) => { this.photo.texture = v; });
+    } else if (this.mode === 'silhouette') {
       num('Depth', this.silhouette.depth, 0.02, (v) => { this.silhouette.depth = v; }, { min: 0.001 });
       num('Height', this.silhouette.targetHeight, 0.05, (v) => { this.silhouette.targetHeight = v; }, { min: 0.01 });
       num('Smoothing', this.silhouette.simplify, 0.1, (v) => { this.silhouette.simplify = v; }, { min: 0, max: 12 });
@@ -460,12 +498,14 @@ export class CreatePanel {
           this.assignedName = object.name;
         }
       }
+      if (this.mode === 'photo') this.applyPhotoTexture(object);
       this.editor.markGeometryDirty(object);
       if (refit) this.editor.frameSelected();
 
       const { stats } = result;
       this.statsLine.textContent =
         `${stats.verts.toLocaleString()} verts · ${stats.faces.toLocaleString()} faces · ${stats.ms} ms`;
+      if (this.mode === 'photo') this.reportSubject();
       this.editor.setStatus(`${object.name}: ${stats.faces.toLocaleString()} faces from ${this.reference?.name ?? 'reference'}`);
       this.drawPreview();
     } finally {
@@ -493,11 +533,13 @@ export class CreatePanel {
   }
 
   private nameForMode(): string {
+    if (this.mode === 'photo') return 'Photo';
     return this.mode === 'silhouette' ? 'Cutout' : this.mode === 'lathe' ? 'Turned' : 'Relief';
   }
 
   private buildMesh(): ReturnType<typeof meshFromSilhouette> {
     const bitmap = this.bitmap!;
+    if (this.mode === 'photo') return this.buildPhoto(bitmap);
     if (this.mode === 'silhouette') {
       return meshFromSilhouette(bitmap, { ...this.silhouette, mask: { ...this.mask } });
     }
@@ -511,6 +553,109 @@ export class CreatePanel {
     return meshFromHeightfield(bitmap, { ...this.relief });
   }
 
+  /**
+   * The photograph route, with the slow half cached.
+   *
+   * Segmentation and the depth solve are keyed on the settings that actually
+   * change them. Without that, nudging the target height would re-run a
+   * GrabCut and a Poisson solve — half a second of work to move some vertices
+   * that were already in the right place relative to each other.
+   */
+  private buildPhoto(bitmap: Bitmap): PhotoResult {
+    const matteKey = `${bitmap.width}x${bitmap.height}:${this.frameTime}`;
+    if (this.matte?.key !== matteKey) {
+      this.matte = { key: matteKey, value: segmentSubject(bitmap) };
+      this.depthField = null;
+    }
+    const matte = this.matte.value;
+
+    const depthKey = `${matteKey}|${this.photo.volume}|${this.photo.detail}`;
+    if (this.depthField?.key !== depthKey) {
+      this.depthField = {
+        key: depthKey,
+        value: depthFromPhoto(bitmap, matte, { volume: this.photo.volume, detail: this.photo.detail }),
+      };
+    }
+
+    const result = meshFromPhoto(bitmap, {
+      resolution: this.photo.resolution,
+      targetHeight: this.photo.targetHeight,
+      depthScale: this.photo.depthScale,
+      back: this.photo.back,
+      matte,
+      field: this.depthField.value,
+    });
+    this.noteCoverage(result);
+    return result;
+  }
+
+  /** Remember what the last photo build found, for the line under the settings. */
+  private noteCoverage(result: PhotoResult): void {
+    this.lastCoverage = result.coverage;
+  }
+
+  /**
+   * Say what was found, and say when it was not found.
+   *
+   * A subject that covers the whole frame, or none of it, means the colour
+   * models could not tell the thing from the room behind it — and the model
+   * that comes out is then a rectangle or nothing. Announcing that beats
+   * letting someone conclude the feature is broken and close the panel.
+   */
+  private reportSubject(): void {
+    const matte = this.matte?.value;
+    if (!matte) return;
+    const percent = Math.round(this.lastCoverage * 100);
+    if (matte.separation < MIN_SEPARATION) {
+      this.statsLine.textContent +=
+        ' — the subject and the background are the same colours here, so the whole frame was used. '
+        + 'Crop to the subject, or shoot it against something that contrasts.';
+    } else if (percent < 3) {
+      this.statsLine.textContent += ' — almost nothing was found; try a photo where the subject is nearer the middle.';
+    } else {
+      this.statsLine.textContent += ` — subject fills ${percent}% of the frame`;
+    }
+  }
+
+  /**
+   * Put the photograph on the model.
+   *
+   * This is not decoration. An inflated silhouette with no texture is a grey
+   * lump in roughly the right outline, and it is the step everyone skips —
+   * the difference between "that is my shoe" and "that is a shoe-shaped
+   * thing" is almost entirely the picture being on it.
+   */
+  private applyPhotoTexture(object: SceneObject): void {
+    const ref = this.reference;
+    if (!ref) return;
+    const scene = this.editor.scene;
+    if (!this.photo.texture) {
+      object.materialSlots = [scene.ensureDefaultMaterial()];
+      return;
+    }
+    const key = `${ref.name}:${this.frameTime}`;
+    if (this.photoTexture?.key !== key) {
+      try {
+        const { url, width, height } = textureFromReference(ref);
+        const texture = createTexture(ref.name.replace(/\.[^.]+$/, ''), url, width, height);
+        scene.textures.push(texture);
+        this.photoTexture = { key, id: texture.id };
+      } catch (err) {
+        this.editor.setStatus(`The model was built, but the photo could not be used as a texture: ${(err as Error).message}`);
+        return;
+      }
+    }
+    const slot = scene.addMaterial(createMaterial({
+      name: `${object.name} surface`,
+      baseColorTexture: this.photoTexture.id,
+      // A photograph already contains its own highlights; a shiny material on
+      // top of one reads as plastic wrap.
+      roughness: 0.85,
+      metallic: 0,
+    }));
+    object.materialSlots = [slot];
+  }
+
   /** Frame plus the traced outline, so the threshold is something you can see. */
   private drawPreview(): void {
     const ref = this.reference;
@@ -522,6 +667,29 @@ export class CreatePanel {
     const placement = drawReferenceInto(this.preview, ref);
     const ctx = this.preview.getContext('2d');
     if (!ctx || !placement || !this.bitmap || this.mode === 'relief') return;
+
+    if (this.mode === 'photo') {
+      // The matte over the frame, so the thing being modelled is visible
+      // before the model exists. Photo mode does not use a threshold, so
+      // there is nothing to nudge — but there is plenty to check.
+      const matte = this.matte?.value;
+      if (!matte) return;
+      const overlay = document.createElement('canvas');
+      overlay.width = matte.width;
+      overlay.height = matte.height;
+      const octx = overlay.getContext('2d');
+      if (!octx) return;
+      const image = octx.createImageData(matte.width, matte.height);
+      for (let i = 0; i < matte.data.length; i++) {
+        image.data[i * 4] = 255;
+        image.data[i * 4 + 1] = 158;
+        image.data[i * 4 + 2] = 44;
+        image.data[i * 4 + 3] = Math.round((1 - Math.min(1, matte.data[i])) * 150);
+      }
+      octx.putImageData(image, 0, 0);
+      ctx.drawImage(overlay, placement.x, placement.y, placement.width, placement.height);
+      return;
+    }
 
     const mask = denoiseMask(maskFromBitmap(this.bitmap, this.mask), this.silhouette.denoise);
     const parts = splitComponents(mask, 32).slice(0, this.mode === 'lathe' ? 1 : this.silhouette.maxParts);

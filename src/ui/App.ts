@@ -37,7 +37,13 @@ export class App {
   private dropVeil = h('div', { class: 'drop-veil' }, [
     h('p', { text: 'Drop to build geometry from it' }),
   ]);
-  private properties!: Properties;
+  /**
+   * The right-hand panel, reachable from the scripting handle.
+   *
+   * Public so the end-to-end tests can hand it a file the way a drop does,
+   * rather than reaching in through the DOM and clicking hidden inputs.
+   */
+  properties!: Properties;
   private palette!: CommandPalette;
   private buildBar!: BuildBar;
   private renderWindow!: RenderWindow;
@@ -74,6 +80,7 @@ export class App {
       toggleDiff: () => this.diffPanel.toggle(),
       toggleGuide: () => this.setupGuide.toggle(),
       focusBuild: (prefill) => this.buildBar.focus(prefill),
+      openCreate: () => this.properties.openCreate(),
     };
     const sculptPanel = new SculptPanel(this.editor);
     const timeline = new Timeline(this.editor);

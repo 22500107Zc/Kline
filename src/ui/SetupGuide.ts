@@ -96,6 +96,20 @@ const CARDS: Card[] = [
     },
   },
   {
+    title: 'Turn a photo into a model',
+    body: 'Drag a photograph onto the window. Kline finds the subject by colour, inflates it '
+      + 'to its own thickness — wide parts deep, thin parts thin — and projects the photo back '
+      + 'on as a texture. What comes out is a closed, editable mesh, not a cut-out. It cannot '
+      + 'see the back of the object, so the far side is the near side, shallower.',
+    action: {
+      label: 'Where do I drop it?',
+      run: (editor) => {
+        editor.panels.openCreate?.();
+        editor.setStatus('Drop an image anywhere on the window, or use the Create tab on the right');
+      },
+    },
+  },
+  {
     title: 'Ask for what you want',
     body: 'The Build box at the top takes plain language — "a spiral staircase with 20 steps", '
       + '"12 cubes in a circle". It answers from built-in recipes with no model and no network. '

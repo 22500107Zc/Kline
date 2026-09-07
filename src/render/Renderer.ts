@@ -937,6 +937,11 @@ export class Renderer {
     p.setInt('uShadowLight', this.shadowLightIndex);
     p.setFloat('uShadowStrength', this.shadowLightIndex >= 0 && this.shadowMap ? 0.85 : 0);
     p.setFloat('uShadowTexel', 1 / SHADOW_SIZE);
+    // Put the active unit back. Everything else in this file that touches a
+    // texture — the array upload, the mipmap rebuild, the paint preview —
+    // binds without naming a unit, and those run from image callbacks between
+    // frames, long after this left the context pointing somewhere else.
+    gl.activeTexture(gl.TEXTURE0);
   }
 
   /**
@@ -962,6 +967,7 @@ export class Renderer {
     const layer = this.textureLayers.get(textureId);
     if (layer === undefined) return;
     const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.textureArray);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.texSubImage3D(
