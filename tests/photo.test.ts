@@ -321,6 +321,79 @@ test('a small subject in a big frame is not modelled coarsely for it', () => {
   assert.ok(Math.abs((hb.max.x - hb.min.x) - (ha.max.x - ha.min.x)) < 0.1, 'the two crops gave different widths');
 });
 
+test('every texture coordinate sits well inside the outline', () => {
+  // The joining wall and the outermost ring of the surface have their corners
+  // on the outline. Reading the texture there wrapped every model in a fringe
+  // of whatever it was photographed on — brown streaks around a vase that
+  // stood on a table.
+  //
+  // Landing *just* inside the mask is not enough, which is why this measures
+  // distance rather than which side of the line it fell on. The wall quads are
+  // a thin lip seen edge-on, so their coordinates change fast across very few
+  // pixels; the renderer answers that by sampling a coarse mip level, which
+  // averages a wide neighbourhood. A coordinate one pixel inside the outline
+  // still comes back mostly background at that level. It has to be clear of
+  // the edge by a margin, and the margin is what is checked.
+  const size = 160;
+  const bitmap = paint(frame(size, size, [175, 120, 55]), disc(80, 80, 46), [40, 90, 210]);
+  const { mesh, matte } = meshFromPhoto(bitmap, { resolution: 70 });
+  assert.ok(mesh.faceCount > 0);
+
+  // How far each subject pixel is from the nearest background pixel, by
+  // breadth-first search out from the background.
+  const dist = new Float32Array(size * size).fill(Infinity);
+  const queue: number[] = [];
+  for (let i = 0; i < dist.length; i++) {
+    if (matte.data[i] < 0.5) { dist[i] = 0; queue.push(i); }
+  }
+  for (let head = 0; head < queue.length; head++) {
+    const i = queue[head];
+    const x = i % size;
+    const y = (i - x) / size;
+    for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+      const j = ny * size + nx;
+      if (dist[j] !== Infinity) continue;
+      dist[j] = dist[i] + 1;
+      queue.push(j);
+    }
+  }
+
+  const at = (u: number, v: number): number => {
+    const x = Math.max(0, Math.min(size - 1, Math.round(u * (size - 1))));
+    const y = Math.max(0, Math.min(size - 1, Math.round((1 - v) * (size - 1))));
+    return dist[y * size + x];
+  };
+
+  // The wall that joins the two surfaces is the part that wore the floor: it
+  // is a thin lip seen edge-on. Its faces are the ones spanning both surfaces,
+  // so they have corners on each side of the model's mid-plane; the front and
+  // back surfaces themselves sit wholly on one side.
+  let closestOnWall = Infinity;
+  let walls = 0;
+  let everything = Infinity;
+  for (let f = 0; f < mesh.faces.length; f++) {
+    const uv = mesh.uvFor(f);
+    if (!uv) continue;
+    for (let i = 0; i < uv.length; i += 2) everything = Math.min(everything, at(uv[i], uv[i + 1]));
+    const ys = mesh.faces[f].map((v) => mesh.positions[v].y);
+    if (!(ys.some((y) => y < 0) && ys.some((y) => y > 0))) continue;
+    walls++;
+    for (let i = 0; i < uv.length; i += 2) closestOnWall = Math.min(closestOnWall, at(uv[i], uv[i + 1]));
+  }
+
+  assert.ok(walls > 0, 'the model has no joining wall to check');
+  assert.ok(Number.isFinite(everything), 'the mesh has no texture coordinates to check');
+  // Without the inset every one of these coordinates sits on the outline, and
+  // the assertion reports 0 or 1.
+  assert.ok(
+    closestOnWall >= 2,
+    `the joining wall reads ${closestOnWall} pixel(s) from the background — that edge will wear the floor`,
+  );
+});
+
 test('the model has real depth, and the back can be flattened', () => {
   const bitmap = paint(frame(96, 96, [30, 30, 30]), disc(48, 48, 34), [210, 210, 210]);
   const round = meshFromPhoto(bitmap, { resolution: 70, back: 1 });

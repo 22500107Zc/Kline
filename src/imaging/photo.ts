@@ -77,6 +77,112 @@ function samplePlane(plane: Float32Array, width: number, height: number, px: num
   return a * (1 - fy) + b * fy;
 }
 
+/**
+ * How far inside the outline the silhouette reads its colour, in grid cells.
+ *
+ * Grid nodes on the outline sit exactly where the photograph stops being the
+ * subject and starts being whatever it was standing on, so reading the texture
+ * where they sit wraps the model in a fringe of that: brown streaks down every
+ * edge of a vase photographed on a table. Reading from a little further in
+ * costs a sliver of accuracy along the silhouette and removes the fringe.
+ */
+const OUTLINE_INSET_CELLS = 1.5;
+
+/**
+ * The least the inset is ever allowed to be, in source pixels.
+ *
+ * A coarse grid over a small subject makes a cell smaller than a pixel, and an
+ * inset measured in cells then rounds to nothing. One pixel in is not a margin
+ * either — these wall faces are a lip seen edge-on, so their coordinates
+ * change fast over very few pixels and the renderer answers that by sampling a
+ * coarse mip level, which averages a wide neighbourhood. Two pixels is the
+ * floor.
+ */
+const MIN_INSET_PX = 2;
+
+/**
+ * For every pixel of the matte, the pixel it should read its colour from.
+ *
+ * Pixels at least `radius` inside the subject read themselves. Everything else
+ * — the boundary, and the background — is sent to the nearest pixel that is
+ * that far in. Two breadth-first passes: the first measures how deep each
+ * pixel is, the second carries the deep pixels' own indices outward.
+ *
+ * Both walk the eight neighbours, so what the first pass measures is the
+ * larger of the two axis distances. That is never more than the straight-line
+ * distance, so a pixel this calls `radius` deep really is at least that far
+ * from the background — the error is on the side of insetting further, which
+ * is the harmless side.
+ *
+ * Null when the subject is nowhere `radius` thick, which leaves the caller to
+ * read where it sits; there is no better answer for a subject two pixels wide.
+ */
+function insetLookup(matte: Matte, radius: number): Int32Array | null {
+  const { width, height, data } = matte;
+  const n = width * height;
+  if (n === 0) return null;
+  const depth = new Int32Array(n).fill(-1);
+  const queue = new Int32Array(n);
+  let head = 0;
+  let tail = 0;
+  for (let i = 0; i < n; i++) {
+    if (data[i] < 0.5) {
+      depth[i] = 0;
+      queue[tail++] = i;
+    }
+  }
+  // An all-subject frame has no background to measure from, so everything in
+  // it is as deep as it needs to be and reads where it sits.
+  if (tail === 0) return null;
+  while (head < tail) {
+    const i = queue[head++];
+    const x = i % width;
+    const y = (i - x) / width;
+    const d = depth[i] + 1;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const ax = x + dx;
+        const ay = y + dy;
+        if (ax < 0 || ay < 0 || ax >= width || ay >= height) continue;
+        const j = ay * width + ax;
+        if (depth[j] !== -1) continue;
+        depth[j] = d;
+        queue[tail++] = j;
+      }
+    }
+  }
+
+  const source = new Int32Array(n).fill(-1);
+  head = 0;
+  tail = 0;
+  for (let i = 0; i < n; i++) {
+    if (depth[i] >= radius) {
+      source[i] = i;
+      queue[tail++] = i;
+    }
+  }
+  if (tail === 0) return null;
+  while (head < tail) {
+    const i = queue[head++];
+    const x = i % width;
+    const y = (i - x) / width;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const ax = x + dx;
+        const ay = y + dy;
+        if (ax < 0 || ay < 0 || ax >= width || ay >= height) continue;
+        const j = ay * width + ax;
+        if (source[j] !== -1) continue;
+        source[j] = source[i];
+        queue[tail++] = j;
+      }
+    }
+  }
+  return source;
+}
+
 export function meshFromPhoto(bitmap: Bitmap, options: PhotoOptions = {}): PhotoResult {
   const started = Date.now();
   const resolution = Math.max(24, Math.min(400, Math.floor(options.resolution ?? 160)));
@@ -183,13 +289,61 @@ export function meshFromPhoto(bitmap: Bitmap, options: PhotoOptions = {}): Photo
   // the image while the grid runs down from its top.
   // Coordinates address the whole photograph, because the whole photograph is
   // what gets stored as the texture — the grid is cropped, the image is not.
+  const uvPixel = (px: number, py: number): [number, number] => [
+    px / Math.max(1, bitmap.width - 1),
+    1 - py / Math.max(1, bitmap.height - 1),
+  ];
   const uvAt = (gx: number, gy: number): [number, number] => {
     const { px, py } = imageAt(gx, gy);
-    return [
-      px / Math.max(1, bitmap.width - 1),
-      1 - py / Math.max(1, bitmap.height - 1),
-    ];
+    return uvPixel(px, py);
   };
+
+  // Which nodes are on the silhouette: a node with a solid cell on all four
+  // sides is in the middle of the subject, anything else is on its edge.
+  const onOutline = new Uint8Array(nodes);
+  for (let gy = 0; gy < ny; gy++) {
+    for (let gx = 0; gx < nx; gx++) {
+      const g = gy * nx + gx;
+      if (!used[g]) continue;
+      let solid = 0;
+      let touching = 0;
+      for (const [dx, dy] of [[-1, -1], [0, -1], [-1, 0], [0, 0]] as const) {
+        const cx = gx + dx;
+        const cy = gy + dy;
+        if (cx < 0 || cy < 0 || cx + 1 >= nx || cy + 1 >= ny) continue;
+        touching++;
+        if (cells[cy * (nx - 1) + cx]) solid++;
+      }
+      onOutline[g] = touching === 4 && solid === 4 ? 0 : 1;
+    }
+  }
+
+  const cellPx = cropW / Math.max(1, nx - 1);
+  const insetRadius = Math.max(MIN_INSET_PX, Math.round(cellPx * OUTLINE_INSET_CELLS));
+  const insetSource = insetLookup(matte, insetRadius);
+
+  /** A coordinate for a node on the silhouette, pulled onto the subject. */
+  const uvInside = (gx: number, gy: number): [number, number] => {
+    if (!insetSource) return uvAt(gx, gy);
+    const { px, py } = imageAt(gx, gy);
+    const x = Math.max(0, Math.min(matte.width - 1, Math.round(px)));
+    const y = Math.max(0, Math.min(matte.height - 1, Math.round(py)));
+    const s = insetSource[y * matte.width + x];
+    if (s < 0) return uvAt(gx, gy);
+    const sx = s % matte.width;
+    return uvPixel(sx, (s - sx) / matte.width);
+  };
+
+  /**
+   * The coordinate for one corner of a face.
+   *
+   * Corners in the middle of the subject read exactly where they sit, so the
+   * photograph lands on the model undistorted. Only the ring on the silhouette
+   * is moved, and only far enough to be on the subject.
+   */
+  const uvForCorner = (gx: number, gy: number): [number, number] => (
+    onOutline[gy * nx + gx] ? uvInside(gx, gy) : uvAt(gx, gy)
+  );
   const addFace = (corners: number[], coords: [number, number][]): void => {
     mesh.faces.push(corners);
     mesh.faceMaterial.push(0);
@@ -205,14 +359,12 @@ export function meshFromPhoto(bitmap: Bitmap, options: PhotoOptions = {}): Photo
       const d = a + nx;
       // Wound so the front faces -Y, which is where the front view looks
       // from; the back is the same quad the other way round.
-      addFace(
-        [frontIdx[d], frontIdx[c], frontIdx[b], frontIdx[a]],
-        [uvAt(cx, cy + 1), uvAt(cx + 1, cy + 1), uvAt(cx + 1, cy), uvAt(cx, cy)],
-      );
-      addFace(
-        [backIdx[a], backIdx[b], backIdx[c], backIdx[d]],
-        [uvAt(cx, cy), uvAt(cx + 1, cy), uvAt(cx + 1, cy + 1), uvAt(cx, cy + 1)],
-      );
+      const ua = uvForCorner(cx, cy);
+      const ub = uvForCorner(cx + 1, cy);
+      const uc = uvForCorner(cx + 1, cy + 1);
+      const ud = uvForCorner(cx, cy + 1);
+      addFace([frontIdx[d], frontIdx[c], frontIdx[b], frontIdx[a]], [ud, uc, ub, ua]);
+      addFace([backIdx[a], backIdx[b], backIdx[c], backIdx[d]], [ua, ub, uc, ud]);
     }
   }
 
@@ -236,8 +388,12 @@ export function meshFromPhoto(bitmap: Bitmap, options: PhotoOptions = {}): Photo
     const corners = facingOut
       ? [frontIdx[p], frontIdx[q], backIdx[q], backIdx[p]]
       : [frontIdx[q], frontIdx[p], backIdx[p], backIdx[q]];
-    const up = uvAt(p % nx, Math.floor(p / nx));
-    const uq = uvAt(q % nx, Math.floor(q / nx));
+    // Read from inside the subject, never from the silhouette itself. These
+    // nodes sit exactly where the photograph has already become the floor, and
+    // the wall is a thin lip seen edge-on, so reading where they sit put a
+    // stretched smear of floor colour down every edge of every model.
+    const up = uvInside(p % nx, Math.floor(p / nx));
+    const uq = uvInside(q % nx, Math.floor(q / nx));
     addFace(corners, facingOut ? [up, uq, uq, up] : [uq, up, up, uq]);
   }
 
