@@ -89,6 +89,8 @@ export class CreatePanel {
    * unused.
    */
   private photoMaterial: { objectId: number; slot: number } | null = null;
+  /** Whether the viewport has already been switched over to show a photograph. */
+  private revealedTexture = false;
   /** Fraction of the frame the last photo build found as subject. */
   private lastCoverage = 0;
   /** Pending debounced photo rebuild, if a slider is mid-drag. */
@@ -718,11 +720,34 @@ export class CreatePanel {
     if (existing && existing.objectId === object.id && scene.materials[existing.slot]) {
       Object.assign(scene.materials[existing.slot], settings);
       object.materialSlots = [existing.slot];
+      this.showTexture();
       return;
     }
     const slot = scene.addMaterial(createMaterial(settings));
     this.photoMaterial = { objectId: object.id, slot };
     object.materialSlots = [slot];
+    this.showTexture();
+  }
+
+  /**
+   * Put the viewport where the photograph can be seen.
+   *
+   * Solid shading is the right default for modelling — it reads shape without
+   * a material in the way — but it is the wrong thing to be looking at one
+   * second after dropping a photograph on the window. The whole promise is
+   * that the picture comes out on the model, and in solid shading it does
+   * not: the first thing anyone saw after using the headline feature was a
+   * grey blob, with nothing on screen to say the photograph had arrived at
+   * all.
+   *
+   * Once, on the first photo model of the session. Anybody who then goes back
+   * to solid shading meant it, and is left alone.
+   */
+  private showTexture(): void {
+    if (this.revealedTexture) return;
+    this.revealedTexture = true;
+    if (this.editor.options.shading !== 'solid') return;
+    this.editor.setShading('material');
   }
 
   /** Frame plus the traced outline, so the threshold is something you can see. */

@@ -136,7 +136,9 @@ export class Renderer {
       antialias: true,
       alpha: false,
       depth: true,
-      stencil: false,
+      // The selection outline masks the object's own pixels out of its hull,
+      // and a stencil buffer is what that mask is.
+      stencil: true,
       preserveDrawingBuffer: false,
       powerPreference: 'high-performance',
     });
@@ -316,7 +318,7 @@ export class Renderer {
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(true);
     gl.disable(gl.BLEND);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
 
     this.syncDiff(state.diff ?? null);
 
@@ -491,24 +493,64 @@ export class Renderer {
     p.setMat4('uViewProj', viewProj.m);
     p.setVec3('uCamPos', eye.x, eye.y, eye.z);
     gl.enable(gl.CULL_FACE);
-    gl.cullFace(gl.FRONT);
+    gl.enable(gl.STENCIL_TEST);
     for (const d of selected) {
       const entry = this.cache.get(d.obj.id);
       if (!entry || entry.surface.count === 0) continue;
       const active = scene.active === d.obj.id;
       p.setMat4('uModel', d.model.m);
       p.setMat4('uNormalMat', d.model.normalMatrix().m);
-      p.setFloat('uWidth', 0.0035);
       p.setVec3('uColor', ...(active ? THEME.outlineActive : THEME.outlineSelected));
       gl.bindBuffer(gl.ARRAY_BUFFER, entry.surface.buffer);
       setupAttribs(gl, p, SURFACE_LAYOUT);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, entry.surfaceIndex.buffer);
+
+      // Mark where this object is already on screen, then draw the hull
+      // everywhere except there.
+      //
+      // The outline is the usual inverted hull: the mesh again, pushed out
+      // along its normals, back faces only, so what is left over is a rim.
+      // Where the surface turns edge-on to the camera that push is almost
+      // entirely sideways, and on a dense organic mesh — a model built from a
+      // photograph has tens of thousands of faces and a thin lip all round it
+      // — the pushed-out far side comes through the near side as a hatch of
+      // orange slivers across the model. It reads as the model being broken
+      // rather than as it being selected, and no amount of depth offset fixes
+      // it, because the hull really is in front there.
+      //
+      // A rim is by definition the part that is not the object, so the object
+      // says where it is and the hull is refused those pixels outright.
+      gl.clearStencil(0);
+      gl.clear(gl.STENCIL_BUFFER_BIT);
+
+      // Pass one: the mesh as it stands, into the stencil only. Depth stays
+      // as it is, so this marks exactly the pixels where the object is the
+      // thing being looked at — anywhere it is hidden behind something else
+      // is left unmarked, and keeps the outline it had.
+      gl.colorMask(false, false, false, false);
+      gl.depthMask(false);
+      gl.cullFace(gl.BACK);
+      gl.stencilFunc(gl.ALWAYS, 1, 0xff);
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+      p.setFloat('uWidth', 0);
       gl.drawElements(gl.TRIANGLES, entry.surfaceIndex.count, gl.UNSIGNED_INT, 0);
-      this.lastDrawCalls++;
+
+      // Pass two: the hull, kept out of everything pass one marked.
+      gl.colorMask(true, true, true, true);
+      gl.depthMask(true);
+      gl.cullFace(gl.FRONT);
+      gl.stencilFunc(gl.NOTEQUAL, 1, 0xff);
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+      p.setFloat('uWidth', 0.0035);
+      gl.drawElements(gl.TRIANGLES, entry.surfaceIndex.count, gl.UNSIGNED_INT, 0);
+      this.lastDrawCalls += 2;
     }
+    gl.stencilFunc(gl.ALWAYS, 0, 0xff);
+    gl.disable(gl.STENCIL_TEST);
     gl.cullFace(gl.BACK);
     gl.disable(gl.CULL_FACE);
   }
+
 
   private drawGrid(camera: ViewportCamera, viewProj: Mat4): void {
     const gl = this.gl;

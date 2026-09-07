@@ -1173,6 +1173,108 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     );
   });
 
+  test('selecting the model does not paint over the photograph', async () => {
+    // Selecting an object tints it, and the tint used to be mixed into linear
+    // radiance using an interface colour written for the screen. In linear
+    // terms that colour is far brighter than a lit surface, so a tint of a
+    // tenth put in most of the pixel: a model wearing a photograph turned
+    // into a flat orange wash the moment it was selected — which is the
+    // moment it is created, so the headline feature showed its result and hid
+    // it in the same frame. Nobody noticed for weeks because the test above
+    // deselects before it looks.
+    //
+    // The same sample, taken with the model selected. It still has to be the
+    // blue of the photograph.
+    await page.evaluate(() => {
+      const ed = window.kline.editor;
+      // At the flat white ambient the test above uses, the surface is bright
+      // enough to survive even a tint that is wrong, so the bug hides. This
+      // is a brightness a lit scene actually produces.
+      ed.scene.world.ambient = 0.3;
+      const model = [...ed.scene.objects.values()].find((o) => o.type === 'mesh');
+      ed.selectObject(model.id);
+      ed.requestRender();
+    });
+    await page.waitForTimeout(400);
+    const [middle, left] = await samplePixels(page, [[0.5, 0.5], [0.44, 0.52]]);
+    for (const [name, px] of [['middle', middle], ['left', left]]) {
+      assert.ok(
+        px[2] > px[0] * 1.3,
+        `selected, the ${name} of the model rendered ${JSON.stringify(px)} — the photograph is under a wash`,
+      );
+    }
+  });
+
+  test('the selection outline stays outside the model it outlines', async () => {
+    // The outline is an inverted hull: the mesh again, pushed out along its
+    // normals, back faces only, so what is left over is a rim. On a dense
+    // organic mesh with a thin lip round it — which is exactly what a
+    // photograph produces — the pushed-out far side comes through the near
+    // side, and the model wears a hatch of orange slivers that reads as
+    // broken geometry rather than as selection.
+    //
+    // Where the model is on screen is read out of the picture rather than
+    // guessed at, because the slivers do not appear in the middle: they
+    // gather where the surface turns edge-on, which is off to the side and
+    // moves with the framing.
+    const hits = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      // Lit flat and bright, so "is this pixel the model" is not a judgement
+      // call. Whether the hull comes through does not depend on the lighting
+      // — the outline is drawn over the top of it — and the orange it is
+      // drawn in is nothing a blue subject on a brown floor produces.
+      ed.scene.world.ambient = 1;
+      const model = [...ed.scene.objects.values()].find((o) => o.type === 'mesh');
+      ed.selectObject(model.id);
+
+      // Drawn and read in the same task: a WebGL drawing buffer is discarded
+      // the moment the browser composites, so anything later sees an empty
+      // canvas — which reads as "no model on screen" rather than as a failure
+      // to look.
+      const gl = ed.renderer.gl;
+      ed.renderNow();
+      const w = gl.drawingBufferWidth;
+      const h = gl.drawingBufferHeight;
+      const px = new Uint8Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+
+      const luma = (i) => 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+      // The viewport behind the model is nearly black with a dim grid.
+      const model_ = new Uint8Array(w * h);
+      for (let i = 0, j = 0; i < px.length; i += 4, j++) model_[j] = luma(i) > 60 ? 1 : 0;
+
+      // Well inside the silhouette: the rim is a few pixels wide, so a pixel
+      // with model this far away on all four sides is not on the rim.
+      const R = 10;
+      const interior = (x, y) => (
+        x >= R && y >= R && x + R < w && y + R < h
+        && model_[y * w + x] && model_[y * w + x - R] && model_[y * w + x + R]
+        && model_[(y - R) * w + x] && model_[(y + R) * w + x]
+      );
+
+      let orange = 0;
+      let inside = 0;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (!interior(x, y)) continue;
+          inside++;
+          const i = (y * w + x) * 4;
+          // The outline colour is a strong orange: red well ahead of green,
+          // green well ahead of blue. Nothing in a photograph of a blue
+          // subject on a brown floor reaches it.
+          if (px[i] > 170 && px[i] > px[i + 1] * 1.35 && px[i + 1] > px[i + 2] * 1.6) orange++;
+        }
+      }
+      return { orange, inside };
+    });
+
+    assert.ok(hits.inside > 5000, `only ${hits.inside} pixels of model to look at`);
+    assert.ok(
+      hits.orange <= hits.inside * 0.002,
+      `${hits.orange} of ${hits.inside} pixels inside the model are outline coloured — the hull is coming through`,
+    );
+  });
+
   test('rebuilding a photo does not pile up materials and textures', async () => {
     // The object is rebuilt on every settings change, and the texture is
     // applied on every rebuild. Making a fresh material each time meant one

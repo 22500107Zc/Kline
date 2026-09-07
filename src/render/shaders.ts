@@ -296,15 +296,28 @@ void main() {
     color += uMatEmit[mi].rgb * uMatEmit[mi].w;
   }
 
-  color = mix(color, uSelectColor, vFlags * 0.32);
+  // Every tint below is laid on the finished picture rather than mixed into
+  // the light, and that is the whole of the difference.
+  //
+  // These used to be mixed into linear radiance. The tints are interface
+  // colours — they are written the way they are meant to look on screen, and
+  // in linear terms a value like 1.0, 0.62, 0.16 is far brighter than a lit
+  // surface, which sits nearer a tenth of that. So a mix of "10%" put in most
+  // of the pixel, and a photograph projected onto a model vanished under a
+  // flat orange wash the instant the model was selected — which is the
+  // instant it is created, so the headline feature showed its result and hid
+  // it in the same frame. In display space the numbers mean what they say: a
+  // tenth is a hint of warmth, and the picture underneath survives it.
+  vec3 shown = encodeSRGB(acesTonemap(color));
+  shown = mix(shown, uSelectColor, vFlags * 0.32);
   // Comparison tint, laid over the shaded surface rather than replacing it,
   // so the form stays readable while the change is unmissable.
   if (uDiffMode > 0.5) {
-    if (vDiff > 1.5) color = mix(color, uDiffAdded, 0.72);
-    else if (vDiff > 0.5) color = mix(color, uDiffMoved, 0.6);
+    if (vDiff > 1.5) shown = mix(shown, uDiffAdded, 0.72);
+    else if (vDiff > 0.5) shown = mix(shown, uDiffMoved, 0.6);
   }
-  color = mix(color, uSelectColor * 0.85, uObjectSelected * 0.10);
-  fragColor = vec4(encodeSRGB(acesTonemap(color)), uMatAlpha[mi] * uOpacity);
+  shown = mix(shown, uSelectColor * 0.85, uObjectSelected * 0.10);
+  fragColor = vec4(shown, uMatAlpha[mi] * uOpacity);
 }
 `;
 
