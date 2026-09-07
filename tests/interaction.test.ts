@@ -7,6 +7,8 @@ import { defaultSnap, snapToGrid } from '../src/editor/snapping';
 import { COMMANDS, COMMANDS_BY_ID, KEYMAP, lookupKey } from '../src/editor/commands';
 import { defaultPreferences } from '../src/editor/persistence';
 import { Vec3 } from '../src/core/math';
+import { ViewportCamera } from '../src/scene/ViewportCamera';
+import { navModeForPress, pressGesture, wheelGesture, wheelPixels } from '../src/editor/navigation';
 
 test('every falloff runs from 1 to 0 and stays in range', () => {
   const types = ['smooth', 'sphere', 'root', 'inverseSquare', 'sharp', 'linear'] as const;
@@ -166,4 +168,121 @@ test('the guide is reachable from a menu and the palette, not only on first run'
   const toggle = COMMANDS_BY_ID.get('help.guideOnStart');
   assert.ok(toggle, 'there is no command to change whether it opens on start');
   assert.equal(toggle.category, 'Help');
+});
+
+// --------------------------------------------------------------- navigation
+
+/** A wheel event as the DOM would deliver it. */
+function wheel(deltaY: number, deltaX = 0, deltaMode = 0) {
+  return { deltaX, deltaY, deltaMode };
+}
+
+const NONE = { alt: false, shift: false, ctrl: false };
+
+test('a press picks its navigation from the button and the modifiers', () => {
+  assert.equal(navModeForPress(1, NONE), 'orbit', 'middle drag orbits');
+  assert.equal(navModeForPress(1, { ...NONE, shift: true }), 'pan');
+  assert.equal(navModeForPress(1, { ...NONE, ctrl: true }), 'zoom');
+
+  // The trackpad half: no middle button exists, so Option stands in for it.
+  assert.equal(navModeForPress(0, { ...NONE, alt: true }), 'orbit');
+  assert.equal(navModeForPress(0, { ...NONE, alt: true, shift: true }), 'pan');
+  assert.equal(navModeForPress(0, { ...NONE, alt: true, ctrl: true }), 'zoom');
+
+  // A plain left press is selection, and must stay selection.
+  assert.equal(navModeForPress(0, NONE), null);
+  assert.equal(navModeForPress(0, { ...NONE, shift: true }), null);
+  assert.equal(navModeForPress(2, { ...NONE, alt: true }), null, 'right press is not navigation');
+});
+
+test('wheel deltas are normalised to pixels whatever unit the device uses', () => {
+  assert.deepEqual(wheelPixels(wheel(100, 20, 0), 800), { x: 20, y: 100 });
+  // Firefox reports a plain mouse wheel in lines, about three per detent.
+  assert.deepEqual(wheelPixels(wheel(3, 0, 1), 800), { x: 0, y: 48 });
+  assert.deepEqual(wheelPixels(wheel(1, 0, 2), 800), { x: 0, y: 800 });
+  // A device that reports nonsense should not send the camera to NaN.
+  assert.deepEqual(wheelPixels({ deltaX: NaN, deltaY: Infinity, deltaMode: 0 }, 800), { x: 0, y: 0 });
+});
+
+test('one mouse-wheel detent is one zoom step', () => {
+  const cam = new ViewportCamera();
+  const before = cam.distance;
+  const g = wheelGesture(wheel(-100), NONE, 800);
+  assert.equal(g.kind, 'zoom');
+  if (g.kind === 'zoom') cam.zoom(g.amount);
+  // 10% closer, which is what a detent has always done.
+  assert.ok(Math.abs(cam.distance - before * 0.9) < 1e-9, `${cam.distance} is not one step from ${before}`);
+});
+
+test('a trackpad flick glides instead of teleporting', () => {
+  // The bug this exists to keep out: a two-finger scroll arrives as a stream
+  // of small events, and treating each one as a whole detent multiplied the
+  // distance by 0.9 a hundred times over. The camera hit the near clamp
+  // before the fingers had finished moving, and the viewport was unusable on
+  // a laptop — which is the machine most people will try Kline on.
+  const cam = new ViewportCamera();
+  const before = cam.distance;
+  // Roughly what one firm flick plus its momentum tail reports.
+  for (let i = 0; i < 100; i++) {
+    const g = wheelGesture(wheel(-4), NONE, 800);
+    if (g.kind === 'zoom') cam.zoom(g.amount);
+  }
+  assert.ok(cam.distance < before, 'the flick should have zoomed in');
+  assert.ok(cam.distance > before * 0.5, `100 events took the distance to ${cam.distance}, from ${before}`);
+});
+
+test('one enormous delta cannot jump the camera through the model', () => {
+  const cam = new ViewportCamera();
+  const before = cam.distance;
+  const g = wheelGesture(wheel(1, 0, 2), NONE, 4000);
+  if (g.kind === 'zoom') cam.zoom(g.amount);
+  assert.ok(cam.distance > before * 0.5, `a single page-sized delta moved ${before} to ${cam.distance}`);
+});
+
+test('Option with a two-finger scroll orbits', () => {
+  const cam = new ViewportCamera();
+  const yaw = cam.yaw;
+  const pitch = cam.pitch;
+  // Fingers moving right report a negative deltaX, so the view should turn
+  // the same way a rightward drag turns it.
+  const right = wheelGesture(wheel(0, -60), { ...NONE, alt: true }, 800);
+  assert.equal(right.kind, 'orbit');
+  if (right.kind === 'orbit') cam.orbit(right.dx, right.dy);
+  assert.ok(cam.yaw < yaw, 'a rightward scroll should turn the view right');
+
+  const drag = new ViewportCamera();
+  drag.orbit(...(() => { const g = pressGesture('orbit', 60, 0); return g.kind === 'orbit' ? [g.dx, g.dy] as const : [0, 0] as const; })());
+  assert.ok(drag.yaw < yaw, 'a rightward drag turns the same way');
+
+  const up = wheelGesture(wheel(-60), { ...NONE, alt: true }, 800);
+  if (up.kind === 'orbit') cam.orbit(up.dx, up.dy);
+  assert.notEqual(cam.pitch, pitch);
+});
+
+test('Shift scrolls pan and pinch zooms', () => {
+  const pan = wheelGesture(wheel(30, 10), { ...NONE, shift: true }, 800);
+  assert.deepEqual(pan, { kind: 'pan', dx: -10, dy: -30 });
+
+  // A pinch reaches the page as a wheel event with ctrlKey set, reporting a
+  // few units a frame. It has to move the camera enough to feel connected.
+  const pinch = wheelGesture(wheel(-5), { ...NONE, ctrl: true }, 800);
+  assert.equal(pinch.kind, 'zoom');
+  if (pinch.kind === 'zoom') assert.ok(pinch.amount > 0.1, `a pinch of 5 gave ${pinch.amount}`);
+
+  // Ctrl with a real mouse wheel comes through the same path and must not
+  // become a leap: it is capped at a single step.
+  const ctrlWheel = wheelGesture(wheel(-120), { ...NONE, ctrl: true }, 800);
+  if (ctrlWheel.kind === 'zoom') assert.ok(ctrlWheel.amount <= 1 + 1e-9, `${ctrlWheel.amount} is more than one step`);
+});
+
+test('a latched drag keeps doing the same thing all the way through', () => {
+  // The mode comes from the press, not from whatever the keys are doing when
+  // a move event happens to arrive, so a finger slipping off Shift halfway
+  // through a pan does not turn the rest of it into an orbit.
+  assert.deepEqual(pressGesture('pan', 12, -7), { kind: 'pan', dx: 12, dy: -7 });
+  const orbit = pressGesture('orbit', 12, -7);
+  assert.equal(orbit.kind, 'orbit');
+  const zoom = pressGesture('zoom', 0, -50);
+  assert.equal(zoom.kind, 'zoom');
+  if (zoom.kind === 'zoom') assert.ok(zoom.amount > 0, 'dragging up zooms in');
 });

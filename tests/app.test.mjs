@@ -937,6 +937,99 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     });
   });
 
+  // --------------------------------------------------------- navigation
+  //
+  // Kline is used on laptops, and a laptop has no middle mouse button. Every
+  // one of these drives the real canvas through real input events, because
+  // the failure being guarded against was never in the camera maths — it was
+  // in what the browser reports and what the app does with it.
+
+  /** The camera's orbit state, as the app currently holds it. */
+  const cameraState = () => page.evaluate(() => {
+    const c = window.kline.editor.camera;
+    return { yaw: c.yaw, pitch: c.pitch, distance: c.distance, target: [c.target.x, c.target.y, c.target.z] };
+  });
+
+  test('a two-finger flick zooms smoothly instead of slamming into the model', async () => {
+    await resetScene(page);
+    await page.mouse.move(centre.x, centre.y);
+    const before = await cameraState();
+    // A trackpad reports a flick as a long stream of small deltas. Treating
+    // each as a full wheel detent took the distance from 11 to the near
+    // clamp in a fraction of a second, and there was no way back out.
+    for (let i = 0; i < 40; i++) await page.mouse.wheel(0, -4);
+    const after = await cameraState();
+    assert.ok(after.distance < before.distance, 'the flick did not zoom in at all');
+    assert.ok(
+      after.distance > before.distance * 0.5,
+      `40 trackpad events took the camera from ${before.distance} to ${after.distance}`,
+    );
+  });
+
+  test('Option with a two-finger scroll turns the view', async () => {
+    await resetScene(page);
+    await page.mouse.move(centre.x, centre.y);
+    const before = await cameraState();
+    await page.keyboard.down('Alt');
+    for (let i = 0; i < 10; i++) await page.mouse.wheel(-20, 0);
+    await page.keyboard.up('Alt');
+    const after = await cameraState();
+    assert.notEqual(after.yaw, before.yaw, 'Option + scroll did not orbit');
+    assert.ok(
+      Math.abs(after.distance - before.distance) < 1e-6,
+      `orbiting also changed the distance, ${before.distance} to ${after.distance}`,
+    );
+  });
+
+  test('Option and Shift with a scroll slides the view', async () => {
+    await resetScene(page);
+    await page.mouse.move(centre.x, centre.y);
+    const before = await cameraState();
+    await page.keyboard.down('Shift');
+    for (let i = 0; i < 5; i++) await page.mouse.wheel(0, 30);
+    await page.keyboard.up('Shift');
+    const after = await cameraState();
+    assert.notDeepEqual(after.target, before.target, 'Shift + scroll did not pan');
+    assert.ok(Math.abs(after.yaw - before.yaw) < 1e-9, 'panning also turned the view');
+  });
+
+  test('Option and drag orbits, and letting go of Option does not eat the selection', async () => {
+    // Navigation used to be re-read from the keys on every move event, so a
+    // finger coming off Option part way through an orbit turned the rest of
+    // the drag into a box select — which then applied on release and wiped
+    // whatever was selected.
+    await resetScene(page);
+    await page.evaluate(() => {
+      window.kline.run('add.cube');
+      window.kline.editor.frameSelected();
+    });
+    await page.waitForTimeout(120);
+    const before = await cameraState();
+    const selected = await page.evaluate(() => window.kline.editor.scene.selection.size);
+    assert.equal(selected, 1, 'the cube should start selected');
+
+    await page.mouse.move(centre.x, centre.y);
+    await page.keyboard.down('Alt');
+    await page.mouse.down();
+    await page.mouse.move(centre.x + 60, centre.y + 10, { steps: 6 });
+    await page.keyboard.up('Alt');
+    await page.mouse.move(centre.x + 120, centre.y + 20, { steps: 6 });
+    await page.mouse.up();
+
+    const after = await cameraState();
+    assert.notEqual(after.yaw, before.yaw, 'Option + drag did not orbit');
+    assert.equal(
+      await page.evaluate(() => window.kline.editor.scene.selection.size),
+      1,
+      'releasing Option mid-orbit threw the selection away',
+    );
+    assert.equal(
+      await page.evaluate(() => !!window.kline.editor.boxSelectRect),
+      false,
+      'a box select was left running after the orbit',
+    );
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

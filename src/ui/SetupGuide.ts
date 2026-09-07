@@ -4,12 +4,13 @@ import { h } from './dom';
 /**
  * The first thing a new user sees.
  *
- * A 3D application is close to unusable without knowing three things: that
+ * A 3D application is close to unusable without knowing a few things: how to
+ * turn the view without a middle mouse button, that
  * Tab switches between moving objects and editing their geometry, that G, R
  * and S are how you move anything, and that Ctrl+K will find the rest. None
  * of that is discoverable by clicking around, and everyone who has used
  * Blender already knows it while everyone who has not is stuck. So it is
- * said once, up front, in five short cards.
+ * said once, up front, in a handful of short cards.
  *
  * Each card can *do* the thing it describes. Reading "press Tab to edit
  * geometry" teaches nothing next to watching the cube light up with vertices,
@@ -42,6 +43,22 @@ const CARDS: Card[] = [
         for (const id of [...editor.scene.objects.keys()]) editor.scene.remove(id);
         editor.addPrimitive('cube');
         editor.frameSelected();
+      },
+    },
+  },
+  {
+    title: 'Turning the view',
+    body: 'Hold Option and scroll with two fingers to turn the model round. Option and Shift '
+      + 'together slide it sideways, pinch to zoom. All of it works from a laptop trackpad — '
+      + 'no middle mouse button, no second hand. With a mouse, the middle button does the same.',
+    action: {
+      label: 'Show me from another angle',
+      run: (editor) => {
+        if (editor.scene.objects.size === 0) editor.addPrimitive('cube');
+        editor.frameSelected();
+        editor.camera.nudge(-45 * (Math.PI / 180), 12 * (Math.PI / 180));
+        editor.requestRender();
+        editor.setStatus('Option + two-finger scroll turns the view · Option + Shift slides it · pinch zooms');
       },
     },
   },

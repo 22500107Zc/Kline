@@ -16,6 +16,7 @@ import { ElementSelection, deriveSelection, elementCount, emptySelection } from 
 import { edgeRing, insetFaces, loopCut } from '../mesh/ops';
 import { ProportionalSettings, defaultProportional, influenceCircle, proportionalWeights } from './proportional';
 import { SnapSettings, defaultSnap, snapPointUnderCursor } from './snapping';
+import { NavGesture, NavMode, modifiersOf, navModeForPress, pressGesture, wheelGesture } from './navigation';
 import { SculptSettings, SculptStroke, defaultSculpt } from '../sculpt/sculpt';
 import { ChannelPath, removeKey, setKey } from '../anim/animation';
 import { bevelEdges } from '../mesh/bevel';
@@ -145,6 +146,17 @@ export class Editor {
    * that chains two operators depends on this flag.
    */
   private pressConsumed = false;
+  /**
+   * Which camera move the current drag is performing, decided when the press
+   * landed and held until it is released.
+   *
+   * Navigation used to be re-derived from the modifier keys on every move
+   * event, which meant a drag changed job halfway through if a finger came
+   * off a key. Letting go of Option a moment early turned the tail of an
+   * orbit into a box select, and the release then applied it — so the usual
+   * way to lose a careful selection was to navigate away from it.
+   */
+  private navMode: NavMode | null = null;
   private keys = { shift: false, ctrl: false, alt: false };
   private hoverPreview: LineSegment[] = [];
 
@@ -1743,6 +1755,9 @@ export class Editor {
       else if (e.button === 2) this.cancelModal();
       return;
     }
+    this.navMode = navModeForPress(e.button, modifiersOf(e));
+    if (this.navMode) return;
+
     if (this.mode === 'sculpt' && e.button === 0 && !e.altKey) {
       if (this.beginStroke(p.x, p.y, e.ctrlKey || e.metaKey)) return;
     }
@@ -1810,14 +1825,8 @@ export class Editor {
     const moved = Math.hypot(p.x - this.pointer.startX, p.y - this.pointer.startY);
     if (moved > 3) this.pointer.dragging = true;
 
-    // A trackpad has no middle button, so Alt (Option) with the left button
-    // drives navigation too. Alt+click without a drag still selects a loop.
-    const navigating = this.pointer.button === 1 || (this.pointer.button === 0 && e.altKey);
-    if (navigating) {
-      if (e.shiftKey) this.camera.pan(dx, dy, this.canvas.clientHeight);
-      else if (e.ctrlKey || e.metaKey) this.camera.zoom(-dy * 0.02);
-      else this.camera.orbit(dx * 0.008, dy * 0.008);
-      this.requestRender();
+    if (this.navMode) {
+      this.applyNavGesture(pressGesture(this.navMode, dx, dy));
     } else if (this.pointer.button === 0 && this.pointer.dragging && this.mode !== 'sculpt') {
       this.modal = {
         type: 'box',
@@ -1836,6 +1845,7 @@ export class Editor {
     this.pointer.down = false;
     this.pointer.dragging = false;
     this.pressConsumed = false;
+    this.navMode = null;
     if (this.stroke) {
       this.endStroke();
       return;
@@ -1883,14 +1893,15 @@ export class Editor {
       this.emit('modal');
       return;
     }
-    if (e.shiftKey) {
-      // Two-finger scroll with Shift pans, the way it does in most 3D apps.
-      this.camera.pan(-e.deltaX, -e.deltaY, this.canvas.clientHeight);
-    } else if (e.ctrlKey || e.metaKey) {
-      // Trackpad pinch arrives as a wheel event with ctrlKey set.
-      this.camera.zoom(-e.deltaY * 0.05);
-    } else {
-      this.camera.zoom(e.deltaY < 0 ? 1 : -1);
+    this.applyNavGesture(wheelGesture(e, modifiersOf(e), this.canvas.clientHeight));
+  }
+
+  /** Move the camera the way a navigation gesture asks. */
+  private applyNavGesture(g: NavGesture): void {
+    switch (g.kind) {
+      case 'orbit': this.camera.orbit(g.dx, g.dy); break;
+      case 'pan': this.camera.pan(g.dx, g.dy, this.canvas.clientHeight); break;
+      case 'zoom': this.camera.zoom(g.amount); break;
     }
     this.requestRender();
   }

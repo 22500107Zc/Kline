@@ -114,7 +114,10 @@ export class App {
     this.editor.on('change', () => this.syncModalChrome());
     this.syncModalChrome();
     this.editor.start();
-    this.editor.setStatus('Ready — Option+drag orbits, Option+Shift+drag pans, scroll zooms');
+    this.editor.setStatus(
+      'Ready — hold Option and scroll with two fingers to turn the view · '
+      + 'Option+Shift slides it · pinch zooms · Ctrl+K finds everything else',
+    );
   }
 
   private syncModalChrome(): void {
@@ -412,12 +415,15 @@ export class App {
     ]));
 
     grid.appendChild(h('div', { class: 'shortcut-group' }, [
-      h('h3', { text: 'Mouse' }),
+      h('h3', { text: 'Trackpad and mouse' }),
       ...[
-        ['Option + drag', 'Orbit — trackpad friendly'],
+        ['Option + two-finger scroll', 'Orbit — no button to hold'],
+        ['Option + Shift + scroll', 'Pan'],
+        ['Pinch', 'Zoom'],
+        ['Two-finger scroll', 'Zoom'],
+        ['Option + drag', 'Orbit'],
         ['Option + Shift + drag', 'Pan'],
-        ['Scroll / pinch', 'Zoom'],
-        ['Shift + scroll', 'Pan'],
+        ['Option + Cmd + drag', 'Zoom'],
         ['Middle drag', 'Orbit (with a mouse)'],
         ['Shift + middle', 'Pan'],
         ['Left click', 'Select'],
