@@ -1530,6 +1530,153 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     assert.equal(after.undoable, true, 'New Scene cannot be undone');
   });
 
+  // ------------------------------------------------ the ways in
+
+  test('dropping a photograph on the window builds a model', async () => {
+    // The way anybody actually starts. Every test above reached the panel
+    // through its own method; nothing had ever fired a real drop, so the
+    // handler that turns a dragged file into a model was the one step of the
+    // headline feature with no cover on it at all.
+    await resetScene(page);
+    const dropped = await page.evaluate(async () => {
+      const c = document.createElement('canvas');
+      c.width = 140; c.height = 190;
+      const g = c.getContext('2d');
+      const im = g.createImageData(c.width, c.height);
+      for (let y = 0; y < c.height; y++) {
+        for (let x = 0; x < c.width; x++) {
+          const o = (y * c.width + x) * 4;
+          const inside = ((x - 70) / 40) ** 2 + ((y - 95) / 62) ** 2 < 1;
+          im.data[o] = inside ? 60 : 150;
+          im.data[o + 1] = inside ? 85 : 72;
+          im.data[o + 2] = inside ? 200 : 42;
+          im.data[o + 3] = 255;
+        }
+      }
+      g.putImageData(im, 0, 0);
+      const blob = await new Promise((ok) => c.toBlob(ok, 'image/png'));
+
+      const dt = new DataTransfer();
+      dt.items.add(new File([blob], 'dropped.png', { type: 'image/png' }));
+      const mount = document.getElementById('app');
+      const veil = () => document.querySelector('.drop-veil')?.classList.contains('visible');
+      const fire = (type) => mount.dispatchEvent(
+        new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true }),
+      );
+
+      fire('dragenter');
+      const whileDragging = veil();
+      fire('dragover');
+      fire('drop');
+      const afterDrop = veil();
+
+      const ed = window.kline.editor;
+      for (let i = 0; i < 200 && ed.scene.objects.size === 0; i++) {
+        await new Promise((ok) => setTimeout(ok, 50));
+      }
+      const object = [...ed.scene.objects.values()][0];
+      return {
+        whileDragging,
+        afterDrop,
+        objects: ed.scene.objects.size,
+        faces: object?.mesh?.faceCount ?? 0,
+        textures: ed.scene.textures.length,
+        tab: document.querySelector('.tab.active')?.textContent?.trim(),
+      };
+    });
+
+    assert.equal(dropped.whileDragging, true, 'nothing showed the window would take the file');
+    assert.equal(dropped.afterDrop, false, 'the drop highlight stayed up afterwards');
+    assert.equal(dropped.objects, 1, 'the drop produced no model');
+    assert.ok(dropped.faces > 500, `the drop produced ${dropped.faces} faces`);
+    assert.equal(dropped.textures, 1, 'the dropped photograph was not kept as a texture');
+    assert.equal(dropped.tab, 'Create', 'the panel did not come forward to show the result');
+  });
+
+  test('the keys people actually press do what they say', async () => {
+    await resetScene(page);
+    const press = async (key, opts = {}) => {
+      await page.evaluate(([k, o]) => {
+        document.activeElement?.blur?.();
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+          key: k,
+          code: o.code ?? `Key${k.toUpperCase()}`,
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: !!o.ctrl,
+          metaKey: !!o.meta,
+          shiftKey: !!o.shift,
+        }));
+      }, [key, opts]);
+      await page.waitForTimeout(120);
+    };
+    const mode = () => page.evaluate(() => window.kline.editor.mode);
+    const count = () => page.evaluate(() => window.kline.editor.scene.objects.size);
+
+    await page.evaluate(() => window.kline.run('add.cube'));
+    await page.waitForTimeout(120);
+
+    await press('Tab', { code: 'Tab' });
+    assert.equal(await mode(), 'edit', 'Tab did not enter Edit Mode');
+    await press('Tab', { code: 'Tab' });
+    assert.equal(await mode(), 'object', 'Tab did not come back out');
+
+    await press('k', { ctrl: true });
+    assert.equal(
+      await page.evaluate(() => !!document.querySelector('.palette:not(.hidden), .command-palette:not(.hidden)')),
+      true,
+      'Ctrl+K did not open the command palette',
+    );
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(80);
+
+    const before = await count();
+    await press('x');
+    assert.equal(await count(), before - 1, 'X did not delete the selected object');
+    await press('z', { ctrl: true });
+    assert.equal(await count(), before, 'Ctrl+Z did not bring it back');
+  });
+
+  test('a crash gives the work back, textures included', async () => {
+    // Recovery replaces the whole scene, so it went through the same door
+    // that was dropping textures and the timeline — meaning a recovered
+    // session came back with the geometry and none of the pictures on it.
+    await resetScene(page);
+    const recovery = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const settle = (ms = 150) => new Promise((ok) => setTimeout(ok, ms));
+      window.kline.run('add.cube');
+      window.kline.run('material.checker');
+      await settle();
+      const saved = { objects: ed.scene.objects.size, textures: ed.scene.textures.length };
+
+      const wrote = await ed.autosaveNow(false);
+      const slots = await ed.recovery.list();
+
+      // What a crash and restart looks like from here.
+      ed.newScene();
+      await settle(80);
+      const wiped = { objects: ed.scene.objects.size, textures: ed.scene.textures.length };
+
+      const doc = slots[0] ? await ed.recovery.load(slots[0].id) : null;
+      if (doc) ed.loadSceneJSON(doc.scene ?? doc);
+      await settle();
+      return {
+        wrote, saved, wiped, slots: slots.length,
+        back: { objects: ed.scene.objects.size, textures: ed.scene.textures.length },
+      };
+    });
+
+    assert.equal(recovery.wrote, true, 'autosave reported failure');
+    assert.ok(recovery.slots > 0, 'autosave left nothing to recover from');
+    assert.equal(recovery.wiped.objects, 0, 'the scene was not actually cleared before recovering');
+    assert.equal(recovery.back.objects, recovery.saved.objects, 'recovery lost objects');
+    assert.equal(
+      recovery.back.textures, recovery.saved.textures,
+      `recovery came back with ${recovery.back.textures} of ${recovery.saved.textures} pictures`,
+    );
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });
