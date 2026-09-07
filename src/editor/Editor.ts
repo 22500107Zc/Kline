@@ -1894,15 +1894,28 @@ export class Editor {
       this.emit('modal');
       return;
     }
-    this.applyNavGesture(wheelGesture(e, modifiersOf(e), this.canvas.clientHeight));
+    // Zoom towards the cursor rather than the middle of the screen: the point
+    // you are scrolling at is the point you mean, and zooming about the pivot
+    // instead slides it away as you approach.
+    const p = this.localPointer(e);
+    this.applyNavGesture(wheelGesture(e, modifiersOf(e), this.canvas.clientHeight), p);
   }
 
   /** Move the camera the way a navigation gesture asks. */
-  private applyNavGesture(g: NavGesture): void {
+  private applyNavGesture(g: NavGesture, at?: { x: number; y: number }): void {
     switch (g.kind) {
       case 'orbit': this.camera.orbit(g.dx, g.dy); break;
       case 'pan': this.camera.pan(g.dx, g.dy, this.canvas.clientHeight); break;
-      case 'zoom': this.camera.zoom(g.amount); break;
+      case 'zoom': {
+        const w = this.canvas.clientWidth;
+        const h = this.canvas.clientHeight;
+        if (at && w > 0 && h > 0) {
+          this.camera.zoomAt(g.amount, (at.x / w) * 2 - 1, 1 - (at.y / h) * 2, w / h);
+        } else {
+          this.camera.zoom(g.amount);
+        }
+        break;
+      }
     }
     this.requestRender();
   }

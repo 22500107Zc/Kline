@@ -41,6 +41,24 @@ export interface DepthOptions {
   detailScale?: number;
   /** Edge-aware smoothing passes over the finished field. */
   smoothing?: number;
+  /**
+   * How much to even the depth out across the subject's own mirror line.
+   *
+   * 0 leaves each side as the photograph found it; 1 makes the two sides the
+   * average of each other.
+   *
+   * Only applied when the silhouette really is symmetric — see
+   * `symmetryAxis` — so a photograph of something lopsided is left alone.
+   */
+  symmetry?: number;
+}
+
+/** Where a subject mirrors itself, and how well. */
+export interface Symmetry {
+  /** Column the subject reflects about, in pixels. */
+  axis: number;
+  /** Overlap of the subject with its own reflection, 0..1. */
+  score: number;
 }
 
 export interface DepthField {
@@ -195,6 +213,59 @@ function boxBlur(src: Float32Array, width: number, height: number, r: number): F
   return out;
 }
 
+/**
+ * The vertical line the subject most nearly mirrors about, and how well it does.
+ *
+ * Most things people photograph — a shoe, a bottle, a chair, a face — are
+ * bilaterally symmetric, and the photograph is not: one side is lit and the
+ * other is in shadow, so shading-derived depth comes out heavier on the lit
+ * side. Knowing where the mirror line is lets that be evened out. Knowing how
+ * *well* it mirrors is the other half, and the more important one: it is what
+ * stops the correction being applied to something that genuinely is lopsided.
+ */
+export function symmetryAxis(matte: Matte): Symmetry {
+  const { width, height, data } = matte;
+  let x0 = width;
+  let x1 = -1;
+  let y0 = height;
+  let y1 = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (data[y * width + x] < 0.5) continue;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  if (x1 < x0) return { axis: width / 2, score: 0 };
+
+  // Candidates around the middle of the subject: an object photographed
+  // roughly square-on mirrors near its own centre, and searching the whole
+  // frame would mostly rank ways of overlapping the subject with nothing.
+  const centre = (x0 + x1) / 2;
+  const span = Math.max(2, (x1 - x0) * 0.15);
+  const step = Math.max(1, Math.round((x1 - x0) / 120));
+  const rows = Math.max(1, Math.round((y1 - y0) / 96));
+  let best: Symmetry = { axis: centre, score: 0 };
+  for (let a = centre - span; a <= centre + span; a += step / 2) {
+    let both = 0;
+    let either = 0;
+    for (let y = y0; y <= y1; y += rows) {
+      for (let x = x0; x <= x1; x += step) {
+        const here = data[y * width + x] >= 0.5;
+        const mx = Math.round(2 * a - x);
+        const there = mx >= 0 && mx < width && data[y * width + mx] >= 0.5;
+        if (here && there) both++;
+        if (here || there) either++;
+      }
+    }
+    const score = either === 0 ? 0 : both / either;
+    if (score > best.score) best = { axis: a, score };
+  }
+  return best;
+}
+
 /** The finished half-thickness of the subject at every pixel. */
 export function depthFromPhoto(bitmap: Bitmap, matte: Matte, options: DepthOptions = {}): DepthField {
   const { width, height } = matte;
@@ -229,6 +300,20 @@ export function depthFromPhoto(bitmap: Bitmap, matte: Matte, options: DepthOptio
     data[i] = Math.max(base * 0.15, z);
   }
 
+  const symmetry = Math.max(0, Math.min(1, options.symmetry ?? 0.5));
+  if (symmetry > 0) {
+    const mirror = symmetryAxis(matte);
+    // Ramped in rather than switched on: an object that mirrors at 0.8 gets a
+    // little of the correction and one that mirrors at 0.95 gets all of it, so
+    // there is no threshold where a nudge to a slider changes the model.
+    const confidence = Math.max(0, Math.min(1, (mirror.score - 0.78) / 0.14));
+    // Half, because evening two sides out means meeting in the middle. Pulling
+    // all the way to the reflection would not even the lopsidedness out, it
+    // would move it to the other side.
+    const strength = symmetry * confidence * 0.5;
+    if (strength > 0.01) mirrorDepth(data, matte, width, height, mirror.axis, strength);
+  }
+
   const lab = smoothing > 0 ? labFromBitmap(bitmap) : null;
   for (let s = 0; s < smoothing && lab; s++) edgeAwareSmooth(data, lab, matte, width, height);
 
@@ -238,6 +323,33 @@ export function depthFromPhoto(bitmap: Bitmap, matte: Matte, options: DepthOptio
     else if (data[i] > finalPeak) finalPeak = data[i];
   }
   return { width, height, data, peak: finalPeak };
+}
+
+/**
+ * Pull each depth towards its reflection across the subject's mirror line.
+ *
+ * The silhouette is deliberately left alone — it is the reliable half of the
+ * picture, and mirroring it would push the outline off the object. Only the
+ * thickness is evened out, and only where both sides of the line are subject.
+ */
+function mirrorDepth(
+  data: Float32Array, matte: Matte, width: number, height: number, axis: number, strength: number,
+): void {
+  const src = data.slice();
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      if (matte.data[i] < 0.5) continue;
+      const mx = 2 * axis - x;
+      if (mx < 0 || mx > width - 1) continue;
+      const x0 = Math.floor(mx);
+      const x1 = Math.min(width - 1, x0 + 1);
+      const f = mx - x0;
+      if (matte.data[y * width + x0] < 0.5 || matte.data[y * width + x1] < 0.5) continue;
+      const reflected = src[y * width + x0] * (1 - f) + src[y * width + x1] * f;
+      data[i] = src[i] * (1 - strength) + reflected * strength;
+    }
+  }
 }
 
 /** Average each depth with its neighbours, but only across pixels that match in colour. */

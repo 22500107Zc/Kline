@@ -241,6 +241,11 @@ threshold is right for a logo on white and useless for a shoe on a floor.
 Speckles elsewhere in the frame are dropped and enclosed dark details are
 filled, so a buckle does not punch a hole through the model.
 
+**It models the subject, not the photograph.** The mesh grid is fitted to the
+subject's own bounds, so a thing filling a quarter of the frame gets the whole
+detail budget rather than a quarter of it — how tightly you happened to crop no
+longer decides how good the model is.
+
 **It inflates the outline to its own thickness.** Solving ∇²h = -4 across the
 inside of the silhouette and taking √h gives exactly a hemisphere over a
 circle, and everywhere else gives a thickness that follows the *local* width.
@@ -249,6 +254,11 @@ That is the part a distance-to-the-outline inflation gets wrong, and it is why
 inflated silhouettes usually look like inflated silhouettes. Shading inside the
 subject, with its broad lighting gradient removed, is added on top for creases
 and seams, and the whole field is smoothed along the image's colour edges.
+Most things people photograph are bilaterally symmetric while the light on them
+is not, so the depth is evened out across the subject's own mirror line — but
+only as far as the silhouette actually mirrors itself, measured, so something
+genuinely lopsided is left alone. The outline never moves; it is the reliable
+half of the picture.
 
 **It puts the photograph on the model.** Per-corner coordinates, projected from
 the camera the photo was taken from, with the image embedded in the scene. A
@@ -488,13 +498,17 @@ the UI are all in this repository, and each piece is readable on its own.
 |---|---|---|
 | `Option` + two-finger scroll, or `Option` + drag | Middle-drag | Orbit |
 | `Option`+`Shift` + scroll or drag | `Shift` + middle-drag | Pan |
-| Pinch, or two-finger scroll | Wheel | Zoom |
+| Pinch, or two-finger scroll | Wheel | Zoom towards the cursor |
 | `Option`+`Cmd` + drag | `Ctrl` + middle-drag | Zoom |
 
 Holding `Option` and scrolling with two fingers turns the view: nothing to hold
 down, no second hand, and no middle mouse button — which a laptop does not
 have. Gestures are measured in pixels of finger travel rather than in wheel
 clicks, so a trackpad glides where a wheel steps.
+
+Zooming goes towards whatever is under the cursor, not the middle of the
+screen. Point at the corner you want a closer look at and scroll; it stays
+where it is instead of sliding away as you approach.
 
 `Shift` + right click places the 3D cursor. `.` frames what is selected and
 `Home` frames everything — handy when you have lost the object off screen. The

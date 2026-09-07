@@ -66,8 +66,9 @@ export class CreatePanel {
     resolution: 128, size: 2, height: 0.35, invert: false, solid: false, smooth: true,
   };
   private photo: Required<Pick<PhotoOptions, 'resolution' | 'targetHeight' | 'depthScale' | 'back'>>
-    & Required<Pick<DepthOptions, 'volume' | 'detail'>> & { texture: boolean } = {
-      resolution: 160, targetHeight: 2, depthScale: 1, back: 0.8, volume: 1, detail: 0.35, texture: true,
+    & Required<Pick<DepthOptions, 'volume' | 'detail' | 'symmetry'>> & { texture: boolean } = {
+      resolution: 160, targetHeight: 2, depthScale: 1, back: 0.8,
+      volume: 1, detail: 0.35, symmetry: 0.5, texture: true,
     };
   /**
    * Finding the subject and solving its thickness cost a few hundred
@@ -81,6 +82,8 @@ export class CreatePanel {
   private photoTexture: { key: string; id: number } | null = null;
   /** Fraction of the frame the last photo build found as subject. */
   private lastCoverage = 0;
+  /** Pending debounced photo rebuild, if a slider is mid-drag. */
+  private photoTimer: number | null = null;
 
   private endpoint = storedEndpoint();
   private backend: BackendInfo | null = null;
@@ -135,13 +138,21 @@ export class CreatePanel {
   }
 
   dispose(): void {
+    if (this.photoTimer !== null) {
+      clearTimeout(this.photoTimer);
+      this.photoTimer = null;
+    }
     releaseReference(this.reference);
     this.reference = null;
   }
 
   private sampleFrame(): void {
     if (!this.reference) return;
-    this.bitmap = bitmapFromReference(this.reference, this.mode === 'relief' ? 512 : 384);
+    // Photo mode reads colour and shading rather than tracing an outline, and
+    // it now fits its grid to the subject rather than to the frame — so a
+    // sharper source buys detail in the model instead of just costing time.
+    const detail = this.mode === 'photo' ? 512 : this.mode === 'relief' ? 512 : 384;
+    this.bitmap = bitmapFromReference(this.reference, detail);
     this.matte = null;
     this.depthField = null;
   }
@@ -298,6 +309,7 @@ export class CreatePanel {
       num('Height', this.photo.targetHeight, 0.05, (v) => { this.photo.targetHeight = v; }, { min: 0.01 });
       num('Roundness', this.photo.volume, 0.05, (v) => { this.photo.volume = v; }, { min: 0, max: 2 });
       num('Surface relief', this.photo.detail, 0.05, (v) => { this.photo.detail = v; }, { min: 0, max: 1 });
+      num('Even out the sides', this.photo.symmetry, 0.05, (v) => { this.photo.symmetry = v; }, { min: 0, max: 1 });
       num('Thickness', this.photo.depthScale, 0.05, (v) => { this.photo.depthScale = v; }, { min: 0.02, max: 4 });
       num('Back fullness', this.photo.back, 0.05, (v) => { this.photo.back = v; }, { min: 0, max: 1 });
       toggle('Project the photo on as a texture', this.photo.texture, (v) => { this.photo.texture = v; });
@@ -466,8 +478,32 @@ export class CreatePanel {
 
   // ---------------------------------------------------------------- generate
 
-  /** Rebuild the target object from the current settings. */
+  /**
+   * Rebuild the target object from the current settings.
+   *
+   * Photo mode's analysis costs the better part of a second, and a slider
+   * emits an event per pixel of travel — so a live drag would queue forty of
+   * those and the panel would still be catching up a minute later. Live
+   * changes wait until the dragging stops; releasing the slider rebuilds at
+   * once. Everything else is fast enough to run on every event, as it did.
+   */
   private generate(commit: boolean, refit = false): void {
+    if (this.photoTimer !== null) {
+      clearTimeout(this.photoTimer);
+      this.photoTimer = null;
+    }
+    if (this.mode !== 'photo' || commit) {
+      this.generateNow(commit, refit);
+      return;
+    }
+    this.statsLine.textContent = 'Working…';
+    this.photoTimer = setTimeout(() => {
+      this.photoTimer = null;
+      this.generateNow(false, refit);
+    }, 160) as unknown as number;
+  }
+
+  private generateNow(commit: boolean, refit = false): void {
     if (!this.bitmap) return;
     if (this.busy) {
       this.pending = true;
@@ -512,7 +548,7 @@ export class CreatePanel {
       this.busy = false;
       if (this.pending) {
         this.pending = false;
-        this.generate(false);
+        this.generateNow(false);
       }
     }
   }
@@ -569,11 +605,15 @@ export class CreatePanel {
     }
     const matte = this.matte.value;
 
-    const depthKey = `${matteKey}|${this.photo.volume}|${this.photo.detail}`;
+    const depthKey = `${matteKey}|${this.photo.volume}|${this.photo.detail}|${this.photo.symmetry}`;
     if (this.depthField?.key !== depthKey) {
       this.depthField = {
         key: depthKey,
-        value: depthFromPhoto(bitmap, matte, { volume: this.photo.volume, detail: this.photo.detail }),
+        value: depthFromPhoto(bitmap, matte, {
+          volume: this.photo.volume,
+          detail: this.photo.detail,
+          symmetry: this.photo.symmetry,
+        }),
       };
     }
 

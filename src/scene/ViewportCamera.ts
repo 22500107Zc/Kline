@@ -89,6 +89,28 @@ export class ViewportCamera {
     this.distance = clamp(this.distance * Math.pow(0.9, amount), 0.01, 20000);
   }
 
+  /**
+   * Zoom while keeping whatever is under a screen point where it is.
+   *
+   * `ndcX` and `ndcY` run -1 to 1 across the viewport with +Y up. Zooming
+   * about the middle instead means the thing you were looking at slides away
+   * as you approach it, and you spend the whole time chasing it back with the
+   * pan gesture — which is most of what makes a viewport feel like work.
+   */
+  zoomAt(amount: number, ndcX: number, ndcY: number, aspect: number): void {
+    const before = this.orthoHalfHeight();
+    this.zoom(amount);
+    const shift = before - this.orthoHalfHeight();
+    if (!Number.isFinite(shift) || shift === 0) return;
+    // The point under the cursor sits at target + right·ndcX·h·aspect + up·ndcY·h,
+    // so holding it still while h changes is a translation of the pivot by the
+    // difference. Orientation does not change, so right and up are the same
+    // before and after.
+    this.target = this.target
+      .add(this.right().scale(ndcX * shift * aspect))
+      .add(this.up().scale(ndcY * shift));
+  }
+
   /** Dolly the pivot forward/back, keeping the orbit distance (Blender's Ctrl+MMB feel). */
   dolly(amount: number): void {
     this.lockedMatrix = null;

@@ -966,6 +966,28 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     );
   });
 
+  test('scrolling zooms towards the cursor, not the middle of the screen', async () => {
+    await resetScene(page);
+    const before = await cameraState();
+    // Off to one side, well inside the viewport.
+    await page.mouse.move(centre.x - 260, centre.y + 120);
+    for (let i = 0; i < 8; i++) await page.mouse.wheel(0, -30);
+    const off = await cameraState();
+    const moved = (s) => Math.hypot(...s.target.map((v, i) => v - before.target[i]));
+    assert.ok(off.distance < before.distance, 'scrolling did not zoom');
+    assert.ok(moved(off) > 0.5, `zooming at a corner barely moved the pivot: ${moved(off)}`);
+
+    // And the middle stays the middle. Not to the last decimal — a real
+    // pointer lands on a whole pixel and the middle of the canvas may not be
+    // one — but nowhere near what an off-centre scroll does.
+    await resetScene(page);
+    await page.mouse.move(Math.round(centre.x), Math.round(centre.y));
+    for (let i = 0; i < 8; i++) await page.mouse.wheel(0, -30);
+    const middle = await cameraState();
+    assert.ok(middle.distance < before.distance);
+    assert.ok(moved(middle) < 0.02, `zooming at the centre moved the pivot by ${moved(middle)}`);
+  });
+
   test('Option with a two-finger scroll turns the view', async () => {
     await resetScene(page);
     await page.mouse.move(centre.x, centre.y);

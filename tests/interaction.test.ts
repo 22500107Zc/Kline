@@ -286,3 +286,45 @@ test('a latched drag keeps doing the same thing all the way through', () => {
   assert.equal(zoom.kind, 'zoom');
   if (zoom.kind === 'zoom') assert.ok(zoom.amount > 0, 'dragging up zooms in');
 });
+
+test('zooming holds the point under the cursor still', () => {
+  // Zooming about the middle of the screen means whatever you are scrolling at
+  // slides off as you approach it, and you spend the session chasing it back
+  // with the pan gesture. The screen position of a world point is what has to
+  // stay put, not the pivot.
+  const cam = new ViewportCamera();
+  const aspect = 16 / 9;
+
+  /** Where a world point lands on screen, in the same -1..1 the zoom uses. */
+  const project = (p: Vec3): [number, number] => {
+    const rel = p.sub(cam.target);
+    const h = cam.orthoHalfHeight();
+    return [rel.dot(cam.right()) / (h * aspect), rel.dot(cam.up()) / h];
+  };
+
+  // A point off to one side, on the plane the camera is focused at.
+  const h0 = cam.orthoHalfHeight();
+  const cursor: [number, number] = [0.6, -0.35];
+  const world = cam.target
+    .add(cam.right().scale(cursor[0] * h0 * aspect))
+    .add(cam.up().scale(cursor[1] * h0));
+
+  cam.zoomAt(1.5, cursor[0], cursor[1], aspect);
+  const after = project(world);
+  assert.ok(Math.abs(after[0] - cursor[0]) < 1e-6, `x drifted from ${cursor[0]} to ${after[0]}`);
+  assert.ok(Math.abs(after[1] - cursor[1]) < 1e-6, `y drifted from ${cursor[1]} to ${after[1]}`);
+
+  // And zooming back out puts it back, rather than walking the pivot away.
+  cam.zoomAt(-1.5, cursor[0], cursor[1], aspect);
+  const back = project(world);
+  assert.ok(Math.abs(back[0] - cursor[0]) < 1e-6 && Math.abs(back[1] - cursor[1]) < 1e-6);
+  assert.ok(Math.abs(cam.distance - 11) < 1e-9, 'the round trip did not return to where it started');
+});
+
+test('zooming at the middle is still a plain zoom', () => {
+  const cam = new ViewportCamera();
+  const target = cam.target.clone();
+  cam.zoomAt(1, 0, 0, 1.5);
+  assert.ok(cam.distance < 11);
+  assert.ok(cam.target.distanceTo(target) < 1e-9, 'zooming at the centre moved the pivot');
+});

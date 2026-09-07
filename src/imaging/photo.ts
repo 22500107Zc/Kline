@@ -95,24 +95,39 @@ export function meshFromPhoto(bitmap: Bitmap, options: PhotoOptions = {}): Photo
   });
   if (field.peak <= 0) return empty();
 
-  const aspect = bitmap.width / bitmap.height;
+  // The grid covers the subject, not the photograph.
+  //
+  // Nobody frames a photo tight against the thing in it. A subject filling a
+  // quarter of the frame used to get a quarter of the grid, so three quarters
+  // of the detail budget went into sampling empty carpet — and the model came
+  // out coarse for no reason other than how the photo was cropped. Fitting the
+  // grid to the subject's own bounds gets that detail back for nothing.
+  const box = subjectBounds(matte);
+  if (!box) return empty();
+
+  const cropW = box.x1 - box.x0 + 1;
+  const cropH = box.y1 - box.y0 + 1;
+  const aspect = cropW / cropH;
   const nx = aspect >= 1 ? resolution : Math.max(2, Math.round(resolution * aspect));
   const ny = aspect >= 1 ? Math.max(2, Math.round(resolution / aspect)) : resolution;
-  // The grid spans the image, one world unit wide per world unit tall at the
-  // image's own aspect; the whole thing is rescaled to targetHeight at the end.
+  // Two world units on the longer side; the whole thing is rescaled to
+  // targetHeight at the end anyway.
   const worldW = aspect >= 1 ? 2 : 2 * aspect;
   const worldH = aspect >= 1 ? 2 / aspect : 2;
-  const pixelToWorld = worldW / Math.max(1, bitmap.width);
+  const pixelToWorld = worldW / Math.max(1, cropW);
+
+  /** Where a grid node sits in the source image, in pixels. */
+  const imageAt = (gx: number, gy: number): { px: number; py: number } => ({
+    px: box.x0 + (nx === 1 ? 0 : gx / (nx - 1)) * (cropW - 1),
+    py: box.y0 + (ny === 1 ? 0 : gy / (ny - 1)) * (cropH - 1),
+  });
 
   const nodes = nx * ny;
   const inside = new Uint8Array(nodes);
   const thickness = new Float32Array(nodes);
   for (let gy = 0; gy < ny; gy++) {
     for (let gx = 0; gx < nx; gx++) {
-      const u = nx === 1 ? 0 : gx / (nx - 1);
-      const v = ny === 1 ? 0 : gy / (ny - 1);
-      const px = u * (bitmap.width - 1);
-      const py = v * (bitmap.height - 1);
+      const { px, py } = imageAt(gx, gy);
       const g = gy * nx + gx;
       inside[g] = samplePlane(matte.data, matte.width, matte.height, px, py) >= 0.5 ? 1 : 0;
       thickness[g] = inside[g]
@@ -166,10 +181,15 @@ export function meshFromPhoto(bitmap: Bitmap, options: PhotoOptions = {}): Photo
   const uv: (number[] | null)[] = [];
   // The renderer uploads textures flipped, so v runs up from the bottom of
   // the image while the grid runs down from its top.
-  const uvAt = (gx: number, gy: number): [number, number] => [
-    nx === 1 ? 0 : gx / (nx - 1),
-    ny === 1 ? 1 : 1 - gy / (ny - 1),
-  ];
+  // Coordinates address the whole photograph, because the whole photograph is
+  // what gets stored as the texture — the grid is cropped, the image is not.
+  const uvAt = (gx: number, gy: number): [number, number] => {
+    const { px, py } = imageAt(gx, gy);
+    return [
+      px / Math.max(1, bitmap.width - 1),
+      1 - py / Math.max(1, bitmap.height - 1),
+    ];
+  };
   const addFace = (corners: number[], coords: [number, number][]): void => {
     mesh.faces.push(corners);
     mesh.faceMaterial.push(0);
@@ -252,6 +272,32 @@ function scaleToHeight(mesh: Mesh, targetHeight: number): void {
     const p = mesh.positions[i];
     mesh.positions[i] = new Vec3((p.x - cx) * k, p.y * k, (p.z - box.min.z) * k);
   }
+}
+
+/** The subject's bounding box in image pixels, or null when there is no subject. */
+function subjectBounds(matte: Matte): { x0: number; y0: number; x1: number; y1: number } | null {
+  let x0 = matte.width;
+  let y0 = matte.height;
+  let x1 = -1;
+  let y1 = -1;
+  for (let y = 0; y < matte.height; y++) {
+    for (let x = 0; x < matte.width; x++) {
+      if (matte.data[y * matte.width + x] < 0.5) continue;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  if (x1 < x0 || y1 < y0) return null;
+  // A margin of one pixel so the outline is not sitting on the grid's own
+  // edge, where the surface would be cut off flat instead of closing over.
+  return {
+    x0: Math.max(0, x0 - 1),
+    y0: Math.max(0, y0 - 1),
+    x1: Math.min(matte.width - 1, x1 + 1),
+    y1: Math.min(matte.height - 1, y1 + 1),
+  };
 }
 
 /**

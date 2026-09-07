@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Bitmap } from '../src/imaging/contour';
 import { matteCoverage, matteToMask, segmentSubject } from '../src/imaging/segment';
-import { depthFromPhoto, inflationField } from '../src/imaging/depth';
+import { depthFromPhoto, inflationField, symmetryAxis } from '../src/imaging/depth';
 import { meshFromPhoto } from '../src/imaging/photo';
 import { Mesh } from '../src/mesh/Mesh';
 
@@ -199,6 +199,54 @@ test('shading adds surface relief without pushing through the back', () => {
   }
 });
 
+test('the mirror line of a symmetric subject is found, and a lopsided one is not claimed', () => {
+  const size = 120;
+  const round = paint(frame(size, size, [20, 22, 26]), disc(52, 60, 30), [220, 210, 200]);
+  const sym = symmetryAxis(segmentSubject(round));
+  assert.ok(Math.abs(sym.axis - 52) < 3, `a disc at x=52 mirrors about ${sym.axis.toFixed(1)}`);
+  assert.ok(sym.score > 0.9, `a disc should mirror almost perfectly, scored ${sym.score.toFixed(2)}`);
+
+  // A shape with a limb on one side only. The best available mirror line
+  // cannot overlap it with itself, and saying so is what stops the depth
+  // being evened out across something that is genuinely lopsided.
+  const lop = paint(frame(size, size, [20, 22, 26]), disc(52, 60, 26), [220, 210, 200]);
+  paint(lop, (x, y) => x > 60 && x < 108 && Math.abs(y - 60) < 6, [220, 210, 200]);
+  assert.ok(symmetryAxis(segmentSubject(lop)).score < 0.8, 'a one-sided shape was called symmetric');
+});
+
+test('shading lopsidedness is evened out on a symmetric subject only', () => {
+  // A round object lit hard from the left: the shading term reads the lit side
+  // as standing further out than the shadowed side, which is a lighting fact
+  // rather than a fact about the object.
+  const size = 128;
+  const bitmap = frame(size, size, [16, 18, 22]);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (!disc(64, 64, 40)(x, y)) continue;
+      const o = (y * size + x) * 4;
+      const lit = 235 - (x - 24) * 1.4;
+      bitmap.data[o] = lit;
+      bitmap.data[o + 1] = lit * 0.94;
+      bitmap.data[o + 2] = lit * 0.86;
+    }
+  }
+  const matte = segmentSubject(bitmap);
+  const at = (f: { data: Float32Array }, x: number, y: number) => f.data[y * size + x];
+  const lean = (f: { data: Float32Array }) => at(f, 40, 64) - at(f, 88, 64);
+
+  const raw = depthFromPhoto(bitmap, matte, { detail: 1, symmetry: 0, smoothing: 0 });
+  const evened = depthFromPhoto(bitmap, matte, { detail: 1, symmetry: 1, smoothing: 0 });
+  assert.ok(Math.abs(lean(raw)) > 0.05, 'the test image is not actually lopsided');
+  assert.ok(
+    Math.abs(lean(evened)) < Math.abs(lean(raw)) * 0.35,
+    `evening left ${lean(evened).toFixed(3)} of lean against ${lean(raw).toFixed(3)}`,
+  );
+  // The outline is the reliable half of the picture and must not move.
+  for (let i = 0; i < evened.data.length; i++) {
+    assert.equal(evened.data[i] > 0, raw.data[i] > 0, 'evening the depth changed the silhouette');
+  }
+});
+
 // -------------------------------------------------------------- the model
 
 test('a photograph becomes a closed, textured, correctly sized model', () => {
@@ -253,6 +301,24 @@ test('a photograph becomes a closed, textured, correctly sized model', () => {
   for (const p of result.mesh.positions) {
     assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z));
   }
+});
+
+test('a small subject in a big frame is not modelled coarsely for it', () => {
+  // The grid used to span the photograph, so a subject filling a quarter of
+  // the frame got a quarter of the detail budget and three quarters of it went
+  // into sampling empty floor. How tightly someone happened to crop decided
+  // how good their model was, which is not a thing anyone would choose.
+  const tight = paint(frame(80, 80, [30, 34, 40]), disc(40, 40, 34), [210, 190, 170]);
+  const loose = paint(frame(240, 240, [30, 34, 40]), disc(120, 120, 34), [210, 190, 170]);
+
+  const a = meshFromPhoto(tight, { resolution: 80 });
+  const b = meshFromPhoto(loose, { resolution: 80 });
+
+  assert.ok(b.mesh.faceCount > a.mesh.faceCount * 0.7, `${b.mesh.faceCount} faces from the loose crop against ${a.mesh.faceCount} from the tight one`);
+  // And the same object, so it should come out the same size and shape.
+  const ha = a.mesh.bounds();
+  const hb = b.mesh.bounds();
+  assert.ok(Math.abs((hb.max.x - hb.min.x) - (ha.max.x - ha.min.x)) < 0.1, 'the two crops gave different widths');
 });
 
 test('the model has real depth, and the back can be flattened', () => {

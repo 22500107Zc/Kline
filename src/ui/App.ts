@@ -426,8 +426,8 @@ export class App {
       ...[
         ['Option + two-finger scroll', 'Orbit — no button to hold'],
         ['Option + Shift + scroll', 'Pan'],
-        ['Pinch', 'Zoom'],
-        ['Two-finger scroll', 'Zoom'],
+        ['Pinch', 'Zoom towards the cursor'],
+        ['Two-finger scroll', 'Zoom towards the cursor'],
         ['Option + drag', 'Orbit'],
         ['Option + Shift + drag', 'Pan'],
         ['Option + Cmd + drag', 'Zoom'],
