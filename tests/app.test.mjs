@@ -1306,6 +1306,95 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     assert.ok(counts.textured !== null, 'the model lost its texture while being rebuilt');
   });
 
+  test('Cut Out wears the photograph and takes the correction brush', async () => {
+    // Cut Out is the fastest route and the one people reach for first. It
+    // used to hand back bare grey geometry: no coordinates, no picture, and
+    // a brush that did nothing because this route finds its subject with a
+    // brightness threshold rather than the colour models the brush fed.
+    const out = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const panel = window.kline.app.properties.create;
+      const buttons = [...document.querySelectorAll('.mode-btn')];
+      const cutOut = buttons.find((b) => b.textContent.trim() === 'Cut Out');
+      if (!cutOut) return { ok: false, why: 'no Cut Out button' };
+      const saved = { ...panel.mask };
+      // Start the cut-out from nothing. Left in place, the photo model's own
+      // material would still be on the object and the test would pass on a
+      // build that never textured anything.
+      ed.scene.remove(panel.targetId);
+      panel.targetId = null;
+      panel.photoMaterial = null;
+      cutOut.click();
+      // Nothing about this picture's brightness separates the subject from
+      // the floor — that is what it was drawn for — but its blue channel
+      // does, so the threshold route has something to work with.
+      panel.mask.channel = 'blue';
+      panel.mask.threshold = 0.5;
+      panel.generate(true);
+      await new Promise((ok) => setTimeout(ok, 300));
+
+      const object = ed.scene.get(panel.targetId);
+      if (!object || !object.mesh) return { ok: false, why: 'nothing was built' };
+      const cut = object.mesh;
+      const material = ed.scene.materials[object.materialSlots[0] ?? 0];
+
+      // Every coordinate has to be on the picture, and the brush has to move
+      // the outline. Painting a wide band of background over the left half
+      // should take that side off the model.
+      let offPicture = 0;
+      for (let f = 0; f < cut.faces.length; f++) {
+        const uv = cut.uvFor(f);
+        if (!uv) { offPicture++; continue; }
+        for (const t of uv) if (!(t >= 0 && t <= 1)) offPicture++;
+      }
+      const before = cut.bounds().size().x;
+
+      const bitmap = panel.bitmap;
+      panel.brush.mode = 'background';
+      const hints = new Uint8Array(bitmap.width * bitmap.height);
+      for (let y = 0; y < bitmap.height; y++) {
+        for (let x = 0; x < bitmap.width / 2; x++) hints[y * bitmap.width + x] = 2;
+      }
+      panel.hints = hints;
+      panel.generate(true);
+      await new Promise((ok) => setTimeout(ok, 300));
+      const after = ed.scene.get(panel.targetId)?.mesh?.bounds().size().x ?? 0;
+
+      const result = {
+        ok: true,
+        faces: cut.faceCount,
+        hasUV: cut.hasUV,
+        offPicture,
+        texture: material ? material.baseColorTexture : null,
+        // A cut-out is a flat slab of exactly the depth asked for. The photo
+        // route's inflated shell is not, so this says which one was measured.
+        slab: cut.bounds().size().y,
+        depth: panel.silhouette.depth,
+        before,
+        after,
+      };
+
+      // Hand the panel back exactly as it was found: the tests after this one
+      // share this reference, and a stray mark or threshold would be their
+      // failure rather than this one's.
+      panel.hints = null;
+      Object.assign(panel.mask, saved);
+      buttons.find((b) => b.textContent.trim() === 'Photo').click();
+      await new Promise((ok) => setTimeout(ok, 600));
+      return result;
+    });
+
+    assert.equal(out.ok, true, out.why);
+    assert.ok(out.faces > 20, `only ${out.faces} faces came out of the cut-out`);
+    assert.ok(Math.abs(out.slab - out.depth) < 1e-6,
+      `the object measured is ${out.slab} deep, not the ${out.depth} slab Cut Out makes`);
+    assert.equal(out.hasUV, true, 'the cut-out has no texture coordinates');
+    assert.equal(out.offPicture, 0, `${out.offPicture} coordinates are off the picture`);
+    assert.ok(out.texture !== null, 'the cut-out is not wearing the photograph');
+    assert.ok(out.after < out.before * 0.75,
+      `marking half the frame as background left the model ${out.after.toFixed(2)} wide, was ${out.before.toFixed(2)}`);
+  });
+
   // ------------------------------------------------ the mode buttons work
 
   const modeButtons = () => page.evaluate(() => [...document.querySelectorAll('.mode-opt')].map((b) => ({

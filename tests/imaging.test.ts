@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Bitmap, maskFromBitmap, signedArea, simplifyLoop, splitComponents, suggestMaskOptions, traceContours } from '../src/imaging/contour';
+import { HINT_BACKGROUND, HINT_SUBJECT } from '../src/imaging/segment';
 import { triangulatePolygon } from '../src/imaging/triangulate';
 import { meshFromHeightfield, meshFromLathe, meshFromSilhouette } from '../src/imaging/generate';
 import { Mesh } from '../src/mesh/Mesh';
@@ -176,6 +177,85 @@ test('two blobs extrude into two separate shells', () => {
     }
   }
   assert.equal(shells, 2);
+});
+
+test('a cut-out wears the picture, and never reads the background', () => {
+  // A red disc on a blue field: every coordinate the mesh carries has to land
+  // on the disc, or the model gets a blue fringe all the way round.
+  const width = 96;
+  const height = 96;
+  const data = new Uint8ClampedArray(width * height * 4);
+  const solid = disc(48, 48, 30);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4;
+      const on = solid(x, y);
+      data[o] = on ? 230 : 20;
+      data[o + 1] = 30;
+      data[o + 2] = on ? 30 : 220;
+      data[o + 3] = 255;
+    }
+  }
+  const b: Bitmap = { width, height, data };
+  const { mesh } = meshFromSilhouette(b, { depth: 0.4, mask: { channel: 'red', threshold: 0.5 } });
+  assert.ok(mesh.hasUV, 'the cut-out carries texture coordinates');
+
+  let checked = 0;
+  let outside = 0;
+  for (let f = 0; f < mesh.faces.length; f++) {
+    const uv = mesh.uvFor(f);
+    assert.ok(uv, `face ${f} has no coordinates`);
+    for (let i = 0; i < uv!.length; i += 2) {
+      const u = uv![i];
+      const v = uv![i + 1];
+      assert.ok(u >= 0 && u <= 1 && v >= 0 && v <= 1, `uv ${u},${v} off the picture`);
+      // v is stored flipped, because the renderer uploads textures flipped.
+      const px = Math.round(u * (width - 1));
+      const py = Math.round((1 - v) * (height - 1));
+      checked++;
+      if (!solid(px, py)) outside++;
+    }
+  }
+  assert.ok(checked > 100, `only ${checked} coordinates to check`);
+  assert.equal(outside, 0, `${outside} of ${checked} coordinates read the background`);
+});
+
+test('the correction brush overrides the threshold in Cut Out', () => {
+  // A mid-grey square that the threshold drops, and a bright one it keeps.
+  const b = bitmap(64, 64, (x, y) => x >= 34 && x < 58 && y >= 20 && y < 44);
+  for (let y = 20; y < 44; y++) {
+    for (let x = 6; x < 30; x++) {
+      const o = (y * 64 + x) * 4;
+      b.data[o] = b.data[o + 1] = b.data[o + 2] = 90;
+    }
+  }
+  const plain = meshFromSilhouette(b, { depth: 0.3, mask: { channel: 'luma', threshold: 0.5 } });
+  assert.equal(plain.stats.loops, 1, 'the grey square is below the threshold');
+
+  const hints = new Uint8Array(64 * 64);
+  for (let y = 24; y < 40; y++) for (let x = 10; x < 26; x++) hints[y * 64 + x] = 1;
+  const marked = meshFromSilhouette(b, {
+    depth: 0.3, mask: { channel: 'luma', threshold: 0.5, hints },
+  });
+  assert.ok(marked.stats.loops >= 2, `marking it kept it: ${marked.stats.loops} loops`);
+  assert.ok(marked.mesh.bounds().size().x > plain.mesh.bounds().size().x * 1.5,
+    'the marked square is part of the model');
+
+  // And the other way: marking the bright square as background drops it.
+  const drop = new Uint8Array(64 * 64);
+  for (let y = 20; y < 44; y++) for (let x = 34; x < 58; x++) drop[y * 64 + x] = 2;
+  const dropped = meshFromSilhouette(b, {
+    depth: 0.3, mask: { channel: 'luma', threshold: 0.5, hints: drop },
+  });
+  assert.equal(dropped.mesh.faceCount, 0, 'nothing is left to extrude');
+});
+
+test('the brush marks mean the same thing in both segmenters', () => {
+  // contour.ts deliberately does not import from segment.ts, so the two
+  // agree by test rather than by reference. If one of them ever moves, this
+  // is what says so before a user paints green and watches it vanish.
+  assert.equal(HINT_SUBJECT, 1);
+  assert.equal(HINT_BACKGROUND, 2);
 });
 
 test('an empty image produces nothing rather than throwing', () => {

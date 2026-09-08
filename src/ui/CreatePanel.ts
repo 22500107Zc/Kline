@@ -81,9 +81,10 @@ export class CreatePanel {
   private mask: Required<Pick<MaskOptions, 'channel' | 'threshold' | 'invert'>> = {
     channel: 'luma', threshold: 0.5, invert: false,
   };
-  private silhouette: Required<Pick<SilhouetteOptions, 'depth' | 'targetHeight' | 'simplify' | 'denoise' | 'maxParts' | 'bevel'>> = {
-    depth: 0.4, targetHeight: 2, simplify: 1.2, denoise: 1, maxParts: 8, bevel: 0,
-  };
+  private silhouette: Required<Pick<SilhouetteOptions, 'depth' | 'targetHeight' | 'simplify' | 'denoise' | 'maxParts' | 'bevel'>>
+    & { texture: boolean } = {
+      depth: 0.4, targetHeight: 2, simplify: 1.2, denoise: 1, maxParts: 8, bevel: 0, texture: true,
+    };
   private lathe: Required<Pick<LatheOptions, 'segments' | 'targetHeight' | 'axis' | 'side' | 'smooth'>> = {
     segments: 48, targetHeight: 2, axis: 0.5, side: 'widest', smooth: true,
   };
@@ -152,6 +153,19 @@ export class CreatePanel {
     this.hints = null;
     this.hintRevision++;
     this.generate(true);
+  }
+
+  /**
+   * The threshold settings with the user's corrections attached.
+   *
+   * Cut Out and Turned find their subject with a brightness threshold, which
+   * cannot tell a dark subject from a dark background at all. The brush was
+   * built for the photo route; there is no reason the blunter routes should
+   * not have it too, and it is the only answer they have when the histogram
+   * simply does not separate the two.
+   */
+  private maskOptions(): MaskOptions {
+    return this.hints ? { ...this.mask, hints: this.hints } : { ...this.mask };
   }
 
   /** Whether anything has been marked, for the buttons that undo it. */
@@ -444,6 +458,8 @@ export class CreatePanel {
       num('Clean up', this.silhouette.denoise, 1, (v) => { this.silhouette.denoise = Math.round(v); }, { min: 0, max: 5, precision: 0 });
       num('Bevel', this.silhouette.bevel, 0.01, (v) => { this.silhouette.bevel = v; }, { min: 0, max: 0.45 });
       num('Max parts', this.silhouette.maxParts, 1, (v) => { this.silhouette.maxParts = Math.round(v); }, { min: 1, max: 64, precision: 0 });
+      toggle('Project the photo on as a texture', this.silhouette.texture, (v) => { this.silhouette.texture = v; });
+      section.appendChild(this.brushControls());
     } else if (this.mode === 'lathe') {
       num('Segments', this.lathe.segments, 1, (v) => { this.lathe.segments = Math.round(v); }, { min: 3, max: 256, precision: 0 });
       num('Height', this.lathe.targetHeight, 0.05, (v) => { this.lathe.targetHeight = v; }, { min: 0.01 });
@@ -458,6 +474,7 @@ export class CreatePanel {
         (v) => { this.lathe.side = v as 'widest' | 'left' | 'right'; this.generate(true); },
       )));
       toggle('Smooth shading', this.lathe.smooth, (v) => { this.lathe.smooth = v; });
+      section.appendChild(this.brushControls());
     } else {
       num('Resolution', this.relief.resolution, 8, (v) => { this.relief.resolution = Math.round(v); }, { min: 8, max: 512, precision: 0 });
       num('Size', this.relief.size, 0.1, (v) => { this.relief.size = v; }, { min: 0.05 });
@@ -668,7 +685,7 @@ export class CreatePanel {
           this.assignedName = object.name;
         }
       }
-      if (this.mode === 'photo') this.applyPhotoTexture(object);
+      if (this.wantsTexture()) this.applyPhotoTexture(object);
       this.editor.markGeometryDirty(object);
       if (refit) this.editor.frameSelected();
 
@@ -712,13 +729,13 @@ export class CreatePanel {
     const bitmap = this.bitmap!;
     if (this.mode === 'photo') return this.buildPhoto(bitmap);
     if (this.mode === 'silhouette') {
-      return meshFromSilhouette(bitmap, { ...this.silhouette, mask: { ...this.mask } });
+      return meshFromSilhouette(bitmap, { ...this.silhouette, mask: this.maskOptions() });
     }
     if (this.mode === 'lathe') {
       return meshFromLathe(bitmap, {
         ...this.lathe,
         denoise: this.silhouette.denoise,
-        mask: { ...this.mask },
+        mask: this.maskOptions(),
       });
     }
     return meshFromHeightfield(bitmap, { ...this.relief });
@@ -903,11 +920,17 @@ export class CreatePanel {
    * the difference between "that is my shoe" and "that is a shoe-shaped
    * thing" is almost entirely the picture being on it.
    */
+  private wantsTexture(): boolean {
+    if (this.mode === 'photo') return this.photo.texture;
+    if (this.mode === 'silhouette') return this.silhouette.texture;
+    return false;
+  }
+
   private applyPhotoTexture(object: SceneObject): void {
     const ref = this.reference;
     if (!ref) return;
     const scene = this.editor.scene;
-    if (!this.photo.texture) {
+    if (!this.wantsTexture()) {
       object.materialSlots = [scene.ensureDefaultMaterial()];
       return;
     }
@@ -1093,6 +1116,11 @@ export class CreatePanel {
     return { x: u * (bitmap.width - 1), y: v * (bitmap.height - 1) };
   }
 
+  /** The routes that take corrections: everything that segments an image. */
+  private brushable(): boolean {
+    return this.mode === 'photo' || this.mode === 'silhouette' || this.mode === 'lathe';
+  }
+
   /** Pointer handling for the correction brush, wired once. */
   private wirePreviewBrush(): void {
     const paintAt = (e: PointerEvent): void => {
@@ -1102,7 +1130,7 @@ export class CreatePanel {
       this.drawPreview();
     };
     this.preview.addEventListener('pointerdown', (e) => {
-      if (this.mode !== 'photo' || !this.bitmap) return;
+      if (!this.brushable() || !this.bitmap) return;
       e.preventDefault();
       this.painting = true;
       this.preview.setPointerCapture(e.pointerId);
@@ -1162,7 +1190,7 @@ export class CreatePanel {
       return;
     }
 
-    const mask = denoiseMask(maskFromBitmap(this.bitmap, this.mask), this.silhouette.denoise);
+    const mask = denoiseMask(maskFromBitmap(this.bitmap, this.maskOptions()), this.silhouette.denoise);
     const parts = splitComponents(mask, 32).slice(0, this.mode === 'lathe' ? 1 : this.silhouette.maxParts);
     const sx = placement.width / this.bitmap.width;
     const sy = placement.height / this.bitmap.height;
@@ -1185,6 +1213,9 @@ export class CreatePanel {
         ctx.stroke();
       }
     }
+    ctx.restore();
+    this.drawHints(ctx, placement);
+    ctx.save();
     if (this.mode === 'lathe') {
       const ax = placement.x + this.lathe.axis * placement.width;
       ctx.strokeStyle = '#4074c9';

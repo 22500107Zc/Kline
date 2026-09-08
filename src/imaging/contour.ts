@@ -40,6 +40,20 @@ export interface MaskOptions {
   threshold?: number;
   /** Flip the test, for dark subjects on light backgrounds. */
   invert?: boolean;
+  /**
+   * The user's own corrections, one byte per pixel: 1 keeps, 2 drops.
+   *
+   * A brightness threshold is a blunt instrument — it cannot tell a dark
+   * subject from a dark background at all — and until this existed the only
+   * answer to it getting the outline wrong was to drag the threshold slider
+   * and hope. The same marks the photograph route uses are honoured here, so
+   * the brush means the same thing in both places.
+   *
+   * The values match `HINT_SUBJECT` and `HINT_BACKGROUND` in `segment`. They
+   * are not imported from there to keep this module free of that dependency;
+   * the test holds the two in agreement.
+   */
+  hints?: Uint8Array;
 }
 
 function sample(bitmap: Bitmap, index: number, channel: MaskChannel): number {
@@ -62,7 +76,14 @@ export function maskFromBitmap(bitmap: Bitmap, options: MaskOptions = {}): Mask 
   const invert = options.invert ?? false;
   const count = bitmap.width * bitmap.height;
   const data = new Uint8Array(count);
+  const hints = options.hints && options.hints.length === count ? options.hints : null;
   for (let i = 0; i < count; i++) {
+    // A mark is an instruction, not evidence: it overrules the threshold
+    // outright rather than nudging it.
+    if (hints) {
+      if (hints[i] === 1) { data[i] = 1; continue; }
+      if (hints[i] === 2) { data[i] = 0; continue; }
+    }
     const v = sample(bitmap, i, channel);
     const inside = v >= threshold;
     data[i] = (invert ? !inside : inside) ? 1 : 0;

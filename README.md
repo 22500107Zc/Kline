@@ -218,7 +218,7 @@ can be the source.
 | Mode | What it does | Good for |
 |---|---|---|
 | **Photo** | Finds the subject by colour, inflates it to its own thickness, and projects the photograph on as a texture | Photographs of real objects |
-| **Cut Out** | Traces the outline and extrudes it into a flat solid, holes included | Logos, signage, silhouettes, flat parts |
+| **Cut Out** | Traces the outline, extrudes it into a flat solid holes included, and projects the photograph on as a texture | Logos, signage, silhouettes, flat parts |
 | **Turn** | Revolves the profile around a vertical axis | Vases, bottles, turned legs, anything round |
 | **Relief** | Displaces a grid by image brightness | Carvings, terrain, depth maps, stamps |
 
@@ -517,6 +517,14 @@ the application itself. Nothing is uploaded, and nothing is fetched from
 anywhere at run time — it works with the network unplugged. It is loaded the
 first time you ask for it and never otherwise, so a session that does not use
 it costs nothing.
+
+**Cut Out and Turn** find their subject with a brightness threshold rather
+than colour, which is the right tool for a logo on white and the wrong one for
+anything else — so they take the same brush. A stroke marked Subject or
+Background overrules the threshold outright, and both routes now project the
+photograph onto what they build, with every coordinate stepped a couple of
+pixels off the outline so the edge of the model wears the subject's own colour
+instead of a fringe of whatever was behind it.
 
 What one photograph cannot give you, either way, is the back of anything. Both
 routes are honest about that rather than inventing it.

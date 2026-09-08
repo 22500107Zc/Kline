@@ -2,7 +2,7 @@ import { Vec3 } from '../core/math';
 import { Mesh } from '../mesh/Mesh';
 import { mergeByDistance, recalculateNormals } from '../mesh/ops';
 import {
-  Bitmap, Loop, MaskOptions, Point, denoiseMask, loopBounds, maskFromBitmap, pointInLoop,
+  Bitmap, Loop, Mask, MaskOptions, Point, denoiseMask, loopBounds, maskFromBitmap, pointInLoop,
   simplifyContours, splitComponents, suggestMaskOptions, traceContours,
 } from './contour';
 import { triangulatePolygon } from './triangulate';
@@ -46,6 +46,17 @@ export interface SilhouetteOptions {
   bevel?: number;
 }
 
+/**
+ * How far a texture coordinate is pulled off the silhouette, in pixels.
+ *
+ * A vertex on the outline sits exactly on the boundary between the subject
+ * and whatever was behind it, so reading the photograph there gives half a
+ * texel of background — a bright fringe all the way round the cut-out. Two
+ * pixels in is enough to be clear of it and far too little to be seen as a
+ * shift in the picture.
+ */
+const UV_INSET_PX = 2.5;
+
 interface Shape {
   outer: Loop;
   holes: Loop[];
@@ -71,7 +82,7 @@ function groupShapes(loops: Loop[]): Shape[] {
 /** Contours of a bitmap, cleaned up and grouped into outer/hole shapes. */
 export function contoursFromBitmap(
   bitmap: Bitmap, options: SilhouetteOptions = {},
-): { shapes: Shape[]; width: number; height: number } {
+): { shapes: Shape[]; mask: Mask; width: number; height: number } {
   const maskOptions = options.mask ?? suggestMaskOptions(bitmap);
   const base = denoiseMask(maskFromBitmap(bitmap, maskOptions), options.denoise ?? 1);
   const parts = splitComponents(base, 32).slice(0, Math.max(1, options.maxParts ?? 8));
@@ -82,7 +93,7 @@ export function contoursFromBitmap(
     const loops = simplifyContours(traceContours(part), tolerance);
     shapes.push(...groupShapes(loops));
   }
-  return { shapes, width: bitmap.width, height: bitmap.height };
+  return { shapes, mask: base, width: bitmap.width, height: bitmap.height };
 }
 
 /**
@@ -96,7 +107,7 @@ export function meshFromSilhouette(bitmap: Bitmap, options: SilhouetteOptions = 
   const targetHeight = options.targetHeight ?? 2;
   const bevel = Math.max(0, Math.min(0.45, options.bevel ?? 0));
 
-  const { shapes } = contoursFromBitmap(bitmap, options);
+  const { shapes, mask } = contoursFromBitmap(bitmap, options);
   const mesh = new Mesh();
   if (shapes.length === 0) {
     return { mesh, stats: { ms: Date.now() - started, loops: 0, verts: 0, faces: 0 } };
@@ -121,6 +132,15 @@ export function meshFromSilhouette(bitmap: Bitmap, options: SilhouetteOptions = 
 
   const half = depth / 2;
   let loopCount = 0;
+  // Per-corner texture coordinates, pushed in step with the faces. Every
+  // vertex here is on the outline, so every one of them is pulled inward
+  // before it reads the picture.
+  const uv: (number[] | null)[] = [];
+  const addFace = (corners: number[], coords: number[]): void => {
+    mesh.faces.push(corners);
+    mesh.faceMaterial.push(0);
+    uv.push(coords);
+  };
 
   for (const shape of shapes) {
     const holes = shape.holes.map((h) => h.points);
@@ -133,11 +153,13 @@ export function meshFromSilhouette(bitmap: Bitmap, options: SilhouetteOptions = 
     const back = vertices.map((p) => mesh.positions.push(toWorld(p, half, shrink)) - 1);
     // A bevel needs a second, full-size ring at the mid-plane to taper to.
     const rim = bevel > 0 ? vertices.map((p) => mesh.positions.push(toWorld(p, 0, 1)) - 1) : null;
+    const uvOf = insetTexCoords(vertices, indices, mask, bitmap);
 
     for (let i = 0; i < indices.length; i += 3) {
-      mesh.faces.push([front[indices[i]], front[indices[i + 1]], front[indices[i + 2]]]);
-      mesh.faces.push([back[indices[i]], back[indices[i + 1]], back[indices[i + 2]]]);
-      mesh.faceMaterial.push(0, 0);
+      const a = indices[i], b = indices[i + 1], c = indices[i + 2];
+      const ta = uvOf[a], tb = uvOf[b], tc = uvOf[c];
+      addFace([front[a], front[b], front[c]], [...ta, ...tb, ...tc]);
+      addFace([back[a], back[b], back[c]], [...ta, ...tb, ...tc]);
     }
 
     // Walls follow every ring: the outer boundary and each hole.
@@ -154,18 +176,19 @@ export function meshFromSilhouette(bitmap: Bitmap, options: SilhouetteOptions = 
       for (let i = 0; i < ringIndices.length; i++) {
         const a = ringIndices[i];
         const b = ringIndices[(i + 1) % ringIndices.length];
+        const ta = uvOf[a];
+        const tb = uvOf[b];
         if (rim) {
-          mesh.faces.push([front[a], front[b], rim[b], rim[a]]);
-          mesh.faces.push([rim[a], rim[b], back[b], back[a]]);
-          mesh.faceMaterial.push(0, 0);
+          addFace([front[a], front[b], rim[b], rim[a]], [...ta, ...tb, ...tb, ...ta]);
+          addFace([rim[a], rim[b], back[b], back[a]], [...ta, ...tb, ...tb, ...ta]);
         } else {
-          mesh.faces.push([front[a], front[b], back[b], back[a]]);
-          mesh.faceMaterial.push(0);
+          addFace([front[a], front[b], back[b], back[a]], [...ta, ...tb, ...tb, ...ta]);
         }
       }
     }
   }
 
+  mesh.faceUV = uv;
   mesh.cleanDegenerate();
   mesh.removeLooseVertices();
   if (mesh.faceCount > 0) recalculateNormals(mesh);
@@ -173,6 +196,60 @@ export function meshFromSilhouette(bitmap: Bitmap, options: SilhouetteOptions = 
     mesh,
     stats: { ms: Date.now() - started, loops: loopCount, verts: mesh.vertCount, faces: mesh.faceCount },
   };
+}
+
+/**
+ * A texture coordinate for every triangulated vertex, stepped off the outline.
+ *
+ * The inward direction comes from the triangulation itself: each vertex is
+ * pushed toward the average of the centroids of the triangles it belongs to,
+ * which points into the material whether the vertex is on the outer boundary
+ * or around a hole, and needs no assumption about winding. The step is then
+ * shortened until it lands on a pixel the mask calls subject, so a spike or a
+ * tight notch keeps its own colour rather than borrowing the background's.
+ */
+function insetTexCoords(
+  vertices: Point[], indices: number[], mask: Mask, bitmap: Bitmap,
+): [number, number][] {
+  const dir: Point[] = vertices.map(() => [0, 0]);
+  for (let i = 0; i < indices.length; i += 3) {
+    const tri = [indices[i], indices[i + 1], indices[i + 2]];
+    const cx = (vertices[tri[0]][0] + vertices[tri[1]][0] + vertices[tri[2]][0]) / 3;
+    const cy = (vertices[tri[0]][1] + vertices[tri[1]][1] + vertices[tri[2]][1]) / 3;
+    for (const v of tri) {
+      const dx = cx - vertices[v][0];
+      const dy = cy - vertices[v][1];
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-9) continue;
+      dir[v][0] += dx / len;
+      dir[v][1] += dy / len;
+    }
+  }
+
+  const inside = (px: number, py: number): boolean => {
+    const x = Math.round(px);
+    const y = Math.round(py);
+    if (x < 0 || y < 0 || x >= mask.width || y >= mask.height) return false;
+    return mask.data[y * mask.width + x] !== 0;
+  };
+  const uvPixel = (px: number, py: number): [number, number] => [
+    px / Math.max(1, bitmap.width - 1),
+    // The renderer uploads textures flipped, so v runs up from the bottom.
+    1 - py / Math.max(1, bitmap.height - 1),
+  ];
+
+  return vertices.map((p, v) => {
+    const len = Math.hypot(dir[v][0], dir[v][1]);
+    if (len < 1e-9) return uvPixel(p[0], p[1]);
+    const nx = dir[v][0] / len;
+    const ny = dir[v][1] / len;
+    for (let step = UV_INSET_PX; step > 0.4; step /= 2) {
+      const px = p[0] + nx * step;
+      const py = p[1] + ny * step;
+      if (inside(px, py)) return uvPixel(px, py);
+    }
+    return uvPixel(p[0], p[1]);
+  });
 }
 
 function range(start: number, count: number): number[] {
