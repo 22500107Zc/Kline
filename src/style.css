@@ -54,10 +54,33 @@ body {
 
 #app {
   display: grid;
-  grid-template-rows: 34px 2px 1fr 24px;
+  /* header · heat · recovery · workspace · timeline · status */
+  grid-template-rows: 34px 2px auto 1fr auto 24px;
   height: 100vh;
   height: 100dvh;
 }
+
+/*
+ * Every row is placed by hand rather than left to fall where it lands.
+ *
+ * There used to be four rows declared for six children, so the extras were
+ * auto-placed — and the moment the recovery bar appeared it took the 1fr row
+ * and stretched to the full height of the window. Opening the application
+ * with a recovered scene showed a wall of empty brown across the whole screen
+ * with two enormous buttons floating in the middle of it, which is not a
+ * layout anybody would trust with their work.
+ *
+ * Naming the rows alone would not fix it: a display:none child is not a grid
+ * item at all, so hiding the recovery bar would shift everything below it up
+ * a row and break the ordinary case instead. Pinning each child to its own
+ * row means a hidden one simply leaves an auto row measuring nothing.
+ */
+#app > .header { grid-row: 1; }
+#app > .heat-bar { grid-row: 2; }
+#app > .recovery-bar { grid-row: 3; }
+#app > .workspace { grid-row: 4; }
+#app > .timeline { grid-row: 5; }
+#app > .status-bar { grid-row: 6; }
 
 .mono {
   font-family: var(--mono);
@@ -1890,11 +1913,37 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 12px;
+  padding: 7px 14px;
   font-size: 12px;
   color: var(--ink);
   background: var(--ember-wash);
   border-bottom: 1px solid var(--ember-deep);
+}
+
+/*
+ * The message takes the room, the controls take what they need.
+ *
+ * Buttons in this application grow to fill their container, which is right in
+ * a sidebar column and wrong in a strip the width of the window: Restore and
+ * Discard came out about a third of the screen each.
+ */
+.recovery-bar > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recovery-bar .btn {
+  flex: 0 0 auto;
+  padding: 0 14px;
+}
+
+.recovery-bar .input {
+  flex: 0 0 auto;
+  width: auto;
+  max-width: 220px;
 }
 
 .tex-preview {

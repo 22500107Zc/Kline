@@ -1779,6 +1779,66 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     );
   });
 
+  test('the recovery prompt is a strip, not the whole window', async () => {
+    // The application's shell is a grid, and it declared four rows for six
+    // children. The extras were auto-placed, so the moment the recovery bar
+    // appeared it took the row meant for the workspace and stretched to the
+    // full height of the window: opening Kline with a recovered scene showed
+    // a wall of empty brown with two enormous buttons floating in the middle
+    // of it, and the 3D view squeezed into what was left.
+    //
+    // Nothing caught it because every test here starts from a clean store and
+    // never sees the bar. This one puts a scene in the store, asks for the
+    // prompt, and then measures the shell.
+    const shape = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const shell = window.kline.app;
+      ed.addPrimitive('cube');
+      await ed.autosaveNow(false);
+      shell.offerRecovery();
+      await new Promise((ok) => setTimeout(ok, 400));
+
+      const bar = document.querySelector('.recovery-bar');
+      const shown = bar && !bar.classList.contains('hidden');
+      const rect = bar.getBoundingClientRect();
+      const work = document.querySelector('.workspace').getBoundingClientRect();
+      return {
+        shown,
+        bar: Math.round(rect.height),
+        workspace: Math.round(work.height),
+        window: window.innerHeight,
+        buttons: [...bar.querySelectorAll('.btn')].map((b) => Math.round(b.getBoundingClientRect().width)),
+        pageWidth: window.innerWidth,
+      };
+    });
+
+    assert.equal(shape.shown, true, 'the recovery prompt never appeared, so nothing was measured');
+    // One line of controls. It was the better part of 600px.
+    assert.ok(
+      shape.bar < shape.window * 0.12,
+      `the recovery bar is ${shape.bar}px of a ${shape.window}px window`,
+    );
+    // And the workspace still gets the window, which is the half that matters:
+    // the bar being small is no use if it pushed the 3D view off the bottom.
+    assert.ok(
+      shape.workspace > shape.window * 0.7,
+      `the workspace was left ${shape.workspace}px of a ${shape.window}px window`,
+    );
+    // Buttons in this application grow to fill their container, which is right
+    // in a sidebar and wrong in a strip the width of the screen.
+    assert.ok(shape.buttons.length >= 2, 'the prompt has no buttons to check');
+    for (const w of shape.buttons) {
+      assert.ok(
+        w < shape.pageWidth * 0.2,
+        `a button is ${w}px wide in a ${shape.pageWidth}px window — they are stretching to fill`,
+      );
+    }
+
+    await page.evaluate(() => {
+      document.querySelector('.recovery-bar').classList.add('hidden');
+    });
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });
