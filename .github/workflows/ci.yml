@@ -15,9 +15,14 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # The browser half of the suite needs a real Chromium. Without one it
+      # used to skip itself and the job went green having run none of the
+      # tests that look at the screen.
+      - name: Install the browser the interaction tests need
+        run: npx playwright install --with-deps chromium
       - name: Typecheck
         run: npm run typecheck
-      - name: Unit tests
+      - name: Unit and browser tests
         run: npm test
       - name: Production build
         run: npx vite build

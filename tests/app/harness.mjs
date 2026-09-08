@@ -124,16 +124,33 @@ function serveDist() {
  * has no browser — a contributor without Playwright installed should see the
  * rest of the suite pass, not a wall of failures about something they did not
  * break.
+ *
+ * Except on a build machine, where skipping is the worst possible outcome.
+ * These are the tests that catch the faults unit tests cannot see — a layout
+ * off the side of the screen, a selection wash over a photograph, a depth
+ * model that will not load — and for a long time none of them ran there at
+ * all: Playwright was not a declared dependency, so continuous integration
+ * quietly ran the unit half and reported success. A safety net nobody can
+ * tell is missing is worse than no safety net. Under CI a missing browser is
+ * now a failure, and says which of the two is missing.
  */
+function refuseToSkip(reason) {
+  if (!process.env.CI) return { skip: reason };
+  throw new Error(
+    `${reason} — the browser tests cannot be skipped on a build machine. `
+    + 'Install the dev dependencies and run "npx playwright install chromium".',
+  );
+}
+
 export async function launchApp() {
   let playwright;
   try {
     playwright = await import('playwright-core');
   } catch {
-    return { skip: 'playwright-core is not installed' };
+    return refuseToSkip('playwright-core is not installed');
   }
   const executablePath = findChromium(playwright);
-  if (!executablePath) return { skip: 'no Chromium build was found' };
+  if (!executablePath) return refuseToSkip('no Chromium build was found');
 
   ensureBuild();
   const { server, port } = await serveDist();
