@@ -1,6 +1,6 @@
 {
   "name": "kline",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": false,
   "description": "Kline \u2014 an open source 3D modelling application. Runs in a browser tab or as a desktop app.",
   "license": "MIT",
@@ -56,7 +56,9 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "package.json"
+      "package.json",
+      "THIRD-PARTY-NOTICES.md",
+      "licences/**/*"
     ],
     "extraMetadata": {
       "main": "electron/main.cjs"
@@ -180,5 +182,8 @@
   "author": {
     "name": "Kline contributors",
     "email": "noreply@users.noreply.github.com"
+  },
+  "dependencies": {
+    "onnxruntime-web": "^1.29.0"
   }
 }

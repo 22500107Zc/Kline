@@ -32,6 +32,12 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.woff2': 'font/woff2',
   '.map': 'application/json',
+  // WebAssembly has to arrive as application/wasm or the browser refuses to
+  // compile it as a stream and the runtime quietly falls back to a slower
+  // path. Serving it correctly here is what makes the test honest about how
+  // the shipped application behaves.
+  '.wasm': 'application/wasm',
+  '.onnx': 'application/octet-stream',
 };
 
 /**

@@ -492,6 +492,37 @@ the UI are all in this repository, and each piece is readable on its own.
 | `.` `Home` | Frame selected, frame all |
 | `Ctrl+Z` `Ctrl+Shift+Z` | Undo, redo |
 
+### Photographs into models
+
+Two routes, because photographs come in two kinds.
+
+**Photo** finds the subject by colour, inflates it to a thickness that follows
+its own local width, adds surface relief from the shading, and projects the
+picture back on. It is exact for one object against a background you can tell
+apart from it, and it produces a closed solid you can print. When the colours
+are too close to separate, draw on the preview — a stroke over the subject and
+a stroke over the background are treated as fact, and the model is rebuilt from
+what you said.
+
+**Whole Scene** is for photographs with no single subject to cut out: a room, a
+street, somebody standing in front of something. It reads the distance to
+every part of the picture with a depth network — Depth Anything V2 Small,
+26MB, bundled — and builds the surface that describes. Where the depth steps
+between one thing and another the surface breaks rather than stretching, so a
+foreground stands in front of a background instead of being joined to it by a
+sheet of rubber.
+
+The depth model runs on your machine, through a WebAssembly runtime served from
+the application itself. Nothing is uploaded, and nothing is fetched from
+anywhere at run time — it works with the network unplugged. It is loaded the
+first time you ask for it and never otherwise, so a session that does not use
+it costs nothing.
+
+What one photograph cannot give you, either way, is the back of anything. Both
+routes are honest about that rather than inventing it.
+
+See `THIRD-PARTY-NOTICES.md` for the model's licence and attribution.
+
 ### Moving around the viewport
 
 `Option` on a Mac is `Alt` on Windows and Linux, and `Cmd` is `Ctrl`. Kline

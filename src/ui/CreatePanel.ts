@@ -8,6 +8,8 @@ import {
   meshFromHeightfield, meshFromLathe, meshFromSilhouette,
 } from '../imaging/generate';
 import { PhotoOptions, PhotoResult, meshFromPhoto } from '../imaging/photo';
+import { estimateDepth, patchAligned } from '../imaging/neuralDepth';
+import { meshFromDepth } from '../imaging/sceneDepth';
 import { DepthField, DepthOptions, depthFromPhoto } from '../imaging/depth';
 import {
   HINT_BACKGROUND, HINT_NONE, HINT_SUBJECT, MIN_SEPARATION, Matte, segmentSubject,
@@ -21,7 +23,7 @@ import {
 import { BackendInfo, generateMesh, probeBackend, storeEndpoint, storedEndpoint } from '../ai/client';
 import { button, checkbox, clear, h, numberField, row, select } from './dom';
 
-type Mode = 'photo' | 'silhouette' | 'lathe' | 'relief';
+type Mode = 'photo' | 'scene' | 'silhouette' | 'lathe' | 'relief';
 
 const MODES: { id: Mode; label: string; blurb: string }[] = [
   {
@@ -29,6 +31,14 @@ const MODES: { id: Mode; label: string; blurb: string }[] = [
     label: 'Photo',
     blurb: 'Find the subject by colour, inflate it to its own thickness, and project the photo back on. '
       + 'The far side is the near side, shallower — a photograph does not contain the back.',
+  },
+  {
+    id: 'scene',
+    label: 'Whole Scene',
+    blurb: 'Read the distance to everything in the picture with a depth network that runs on this '
+      + 'machine, and build the surface it describes. For photographs that have no single subject '
+      + 'to cut out — a room, a street, somebody standing in front of something. Correct in front, '
+      + 'hollow behind: one photograph cannot see round anything.',
   },
   { id: 'silhouette', label: 'Cut Out', blurb: 'Trace the outline and extrude it into a flat solid.' },
   { id: 'lathe', label: 'Turn', blurb: 'Spin the profile around a vertical axis.' },
@@ -48,6 +58,19 @@ export class CreatePanel {
   private reference: Reference | null = null;
   private bitmap: Bitmap | null = null;
   private mode: Mode = 'photo';
+  /** Settings for the depth-network route. */
+  private scene = {
+    resolution: 220,
+    targetWidth: 3,
+    relief: 1.1,
+    cut: 0.06,
+    smoothing: 1,
+    /** Square side handed to the network; a multiple of its 14px patch. */
+    modelSize: 392,
+    texture: true,
+  };
+  private sceneRunning = false;
+  private sceneNote = h('p', { class: 'dim small' });
   private targetId: number | null = null;
   /** The name this panel gave the target, so a user rename is never clobbered. */
   private assignedName = '';
@@ -391,6 +414,29 @@ export class CreatePanel {
       num('Back fullness', this.photo.back, 0.05, (v) => { this.photo.back = v; }, { min: 0, max: 1 });
       toggle('Project the photo on as a texture', this.photo.texture, (v) => { this.photo.texture = v; });
       section.appendChild(this.brushControls());
+    } else if (this.mode === 'scene') {
+      num('Detail', this.scene.resolution, 10, (v) => { this.scene.resolution = Math.round(v); },
+        { min: 16, max: 512, precision: 0 });
+      num('Width', this.scene.targetWidth, 0.1, (v) => { this.scene.targetWidth = v; }, { min: 0.1 });
+      num('Depth', this.scene.relief, 0.05, (v) => { this.scene.relief = v; }, { min: 0.01, max: 6 });
+      num('Break at edges', this.scene.cut, 0.01, (v) => { this.scene.cut = v; }, { min: 0.01, max: 1 });
+      num('Smoothing', this.scene.smoothing, 1, (v) => { this.scene.smoothing = Math.round(v); },
+        { min: 0, max: 8, precision: 0 });
+      num('Model detail', this.scene.modelSize, 14, (v) => { this.scene.modelSize = patchAligned(v); },
+        { min: 112, max: 644, precision: 0 });
+      toggle('Project the photo on as a texture', this.scene.texture, (v) => { this.scene.texture = v; });
+      section.appendChild(h('div', { class: 'btn-row' }, [
+        button(this.sceneRunning ? 'Reading the picture…' : 'Build the scene', () => {
+          if (this.sceneRunning) return;
+          void this.runSceneDepth();
+        }, { class: 'primary', title: 'Estimate depth for the whole frame and build the surface' }),
+      ]));
+      section.appendChild(this.sceneNote);
+      if (!this.sceneRunning && !this.sceneNote.textContent) {
+        this.sceneNote.textContent =
+          'The depth model is 26MB and loads the first time you use it. It runs here — nothing '
+          + 'about your picture leaves this machine.';
+      }
     } else if (this.mode === 'silhouette') {
       num('Depth', this.silhouette.depth, 0.02, (v) => { this.silhouette.depth = v; }, { min: 0.001 });
       num('Height', this.silhouette.targetHeight, 0.05, (v) => { this.silhouette.targetHeight = v; }, { min: 0.01 });
@@ -584,6 +630,15 @@ export class CreatePanel {
 
   private generateNow(commit: boolean, refit = false): void {
     if (!this.bitmap) return;
+    // The depth route is not one of these. It costs seconds rather than
+    // milliseconds, so it runs from its own button and never from a slider —
+    // without this, nudging one of its settings would quietly build a
+    // brightness relief instead, which is a different thing that looks a
+    // little like the right answer.
+    if (this.mode === 'scene') {
+      this.drawPreview();
+      return;
+    }
     if (this.busy) {
       this.pending = true;
       return;
@@ -710,6 +765,78 @@ export class CreatePanel {
     });
     this.noteCoverage(result);
     return result;
+  }
+
+  /**
+   * Read the whole picture with the depth network and build what it describes.
+   *
+   * Separate from `generate()` and deliberately behind a button. The other
+   * routes are milliseconds and can run on every nudge of a slider; this one
+   * loads 26MB the first time and then takes a second or several, so running
+   * it by accident would be the difference between an application that feels
+   * instant and one that does not. Everything it needs is bundled, so it works
+   * with the network unplugged.
+   */
+  private async runSceneDepth(): Promise<void> {
+    const bitmap = this.bitmap;
+    const ref = this.reference;
+    if (!bitmap || !ref || this.sceneRunning) return;
+    this.sceneRunning = true;
+    this.build();
+    const say = (text: string): void => {
+      this.sceneNote.textContent = text;
+      this.editor.setStatus(text);
+    };
+    say('Loading the depth model…');
+    try {
+      const depth = await estimateDepth(bitmap, {
+        size: this.scene.modelSize,
+        onProgress: (f) => {
+          if (f < 1) say(`Loading the depth model… ${Math.round(f * 100)}%`);
+          else say('Reading the picture…');
+        },
+      });
+      const result = meshFromDepth(bitmap, depth, {
+        resolution: this.scene.resolution,
+        targetWidth: this.scene.targetWidth,
+        relief: this.scene.relief,
+        cut: this.scene.cut,
+        smoothing: this.scene.smoothing,
+      });
+      if (result.mesh.faceCount === 0) {
+        say('The model read this frame as one flat distance, so there is no surface to build.');
+        return;
+      }
+
+      let object = this.editor.scene.get(this.targetId);
+      if (!object) {
+        this.editor.beginUndo('Build scene from photo');
+        object = this.editor.scene.add('mesh', this.editor.scene.uniqueName('Scene'), result.mesh);
+        object.position = this.placementFor(result.mesh);
+        this.targetId = object.id;
+        this.assignedName = object.name;
+        this.editor.selectObject(object.id);
+      } else {
+        object.mesh = result.mesh;
+      }
+      if (this.scene.texture) this.applyPhotoTexture(object);
+      else object.materialSlots = [this.editor.scene.ensureDefaultMaterial()];
+      this.editor.markGeometryDirty(object);
+      this.editor.frameSelected();
+
+      const { stats } = result;
+      this.statsLine.textContent =
+        `${stats.verts.toLocaleString()} verts · ${stats.faces.toLocaleString()} faces · ${stats.ms} ms`;
+      say(`Scene built — ${stats.faces.toLocaleString()} faces, ${Math.round(result.covered * 100)}% of the `
+        + `frame joined up, ${(depth.ms / 1000).toFixed(1)}s in the depth model.`);
+    } catch (err) {
+      // A failure here has to be a sentence, not a silence: this is the route
+      // people reach for when the others could not do their photograph.
+      say(`The depth model could not run: ${(err as Error).message}`);
+    } finally {
+      this.sceneRunning = false;
+      this.build();
+    }
   }
 
   /** Remember what the last photo build found, for the line under the settings. */

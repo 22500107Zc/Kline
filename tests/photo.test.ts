@@ -7,6 +7,8 @@ import {
 import { depthFromPhoto, inflationField, symmetryAxis } from '../src/imaging/depth';
 import { meshFromPhoto } from '../src/imaging/photo';
 import { Mesh } from '../src/mesh/Mesh';
+import { meshFromDepth } from '../src/imaging/sceneDepth';
+import { patchAligned } from '../src/imaging/neuralDepth';
 
 /**
  * Photograph to model.
@@ -512,4 +514,75 @@ test('an unmarked photograph is segmented exactly as it was before', () => {
   const plain = segmentSubject(bitmap);
   const empty = segmentSubject(bitmap, { hints: new Uint8Array(140 * 140) });
   assert.deepEqual(Array.from(empty.data), Array.from(plain.data));
+});
+
+test('a depth map becomes a surface that stands the right way up', () => {
+  // The depth route answers a different question from the rest of this file —
+  // "how far away is everything" rather than "what is this object" — so the
+  // only thing shared with the silhouette pipeline is which way is up. A scene
+  // and an object built from the same photograph have to stand the same way,
+  // or dropping one beside the other looks like a bug.
+  const w = 40;
+  const hgt = 30;
+  const data = new Float32Array(w * hgt);
+  // Near at the bottom of the frame, far at the top: a floor receding away.
+  // The map is inverse depth, so 1 is the nearest — the bottom row.
+  for (let y = 0; y < hgt; y++) for (let x = 0; x < w; x++) data[y * w + x] = y / (hgt - 1);
+  const depth = { width: w, height: hgt, data, ms: 0 };
+  const bitmap = frame(80, 60, [120, 120, 120]);
+
+  const { mesh, covered } = meshFromDepth(bitmap, depth, { resolution: 40, targetWidth: 3, relief: 1 });
+  assert.ok(mesh.faceCount > 0, 'nothing was built from the depth map');
+  assert.ok(covered > 0.99, `only ${(covered * 100).toFixed(0)}% of a smooth frame was joined up`);
+
+  const box = mesh.bounds();
+  // X across, Z up, Y the distance away — the same convention meshFromPhoto uses.
+  assert.ok(Math.abs((box.max.x - box.min.x) - 3) < 0.01, 'the scene is not the width asked for');
+  assert.ok(box.max.z - box.min.z > 1, 'the scene has no height');
+  assert.ok(Math.abs((box.max.y - box.min.y) - 1) < 0.02, 'the depth range is not the relief asked for');
+
+  // The bottom of the picture is nearest, and nearest is towards -Y.
+  const lowest = mesh.positions.reduce((a, b) => (b.z < a.z ? b : a));
+  const highest = mesh.positions.reduce((a, b) => (b.z > a.z ? b : a));
+  assert.ok(lowest.y < highest.y, 'the near end of the floor did not come out nearest the camera');
+  assert.equal(mesh.hasUV, true, 'the surface has no texture coordinates');
+});
+
+test('the surface breaks at a step instead of stretching across it', () => {
+  // A photograph does not connect the near edge of a table to the wall behind
+  // it, but a grid laid over one does. Left alone that drags a sheet of rubber
+  // between them, which is the single thing that makes depth-map geometry look
+  // fake. Cells spanning a step are dropped instead.
+  const w = 60;
+  const hgt = 60;
+  const data = new Float32Array(w * hgt);
+  // Two flat planes at very different distances, meeting down the middle.
+  for (let y = 0; y < hgt; y++) for (let x = 0; x < w; x++) data[y * w + x] = x < w / 2 ? 0.9 : 0.1;
+  const depth = { width: w, height: hgt, data, ms: 0 };
+  const bitmap = frame(60, 60, [100, 100, 100]);
+
+  const joined = meshFromDepth(bitmap, depth, { resolution: 60, cut: 1, smoothing: 0 });
+  const broken = meshFromDepth(bitmap, depth, { resolution: 60, cut: 0.1, smoothing: 0 });
+
+  assert.ok(joined.covered > 0.99, 'with cutting off, the whole frame should still be one sheet');
+  assert.ok(broken.covered < joined.covered, 'cutting removed nothing at a step of 0.8');
+  assert.ok(broken.covered > 0.9, `cutting removed ${((1 - broken.covered) * 100).toFixed(0)}% — far too much`);
+  // Nothing left should span the gap.
+  let widest = 0;
+  for (let f = 0; f < broken.mesh.faces.length; f++) {
+    const ys = broken.mesh.faces[f].map((v) => broken.mesh.positions[v].y);
+    widest = Math.max(widest, Math.max(...ys) - Math.min(...ys));
+  }
+  assert.ok(widest < 0.2, `a face still spans ${widest.toFixed(2)} of depth across the step`);
+});
+
+test('the depth model input size is held to the patch grid', () => {
+  // The model is a vision transformer with a 14px patch; anything else is
+  // rejected at run time, which would be a failure the user sees rather than
+  // one the slider prevents.
+  for (const asked of [100, 250, 333, 392, 500, 9000]) {
+    const got = patchAligned(asked);
+    assert.equal(got % 14, 0, `${asked} rounded to ${got}, which is not a multiple of 14`);
+    assert.ok(got >= 112 && got <= 644, `${asked} rounded to ${got}, outside the workable range`);
+  }
 });

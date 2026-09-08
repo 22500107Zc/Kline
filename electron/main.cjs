@@ -48,15 +48,43 @@ function saveWindowState(win) {
   }
 }
 
+/*
+ * Content types the bundle needs stated explicitly.
+ *
+ * Fetching a file:// URL does not reliably label what comes back, and one of
+ * these matters a great deal: WebAssembly has to arrive as application/wasm or
+ * the browser refuses to compile it as a stream. It still runs — it falls back
+ * to buffering the whole 13MB and compiling that — but slower, and with a
+ * console error that looks like a fault. The depth model is 26MB of
+ * octet-stream for the same reason.
+ */
+const CONTENT_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.woff2': 'font/woff2',
+  '.wasm': 'application/wasm',
+  '.onnx': 'application/octet-stream',
+};
+
 function serveBundle() {
-  protocol.handle('kline', (request) => {
+  protocol.handle('kline', async (request) => {
     const url = new URL(request.url);
     let pathname = decodeURIComponent(url.pathname);
     if (pathname === '' || pathname === '/') pathname = '/index.html';
     const target = path.join(DIST, path.normalize(pathname));
     if (!target.startsWith(DIST)) return new Response('Forbidden', { status: 403 });
     if (!fs.existsSync(target)) return new Response('Not found', { status: 404 });
-    return net.fetch(pathToFileURL(target).toString());
+    const response = await net.fetch(pathToFileURL(target).toString());
+    const type = CONTENT_TYPES[path.extname(target).toLowerCase()];
+    if (!type) return response;
+    const headers = new Headers(response.headers);
+    headers.set('Content-Type', type);
+    return new Response(response.body, { status: response.status, headers });
   });
 }
 

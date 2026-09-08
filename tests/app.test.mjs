@@ -1950,6 +1950,121 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     assert.ok(out.after.faces > 500, `the corrected model has ${out.after.faces} faces`);
   });
 
+  test('a photograph with no subject to cut out still becomes geometry', async () => {
+    // This is the claim the application is sold on, and it is the one thing
+    // the silhouette pipeline cannot do: a picture with no single object to
+    // find — a corridor, two things at different distances, converging walls.
+    // There is nothing to segment and no outline to inflate, so it goes to the
+    // depth network instead. If this test fails, the headline feature is gone.
+    //
+    // It really loads the 26MB model and really runs it, because the point is
+    // that the model is bundled and works with nothing fetched from anywhere.
+    const out = await page.evaluate(async () => {
+      const W = 480, H = 360;
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      const g = c.getContext('2d');
+      const im = g.createImageData(W, H);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        const t = y / H, horizon = 0.42;
+        let r, gg, b;
+        if (t < horizon) { r = 130 - t * 50; gg = 145 - t * 50; b = 170 - t * 40; }
+        else {
+          const f = (t - horizon) / (1 - horizon);
+          r = 95 + f * 55; gg = 85 + f * 50; b = 72 + f * 40;
+          if (Math.floor(f * 12) % 2 === 0) { r -= 12; gg -= 12; b -= 10; }
+        }
+        const edge = 0.5 - Math.abs(x / W - 0.5);
+        if (t > horizon && edge < 0.06 + (1 - (t - horizon) / (1 - horizon)) * 0.18) {
+          r *= 0.55; gg *= 0.55; b *= 0.6;
+        }
+        if (x > 300 && x < 440 && y > 250 && y < 340) { r = 195; gg = 95; b = 70; }
+        if (x > 215 && x < 255 && y > 175 && y < 215) { r = 70; gg = 155; b = 195; }
+        im.data[i] = r; im.data[i + 1] = gg; im.data[i + 2] = b; im.data[i + 3] = 255;
+      }
+      g.putImageData(im, 0, 0);
+      const blob = await new Promise((ok) => c.toBlob(ok, 'image/png'));
+      window.kline.app.properties.openCreate(new File([blob], 'corridor.png', { type: 'image/png' }));
+      const ed = window.kline.editor;
+      const started = ed.scene.objects.size;
+      for (let i = 0; i < 300 && ed.scene.objects.size === started; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await new Promise((r) => setTimeout(r, 400));
+
+      // Chosen and pressed the way a person does it.
+      const mode = [...document.querySelectorAll('.mode-btn')]
+        .find((b) => b.textContent.trim() === 'Whole Scene');
+      if (!mode) return { error: 'there is no Whole Scene mode' };
+      mode.click();
+      await new Promise((r) => setTimeout(r, 300));
+      const build = [...document.querySelectorAll('button')]
+        .find((b) => b.textContent.trim() === 'Build the scene');
+      if (!build) return { error: 'there is no button to build a scene' };
+      build.click();
+
+      const panel = window.kline.app.properties.create;
+      for (let i = 0; i < 1500; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        const note = panel.sceneNote?.textContent ?? '';
+        if (/could not run|no surface/.test(note)) return { error: note };
+        if (!/joined up/.test(note)) continue;
+        // The object the panel itself built. Searching the scene for "a mesh
+        // with a lot of faces" finds whatever an earlier test left lying
+        // around, and then measures that instead — which is exactly what it
+        // did, and reported the depth ordering backwards for an object that
+        // has no depth ordering.
+        const model = ed.scene.get(panel.targetId);
+        if (!model || !model.mesh) return { error: `reported "${note}" but built nothing` };
+        const box = model.mesh.bounds();
+        // Where the two boxes ended up, in the model's own coordinates.
+        const near = { x: (370 / W - 0.5), z: (0.5 - 295 / H) };
+        const far = { x: (235 / W - 0.5), z: (0.5 - 195 / H) };
+        const depthNear = (p) => {
+          let best = null;
+          let bestD = Infinity;
+          for (const v of model.mesh.positions) {
+            const d = (v.x / (box.max.x - box.min.x) - p.x) ** 2
+              + (v.z / (box.max.z - box.min.z) - p.z) ** 2;
+            if (d < bestD) { bestD = d; best = v; }
+          }
+          return best ? best.y : 0;
+        };
+        return {
+          note,
+          faces: model.mesh.faceCount,
+          hasUV: model.mesh.hasUV,
+          width: +(box.max.x - box.min.x).toFixed(2),
+          depth: +(box.max.y - box.min.y).toFixed(2),
+          nearBoxY: depthNear(near),
+          farBoxY: depthNear(far),
+          textures: ed.scene.textures.length,
+          textured: (() => {
+            const slot = model.materialSlots[0];
+            const mat = ed.scene.materials[slot];
+            return !!mat && mat.baseColorTexture != null;
+          })(),
+        };
+      }
+      return { error: 'the depth model never finished' };
+    });
+
+    assert.equal(out.error, undefined, `the scene route failed: ${out.error}`);
+    assert.ok(out.faces > 5000, `the scene came out with only ${out.faces} faces`);
+    assert.equal(out.hasUV, true, 'the scene has no texture coordinates, so the photo cannot go on it');
+    assert.ok(out.textures >= 1, 'the photograph was not kept as a texture');
+    assert.equal(out.textured, true, 'the scene is not wearing the photograph it was built from');
+    assert.ok(out.depth > 0.2, `the scene is ${out.depth} deep, which is a flat sheet`);
+    // The whole point: the near box has to come out nearer than the far one.
+    // Nearest is towards -Y, so the near box's depth must be the smaller.
+    assert.ok(
+      out.nearBoxY < out.farBoxY,
+      `the near box came out at y=${out.nearBoxY.toFixed(3)} and the far one at `
+      + `y=${out.farBoxY.toFixed(3)} — the depth ordering is wrong`,
+    );
+  });
+
   test('nothing runs off the side of the window, at any width', async () => {
     // The whole right-hand side of the application used to sit past the edge
     // of the screen: property fields cut in half, a Restore button reading
