@@ -12,6 +12,26 @@ export function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+/**
+ * A number from outside, held to a range, with anything unusable replaced.
+ *
+ * Not the same job as `clamp`, which is for numbers that are already known to
+ * be numbers and deliberately lets NaN through — every comparison against NaN
+ * is false, so it falls out of the middle unchanged. That is the right
+ * behaviour inside a solver and a trap at the edge of one.
+ *
+ * Settings arrive from number fields a user can empty, from sliders, and from
+ * scene files written by older versions or by nothing at all. A NaN among
+ * them used to travel straight into vertex positions and produce a mesh that
+ * renders as nothing, exports as garbage and gives no clue where it came
+ * from; an absurd value could put a smoothing loop into a million passes and
+ * hang the window. This is what every generator's options go through.
+ */
+export function setting(value: number | null | undefined, fallback: number, lo: number, hi: number): number {
+  const v = typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
 export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }

@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Bitmap } from '../src/imaging/contour';
 import {
-  HINT_BACKGROUND, HINT_SUBJECT, matteCoverage, matteToMask, segmentSubject,
+  HINT_BACKGROUND, HINT_SUBJECT, SegmentOptions, matteCoverage, matteToMask, segmentSubject,
 } from '../src/imaging/segment';
-import { depthFromPhoto, inflationField, symmetryAxis } from '../src/imaging/depth';
-import { meshFromPhoto } from '../src/imaging/photo';
+import { DepthOptions, depthFromPhoto, inflationField, symmetryAxis } from '../src/imaging/depth';
+import { PhotoOptions, meshFromPhoto } from '../src/imaging/photo';
 import { Mesh } from '../src/mesh/Mesh';
 import { meshFromDepth } from '../src/imaging/sceneDepth';
 import { patchAligned } from '../src/imaging/neuralDepth';
@@ -584,5 +584,109 @@ test('the depth model input size is held to the patch grid', () => {
     const got = patchAligned(asked);
     assert.equal(got % 14, 0, `${asked} rounded to ${got}, which is not a multiple of 14`);
     assert.ok(got >= 112 && got <= 644, `${asked} rounded to ${got}, outside the workable range`);
+  }
+});
+
+test('no setting, however absurd, can produce a broken model', () => {
+  // Every one of these is reachable: a number field the user clears reads as
+  // NaN, a slider can be driven to its limit, and a scene file written by an
+  // older version — or by nothing at all — can carry any value.
+  //
+  // Math.max and Math.min do not clamp NaN, they return it, so a NaN setting
+  // used to travel all the way into vertex positions. What came out rendered
+  // as nothing, exported as garbage, and gave no clue where it came from.
+  // Fourteen of these were live at once. One of them — a softening radius of
+  // a million — hung the window rather than producing anything at all.
+  const bitmap = paint(frame(90, 110, [180, 130, 70]), disc(45, 55, 30), [60, 120, 220]);
+
+  const finite = (result: { mesh: Mesh }, label: string): void => {
+    for (const p of result.mesh.positions) {
+      assert.ok(
+        Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z),
+        `${label} produced the vertex (${p.x}, ${p.y}, ${p.z})`,
+      );
+    }
+    for (let f = 0; f < result.mesh.faces.length; f++) {
+      for (const v of result.mesh.faces[f]) {
+        assert.ok(
+          v >= 0 && v < result.mesh.positions.length,
+          `${label} produced the out-of-range face index ${v}`,
+        );
+      }
+      const uv = result.mesh.uvFor(f);
+      if (uv) for (const n of uv) assert.ok(Number.isFinite(n), `${label} produced the coordinate ${n}`);
+    }
+  };
+
+  const hostile: [string, PhotoOptions][] = [
+    ['resolution NaN', { resolution: NaN }],
+    ['resolution 1e9', { resolution: 1e9 }],
+    ['targetHeight NaN', { targetHeight: NaN }],
+    ['targetHeight Infinity', { targetHeight: Infinity }],
+    ['targetHeight -3', { targetHeight: -3 }],
+    ['depthScale NaN', { depthScale: NaN }],
+    ['back NaN', { back: NaN }],
+    ['back 50', { back: 50 }],
+  ];
+  for (const [label, options] of hostile) finite(meshFromPhoto(bitmap, options), label);
+
+  // The depth solve and the segmentation are reachable with the same values.
+  const matte = segmentSubject(bitmap);
+  for (const [label, options] of [
+    ['volume NaN', { volume: NaN }],
+    ['detail NaN', { detail: NaN }],
+    ['detailScale NaN', { detailScale: NaN }],
+    ['symmetry NaN', { symmetry: NaN }],
+    ['smoothing NaN', { smoothing: NaN }],
+  ] as [string, DepthOptions][]) {
+    const field = depthFromPhoto(bitmap, matte, options);
+    for (let i = 0; i < field.data.length; i++) {
+      assert.ok(Number.isFinite(field.data[i]), `${label} produced the depth ${field.data[i]}`);
+    }
+    assert.ok(Number.isFinite(field.peak), `${label} produced the peak ${field.peak}`);
+  }
+
+  for (const [label, options] of [
+    ['feather NaN', { feather: NaN }],
+    ['border NaN', { border: NaN }],
+    ['clusters NaN', { clusters: NaN }],
+    ['edgeSnap NaN', { edgeSnap: NaN }],
+  ] as [string, SegmentOptions][]) {
+    const m = segmentSubject(bitmap, options);
+    for (let i = 0; i < m.data.length; i++) {
+      assert.ok(Number.isFinite(m.data[i]), `${label} produced the matte value ${m.data[i]}`);
+    }
+  }
+
+  // And the one that hung: a blur radius is a cost, so it is bounded as well
+  // as guarded. Two seconds is generous for a 90x110 frame; the unbounded
+  // version did not come back at all.
+  const started = Date.now();
+  segmentSubject(bitmap, { feather: 1e6 });
+  assert.ok(Date.now() - started < 2000, 'a softening radius of a million still hangs');
+});
+
+test('a depth map full of rubbish still produces a usable mesh', () => {
+  // The scene route takes a depth map, and a depth map can be handed in by a
+  // caller rather than produced by the network. One bad value would otherwise
+  // put a NaN in a vertex, which spreads through the normals and renders the
+  // whole object as nothing.
+  const bitmap = frame(40, 30, [120, 120, 120]);
+  for (const [label, fill] of [
+    ['NaN', () => NaN],
+    ['Infinity', () => Infinity],
+    ['-Infinity', () => -Infinity],
+    ['1e30', () => 1e30],
+    ['negative', (i: number) => -(i % 5)],
+  ] as [string, (i: number) => number][]) {
+    const data = new Float32Array(40 * 30);
+    for (let i = 0; i < data.length; i++) data[i] = fill(i);
+    const r = meshFromDepth(bitmap, { width: 40, height: 30, data, ms: 0 }, { resolution: 30 });
+    for (const p of r.mesh.positions) {
+      assert.ok(
+        Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z),
+        `a depth map of ${label} produced the vertex (${p.x}, ${p.y}, ${p.z})`,
+      );
+    }
   }
 });

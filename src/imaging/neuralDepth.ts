@@ -146,7 +146,11 @@ async function session(onProgress?: (f: number) => void): Promise<Session> {
 
 /** Round a size to the patch grid the model needs, within sane bounds. */
 export function patchAligned(size: number): number {
-  const clamped = Math.max(PATCH * 8, Math.min(PATCH * 46, Math.round(size)));
+  // Not simply clamped: Math.max and Math.min hand NaN straight back, and a
+  // NaN here becomes a tensor shape the runtime rejects with an error the user
+  // has no way to understand.
+  const wanted = Number.isFinite(size) ? size : 392;
+  const clamped = Math.max(PATCH * 8, Math.min(PATCH * 46, Math.round(wanted)));
   return Math.round(clamped / PATCH) * PATCH;
 }
 

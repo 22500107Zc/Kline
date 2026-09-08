@@ -1,3 +1,4 @@
+import { setting } from '../core/math';
 import { Bitmap } from './contour';
 import { Matte, labFromBitmap } from './segment';
 
@@ -269,9 +270,9 @@ export function symmetryAxis(matte: Matte): Symmetry {
 /** The finished half-thickness of the subject at every pixel. */
 export function depthFromPhoto(bitmap: Bitmap, matte: Matte, options: DepthOptions = {}): DepthField {
   const { width, height } = matte;
-  const volume = Math.max(0, Math.min(2, options.volume ?? 1));
-  const detailGain = Math.max(0, Math.min(1, options.detail ?? 0.35));
-  const smoothing = Math.max(0, Math.min(6, Math.floor(options.smoothing ?? 2)));
+  const volume = setting(options.volume, 1, 0, 2);
+  const detailGain = setting(options.detail, 0.35, 0, 1);
+  const smoothing = Math.floor(setting(options.smoothing, 2, 0, 6));
 
   const inflation = inflationField(matte);
   let peak = 0;
@@ -281,7 +282,8 @@ export function depthFromPhoto(bitmap: Bitmap, matte: Matte, options: DepthOptio
   if (peak <= 0) return { width, height, data, peak: 0 };
 
   const relief = detailGain > 0
-    ? shadingRelief(lumaPlane(bitmap), width, height, options.detailScale ?? Math.max(4, peak * 0.5))
+    ? shadingRelief(lumaPlane(bitmap), width, height,
+      setting(options.detailScale, Math.max(4, peak * 0.5), 1, 4096))
     : null;
 
   for (let i = 0; i < data.length; i++) {
@@ -300,7 +302,7 @@ export function depthFromPhoto(bitmap: Bitmap, matte: Matte, options: DepthOptio
     data[i] = Math.max(base * 0.15, z);
   }
 
-  const symmetry = Math.max(0, Math.min(1, options.symmetry ?? 0.5));
+  const symmetry = setting(options.symmetry, 0.5, 0, 1);
   if (symmetry > 0) {
     const mirror = symmetryAxis(matte);
     // Ramped in rather than switched on: an object that mirrors at 0.8 gets a

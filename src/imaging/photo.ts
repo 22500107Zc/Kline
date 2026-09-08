@@ -1,4 +1,4 @@
-import { Vec3 } from '../core/math';
+import { Vec3, setting } from '../core/math';
 import { Mesh } from '../mesh/Mesh';
 import { recalculateNormals } from '../mesh/ops';
 import { Bitmap } from './contour';
@@ -185,10 +185,10 @@ function insetLookup(matte: Matte, radius: number): Int32Array | null {
 
 export function meshFromPhoto(bitmap: Bitmap, options: PhotoOptions = {}): PhotoResult {
   const started = Date.now();
-  const resolution = Math.max(24, Math.min(400, Math.floor(options.resolution ?? 160)));
-  const targetHeight = options.targetHeight ?? 2;
-  const depthScale = Math.max(0.02, Math.min(4, options.depthScale ?? 1));
-  const back = Math.max(0, Math.min(1, options.back ?? 0.8));
+  const resolution = Math.floor(setting(options.resolution, 160, 24, 400));
+  const targetHeight = setting(options.targetHeight, 2, 0.001, 1e4);
+  const depthScale = setting(options.depthScale, 1, 0.02, 4);
+  const back = setting(options.back, 0.8, 0, 1);
 
   const matte = options.matte ?? segmentSubject(bitmap, options.segment);
   const field = options.field ?? depthFromPhoto(bitmap, matte, options.depth);

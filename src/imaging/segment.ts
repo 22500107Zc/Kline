@@ -1,3 +1,4 @@
+import { setting } from '../core/math';
 import { Bitmap, Mask } from './contour';
 
 /**
@@ -262,10 +263,10 @@ export function segmentSubject(bitmap: Bitmap, options: SegmentOptions = {}): Ma
   const cutout = alphaMatte(bitmap);
   if (cutout) return cutout;
 
-  const border = Math.max(1, Math.round((options.border ?? 0.06) * Math.min(width, height)));
-  const passes = Math.max(1, Math.min(8, Math.floor(options.passes ?? 3)));
-  const clusters = Math.max(1, Math.min(12, Math.floor(options.clusters ?? 5)));
-  const edgeSnap = Math.max(0, Math.min(1, options.edgeSnap ?? 0.7));
+  const border = Math.max(1, Math.round(setting(options.border, 0.06, 0, 0.49) * Math.min(width, height)));
+  const passes = Math.floor(setting(options.passes, 3, 1, 8));
+  const clusters = Math.floor(setting(options.clusters, 5, 1, 12));
+  const edgeSnap = setting(options.edgeSnap, 0.7, 0, 1);
 
   const lab = labFromBitmap(bitmap);
 
@@ -391,7 +392,9 @@ export function segmentSubject(bitmap: Bitmap, options: SegmentOptions = {}): Ma
     return { width, height, data, separation };
   }
 
-  feather(data, width, height, options.feather ?? 1.2);
+  // Bounded as well as guarded: the softening is a blur whose cost grows with
+  // its radius, and a radius of a million is a window that never comes back.
+  feather(data, width, height, setting(options.feather, 1.2, 0, 32));
   pinHints();
   return { width, height, data, separation };
 }

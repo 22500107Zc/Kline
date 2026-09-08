@@ -13,7 +13,7 @@
  * information a single photograph contains.
  */
 
-import { Vec3 } from '../core/math';
+import { Vec3, setting } from '../core/math';
 import { Mesh } from '../mesh/Mesh';
 import { recalculateNormals } from '../mesh/ops';
 import { Bitmap } from './contour';
@@ -121,11 +121,11 @@ export function meshFromDepth(
   });
   if (bitmap.width === 0 || bitmap.height === 0 || depth.data.length === 0) return empty();
 
-  const resolution = Math.max(16, Math.min(512, Math.floor(options.resolution ?? 220)));
-  const targetWidth = options.targetWidth ?? 3;
-  const relief = Math.max(0.01, options.relief ?? 1.1);
-  const cut = Math.max(0.01, Math.min(1, options.cut ?? 0.06));
-  const smoothing = Math.max(0, Math.min(8, Math.floor(options.smoothing ?? 1)));
+  const resolution = Math.floor(setting(options.resolution, 220, 16, 512));
+  const targetWidth = setting(options.targetWidth, 3, 0.01, 1e4);
+  const relief = setting(options.relief, 1.1, 0.01, 1e3);
+  const cut = setting(options.cut, 0.06, 0.001, 1);
+  const smoothing = Math.floor(setting(options.smoothing, 1, 0, 8));
 
   const aspect = bitmap.width / bitmap.height;
   const nx = aspect >= 1 ? resolution : Math.max(2, Math.round(resolution * aspect));
@@ -137,7 +137,11 @@ export function meshFromDepth(
   const field = new Float32Array(nodes);
   for (let gy = 0; gy < ny; gy++) {
     for (let gx = 0; gx < nx; gx++) {
-      field[gy * nx + gx] = sample(depth, nx === 1 ? 0 : gx / (nx - 1), ny === 1 ? 0 : gy / (ny - 1));
+      const v = sample(depth, nx === 1 ? 0 : gx / (nx - 1), ny === 1 ? 0 : gy / (ny - 1));
+      // A depth map is not always ours: it can be handed in by a caller, and
+      // one bad value would otherwise put a NaN in a vertex, which spreads
+      // through the normals and renders the whole object as nothing.
+      field[gy * nx + gx] = Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
     }
   }
   smoothWithinSurfaces(field, nx, ny, cut, smoothing);
