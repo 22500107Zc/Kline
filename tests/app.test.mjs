@@ -1860,6 +1860,75 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     });
   });
 
+  test('nothing runs off the side of the window, at any width', async () => {
+    // The whole right-hand side of the application used to sit past the edge
+    // of the screen: property fields cut in half, a Restore button reading
+    // "Re", the shading controls gone entirely. Two causes, both the same
+    // mistake — a box that will not shrink below its own content.
+    //
+    // The workspace is a 42px toolbar, a viewport and a 262px sidebar, so its
+    // minimum is over a thousand pixels; as a grid item that minimum grew the
+    // shell's only column, and every row stretched to match. It looked like
+    // the header overflowing. The header was being dragged along by the row
+    // underneath it. Separately, five labelled tabs are wider than the
+    // sidebar, and that overflow widened the document by another 71px.
+    //
+    // Checked at several widths because each fault appeared at a different
+    // one, and the wide case looked fine while the narrow case was unusable.
+    const widths = [1400, 1180, 980, 880];
+    const report = [];
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 760 });
+      await page.waitForTimeout(250);
+      report.push(await page.evaluate(() => {
+        const past = [];
+        for (const el of document.querySelectorAll('#app *')) {
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) continue;
+          // The status hint is deliberately allowed to run under its own
+          // clip and ellipsis; everything else has to fit.
+          if (el.closest('.status-right')) continue;
+          if (r.right > window.innerWidth + 1) {
+            past.push(`${el.className || el.tagName} +${Math.round(r.right - window.innerWidth)}px`);
+          }
+        }
+        // A tab with neither an icon nor a label is a blank patch you switch
+        // panels by guessing at. Hiding the labels on a narrow sidebar was
+        // meant to leave the icons; the icon is a span too, so it hid those
+        // as well and left five empty 12px tabs at every width up to 1180.
+        const tabs = [...document.querySelectorAll('.tab')].map((t) => {
+          const r = t.getBoundingClientRect();
+          const visible = [...t.children].some((k) => {
+            const kr = k.getBoundingClientRect();
+            return kr.width > 0 && kr.height > 0;
+          });
+          return { h: Math.round(r.height), visible };
+        });
+        return {
+          width: window.innerWidth,
+          documentWidth: document.documentElement.scrollWidth,
+          past: [...new Set(past)].slice(0, 6),
+          tabs,
+        };
+      }));
+    }
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.waitForTimeout(250);
+
+    for (const r of report) {
+      assert.deepEqual(r.past, [], `at ${r.width}px these are off the right edge: ${r.past.join(', ')}`);
+      assert.equal(
+        r.documentWidth, r.width,
+        `at ${r.width}px the document is ${r.documentWidth}px wide, so the layout is pushed sideways`,
+      );
+      assert.ok(r.tabs.length > 0, `no properties tabs found at ${r.width}px`);
+      for (const t of r.tabs) {
+        assert.equal(t.visible, true, `a properties tab is blank at ${r.width}px — nothing to read or aim at`);
+        assert.ok(t.h > 18, `a properties tab is ${t.h}px tall at ${r.width}px`);
+      }
+    }
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

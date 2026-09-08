@@ -58,6 +58,18 @@ body {
   grid-template-rows: 34px 2px auto 1fr auto 24px;
   height: 100vh;
   height: 100dvh;
+  /*
+   * An application shell does not scroll sideways.
+   *
+   * Anything inside that could not fit used to widen the document instead,
+   * and a document wider than the window puts the whole right-hand side of
+   * the application past the edge of the screen: the property fields cut in
+   * half, the Restore button reading "Re", the shading controls gone. The
+   * causes are fixed below — this is here so that the next thing that does
+   * not fit is a thing that does not fit, rather than the entire layout
+   * sliding out of view.
+   */
+  overflow: hidden;
 }
 
 /*
@@ -75,6 +87,19 @@ body {
  * a row and break the ordinary case instead. Pinning each child to its own
  * row means a hidden one simply leaves an auto row measuring nothing.
  */
+/*
+ * And none of them may force the shell wider than the window.
+ *
+ * A grid item will not shrink below its own content unless it is told it may,
+ * and the workspace's content is a 46px toolbar, a viewport and a 306px
+ * sidebar — a minimum of 1091px. Below that width the grid column grew to
+ * 1091 and every row stretched to match, so at an 880px window the header and
+ * the whole right-hand side of the application sat 211px past the edge of the
+ * screen. It looked like the header overflowing; the header was only being
+ * dragged along by the row beneath it.
+ */
+#app > * { min-width: 0; }
+
 #app > .header { grid-row: 1; }
 #app > .heat-bar { grid-row: 2; }
 #app > .recovery-bar { grid-row: 3; }
@@ -155,6 +180,19 @@ button:disabled {
 .menu-bar {
   display: flex;
   align-items: stretch;
+  /*
+   * The menus give way first, and they are the only thing that does.
+   *
+   * A flex item will not shrink below its own content unless it is told it
+   * may, so the row of nine menu labels held its full width and shoved the
+   * mode switch and the shading controls off the right of the window — 211px
+   * of them gone at a narrow window, with no scrollbar to get them back.
+   * Whatever the width, Object/Edit/Sculpt and the view controls stay on
+   * screen; the menus are also reachable from the keyboard and, in the
+   * desktop build, from the real menu bar.
+   */
+  min-width: 0;
+  overflow: hidden;
 }
 
 .menu {
@@ -240,6 +278,7 @@ button:disabled {
   gap: 8px;
   margin-left: auto;
   padding-right: 10px;
+  flex: 0 0 auto;
 }
 
 .mode-switch {
@@ -619,6 +658,22 @@ button:disabled {
 
 .tab-bar {
   display: flex;
+  /*
+   * Five labelled tabs do not fit across a 306px sidebar — they came to about
+   * 71px more than there was room for, and that overflow was what widened the
+   * whole document and pushed the application off the right of the screen.
+   * Wrapping to a second line costs one row of sidebar height and keeps every
+   * label readable, which beats truncating them to "Modifi…" or dropping them
+   * for icons nobody can identify.
+   */
+  flex-wrap: wrap;
+  min-width: 0;
+  /*
+   * And it keeps the height it needs. As a child of a column flex panel it
+   * was free to be squashed, and once it was allowed to wrap it was: the
+   * whole row collapsed to twelve pixels and the labels vanished.
+   */
+  flex: 0 0 auto;
   background: var(--shell-sunk);
   border-bottom: 1px solid var(--edge);
 }
@@ -1033,8 +1088,15 @@ button:disabled {
   .workspace {
     grid-template-columns: 42px 1fr 262px;
   }
-  /* The sidebar is too narrow for tab labels — the icons carry the meaning. */
-  .tab span {
+  /*
+   * The sidebar is too narrow for tab labels — the icons carry the meaning.
+   *
+   * Except that they did not: the icon is a span too, so this hid the icon
+   * along with the label and left five blank twelve-pixel tabs. Every window
+   * 1180px or narrower had a properties panel you switched by guessing which
+   * empty patch to click.
+   */
+  .tab > span:not(.icon) {
     display: none;
   }
   .tab {
