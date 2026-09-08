@@ -57,7 +57,28 @@ export interface SegmentOptions {
   edgeSnap?: number;
   /** Softening of the final edge, in pixels. */
   feather?: number;
+  /**
+   * The user's own corrections, one byte per pixel of the same frame.
+   *
+   * `HINT_NONE` where they have said nothing, `HINT_SUBJECT` where they have
+   * marked the thing they want, `HINT_BACKGROUND` where they have marked what
+   * they do not. Both are treated as ground truth rather than as evidence:
+   * they seed the colour models, they are pinned after every pass, and a
+   * region carrying a subject mark is never discarded as a stray blob.
+   *
+   * This is what makes a photograph the colour models cannot separate usable
+   * anyway — a shoe on a carpet the same shade as the shoe needs two strokes,
+   * not a better algorithm.
+   */
+  hints?: Uint8Array;
 }
+
+/** No correction here. */
+export const HINT_NONE = 0;
+/** The user marked this as the thing they want modelled. */
+export const HINT_SUBJECT = 1;
+/** The user marked this as background. */
+export const HINT_BACKGROUND = 2;
 
 // ------------------------------------------------------------------- colour
 
@@ -248,6 +269,25 @@ export function segmentSubject(bitmap: Bitmap, options: SegmentOptions = {}): Ma
 
   const lab = labFromBitmap(bitmap);
 
+  const hints = options.hints && options.hints.length === n ? options.hints : null;
+  let markedSubject = 0;
+  let markedBackground = 0;
+  if (hints) {
+    for (let i = 0; i < n; i++) {
+      if (hints[i] === HINT_SUBJECT) markedSubject++;
+      else if (hints[i] === HINT_BACKGROUND) markedBackground++;
+    }
+  }
+  const corrected = markedSubject > 0 || markedBackground > 0;
+  /** Hold the user's marks to what they said, wherever the solver has been. */
+  const pinHints = (): void => {
+    if (!hints) return;
+    for (let i = 0; i < n; i++) {
+      if (hints[i] === HINT_SUBJECT) data[i] = 1;
+      else if (hints[i] === HINT_BACKGROUND) data[i] = 0;
+    }
+  };
+
   // Sampling rather than using every pixel: the models are five colours, and
   // four thousand pixels pin those down as well as a million do.
   const stride = Math.max(1, Math.floor(Math.sqrt(n / 4000)));
@@ -258,8 +298,25 @@ export function segmentSubject(bitmap: Bitmap, options: SegmentOptions = {}): Ma
   for (let y = 0; y < height; y += stride) {
     for (let x = 0; x < width; x += stride) {
       const i = y * width + x;
+      // A mark overrules the guess entirely. The frame's edge is assumed to be
+      // background and its middle assumed to be subject, and both assumptions
+      // are exactly what somebody reaches for the brush to correct — a subject
+      // that runs off the edge of the frame, or a hole through the middle of
+      // it.
+      if (hints && hints[i] !== HINT_NONE) {
+        (hints[i] === HINT_SUBJECT ? fgSeeds : bgSeeds).push(i);
+        continue;
+      }
       if (x < border || y < border || x >= width - border || y >= height - border) bgSeeds.push(i);
       else if (x >= insetX && y >= insetY && x < width - insetX && y < height - insetY) fgSeeds.push(i);
+    }
+  }
+  // Marks made too finely to survive the sampling stride still have to count,
+  // or a thin stroke on a big photograph does nothing at all.
+  if (hints && (fgSeeds.length === 0 || bgSeeds.length === 0)) {
+    for (let i = 0; i < n; i++) {
+      if (hints[i] === HINT_SUBJECT && fgSeeds.length === 0) fgSeeds.push(i);
+      else if (hints[i] === HINT_BACKGROUND && bgSeeds.length === 0) bgSeeds.push(i);
     }
   }
   // A frame filled edge to edge by its subject has no background band to learn
@@ -277,7 +334,11 @@ export function segmentSubject(bitmap: Bitmap, options: SegmentOptions = {}): Ma
   // subject to find; deciding one anyway produces an arbitrary blob whose
   // shape comes from the arithmetic rather than from the picture.
   const separation = modelSeparation(bg, fg);
-  if (separation < MIN_SEPARATION) {
+  // Giving up because the colours are close is the right answer when nobody
+  // has said otherwise, and the wrong one the moment somebody has: a person
+  // who has just marked the subject and the background has told us where the
+  // boundary is, and is owed an attempt at it.
+  if (separation < MIN_SEPARATION && !corrected) {
     data.fill(1);
     return { width, height, data, separation };
   }
@@ -291,9 +352,12 @@ export function segmentSubject(bitmap: Bitmap, options: SegmentOptions = {}): Ma
       const d = cost(bg, lab, i) - cost(fg, lab, i);
       data[i] = 1 / (1 + Math.exp(-d * 0.35));
     }
-    pinBorder(data, width, height, border);
+    // The frame's edge is only assumed to be background; a mark is not.
+    if (!corrected) pinBorder(data, width, height, border);
+    pinHints();
     for (let s = 0; s < 3; s++) diffuse(data, lab, width, height, edgeSnap);
-    pinBorder(data, width, height, border);
+    if (!corrected) pinBorder(data, width, height, border);
+    pinHints();
 
     if (pass + 1 < passes) {
       const nextBg: number[] = [];
@@ -311,8 +375,10 @@ export function segmentSubject(bitmap: Bitmap, options: SegmentOptions = {}): Ma
     }
   }
 
-  keepLargestBlob(data, width, height);
+  keepLargestBlob(data, width, height, hints ?? undefined);
   fillEnclosedHoles(data, width, height);
+  // Filling holes can swallow a gap somebody deliberately marked out.
+  pinHints();
 
   // A close-up has no background band to learn from: the two models end up
   // describing the same colours and nothing wins. Coming back with an empty
@@ -320,12 +386,13 @@ export function segmentSubject(bitmap: Bitmap, options: SegmentOptions = {}): Ma
   // is treated as all subject, which at least gives something to crop.
   let covered = 0;
   for (let i = 0; i < n; i++) if (data[i] >= 0.5) covered++;
-  if (covered / n < 0.02) {
+  if (covered / n < 0.02 && !corrected) {
     data.fill(1);
     return { width, height, data, separation };
   }
 
   feather(data, width, height, options.feather ?? 1.2);
+  pinHints();
   return { width, height, data, separation };
 }
 
@@ -392,10 +459,21 @@ function diffuse(data: Float32Array, lab: Float32Array, width: number, height: n
  * a patch of skin-toned floor, a reflection — and those specks would each
  * become their own little island of geometry.
  */
-function keepLargestBlob(data: Float32Array, width: number, height: number): void {
+/**
+ * Reduce the mask to one subject — plus anything the user pointed at.
+ *
+ * The largest region is the subject; everything else is a stray patch of
+ * background that happened to match. But a region the user has marked as
+ * subject is not a guess to be overruled, however small it is: marking a
+ * strap and watching it disappear is worse than no correction at all.
+ */
+function keepLargestBlob(
+  data: Float32Array, width: number, height: number, hints?: Uint8Array,
+): void {
   const n = width * height;
   const label = new Int32Array(n).fill(-1);
   const stack: number[] = [];
+  const marked = new Set<number>();
   let bestLabel = -1;
   let bestSize = 0;
   let next = 0;
@@ -414,6 +492,7 @@ function keepLargestBlob(data: Float32Array, width: number, height: number): voi
     while (stack.length) {
       const i = stack.pop()!;
       size++;
+      if (hints && hints[i] === HINT_SUBJECT) marked.add(id);
       const x = i % width;
       const y = (i - x) / width;
       if (x > 0) visit(i - 1);
@@ -424,7 +503,9 @@ function keepLargestBlob(data: Float32Array, width: number, height: number): voi
     if (size > bestSize) { bestSize = size; bestLabel = id; }
   }
   if (bestLabel < 0) return;
-  for (let i = 0; i < n; i++) if (label[i] !== bestLabel) data[i] = 0;
+  for (let i = 0; i < n; i++) {
+    if (label[i] !== bestLabel && !marked.has(label[i])) data[i] = 0;
+  }
 }
 
 /**
@@ -493,7 +574,13 @@ export function matteToMask(matte: Matte, threshold = 0.5): Mask {
 /** What fraction of the frame the subject covers — a quick sanity read. */
 export function matteCoverage(matte: Matte): number {
   if (matte.data.length === 0) return 0;
-  let sum = 0;
-  for (let i = 0; i < matte.data.length; i++) sum += matte.data[i];
-  return sum / matte.data.length;
+  // Counted at the same half-way line the rest of the pipeline cuts at, not
+  // averaged. On a confident matte the two agree; on an uncertain one — a
+  // subject barely separable from its background, where the values sit just
+  // over the line rather than at 1 — the average reads about half of what is
+  // actually modelled. That number is shown to the user as "the subject fills
+  // N% of the frame", so it has to mean the thing that gets built.
+  let covered = 0;
+  for (let i = 0; i < matte.data.length; i++) if (matte.data[i] >= 0.5) covered++;
+  return covered / matte.data.length;
 }

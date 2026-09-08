@@ -1860,6 +1860,96 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     });
   });
 
+  test('two strokes on the preview rescue a photograph colour cannot separate', async () => {
+    // The honest limit of the photo feature is that a subject photographed
+    // against something its own colour cannot be found by colour. The unit
+    // tests prove the segmentation obeys a correction; this proves the
+    // correction can actually be made — that a drag on the preview reaches the
+    // segmenter and the model is rebuilt from it. That path is a canvas, a
+    // letterboxed placement and a pointer capture, and none of it is reachable
+    // from Node.
+    const out = await page.evaluate(async () => {
+      const W = 300, H = 380;
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      const g = c.getContext('2d');
+      const im = g.createImageData(W, H);
+      const inSubject = (x, y) => ((x - 150) / 85) ** 2 + ((y - 190) / 150) ** 2 <= 1;
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const o = (y * W + x) * 4;
+        const n = ((x * 5 + y * 11) % 17) - 8;
+        // Six values apart: a difference you would struggle to see.
+        const b = inSubject(x, y) ? [150, 126, 104] : [144, 120, 98];
+        im.data[o] = b[0] + n; im.data[o + 1] = b[1] + n; im.data[o + 2] = b[2] + n;
+        im.data[o + 3] = 255;
+      }
+      g.putImageData(im, 0, 0);
+      const blob = await new Promise((ok) => c.toBlob(ok, 'image/png'));
+      window.kline.app.properties.openCreate(new File([blob], 'shoe.png', { type: 'image/png' }));
+      const ed = window.kline.editor;
+      const started = ed.scene.objects.size;
+      for (let i = 0; i < 300 && ed.scene.objects.size === started; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await new Promise((r) => setTimeout(r, 700));
+
+      const panel = window.kline.app.properties.create;
+      const verdictText = () => document.querySelector('.create-verdict')?.textContent ?? '';
+      const before = {
+        coverage: panel.lastCoverage,
+        verdict: verdictText(),
+        bad: !!document.querySelector('.create-verdict.bad'),
+        hasBrush: !!document.querySelector('.brush-controls'),
+      };
+
+      const pv = document.querySelector('.ref-preview');
+      const rect = pv.getBoundingClientRect();
+      const stroke = async (mode, from, to) => {
+        // Chosen the way a person chooses it: by pressing the button.
+        const btn = [...document.querySelectorAll('.brush-modes .seg')]
+          .find((b) => b.textContent.trim().toLowerCase() === mode);
+        btn.click();
+        const at = (t) => ({
+          clientX: rect.left + (from[0] + (to[0] - from[0]) * t) * rect.width,
+          clientY: rect.top + (from[1] + (to[1] - from[1]) * t) * rect.height,
+        });
+        pv.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 1, bubbles: true, ...at(0) }));
+        for (let i = 1; i <= 12; i++) {
+          pv.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, bubbles: true, ...at(i / 12) }));
+        }
+        pv.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true, ...at(1) }));
+        await new Promise((ok) => setTimeout(ok, 700));
+      };
+      await stroke('subject', [0.42, 0.5], [0.58, 0.5]);
+      await stroke('background', [0.06, 0.1], [0.24, 0.1]);
+
+      const model = [...ed.scene.objects.values()].find((o) => o.name.startsWith('Photo'));
+      return {
+        before,
+        after: {
+          coverage: panel.lastCoverage,
+          verdict: verdictText(),
+          good: !!document.querySelector('.create-verdict.good'),
+          faces: model ? model.mesh.faceCount : 0,
+        },
+      };
+    });
+
+    assert.equal(out.before.hasBrush, true, 'photo mode offered no way to correct the subject');
+    // Unaided, the segmenter gives up and calls the whole frame subject, and
+    // the panel has to say so rather than presenting the blob as a result.
+    assert.ok(out.before.coverage > 0.95, `unaided coverage was ${out.before.coverage}, expected the whole frame`);
+    assert.equal(out.before.bad, true, `the panel did not report the failure: "${out.before.verdict}"`);
+
+    // The subject really covers about 35% of that frame.
+    assert.ok(
+      Math.abs(out.after.coverage - 0.35) < 0.06,
+      `after two strokes the subject came out at ${(out.after.coverage * 100).toFixed(1)}%, not about 35%`,
+    );
+    assert.equal(out.after.good, true, `the panel still reports a problem: "${out.after.verdict}"`);
+    assert.ok(out.after.faces > 500, `the corrected model has ${out.after.faces} faces`);
+  });
+
   test('nothing runs off the side of the window, at any width', async () => {
     // The whole right-hand side of the application used to sit past the edge
     // of the screen: property fields cut in half, a Restore button reading

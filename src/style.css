@@ -2253,3 +2253,58 @@ button:disabled {
 .setup-again input {
   cursor: pointer;
 }
+
+/* ------------------------------------------- correcting a photograph by hand */
+
+/*
+ * The verdict on a photograph, said plainly and where the result appears.
+ *
+ * Green or red rather than the panel's ordinary dim grey, because the one
+ * thing somebody needs to know after dropping a photo is whether the subject
+ * was found — and if it was not, that there is something they can do about
+ * it. A percentage tacked onto a face count answered neither question.
+ */
+.create-verdict {
+  margin: 6px 0 4px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  border-radius: var(--radius);
+  border-left: 2px solid var(--edge);
+  background: var(--shell-sunk);
+  color: var(--ink-dim);
+}
+
+.create-verdict.good {
+  border-left-color: #4f9d5d;
+  color: var(--ink);
+}
+
+.create-verdict.bad {
+  border-left-color: var(--ember-deep);
+  color: var(--ink);
+  background: var(--ember-wash);
+}
+
+.brush-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--edge-soft);
+}
+
+.brush-modes {
+  width: 100%;
+}
+
+.brush-modes .seg {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* The preview is a drawing surface in photo mode, so it says so. */
+.ref-preview {
+  touch-action: none;
+}

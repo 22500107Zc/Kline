@@ -9,7 +9,9 @@ import {
 } from '../imaging/generate';
 import { PhotoOptions, PhotoResult, meshFromPhoto } from '../imaging/photo';
 import { DepthField, DepthOptions, depthFromPhoto } from '../imaging/depth';
-import { MIN_SEPARATION, Matte, segmentSubject } from '../imaging/segment';
+import {
+  HINT_BACKGROUND, HINT_NONE, HINT_SUBJECT, MIN_SEPARATION, Matte, segmentSubject,
+} from '../imaging/segment';
 import { createTexture } from '../scene/Texture';
 import { createMaterial } from '../scene/Material';
 import {
@@ -77,6 +79,64 @@ export class CreatePanel {
    * slider rebuilds the mesh and nothing else.
    */
   private matte: { key: string; value: Matte } | null = null;
+  /**
+   * The user's corrections to the subject, one byte per pixel of `bitmap`.
+   *
+   * Null until they pick up the brush, so an untouched photograph is
+   * segmented exactly as it was before this existed.
+   */
+  private hints: Uint8Array | null = null;
+  /** What the brush paints, and how wide, in source pixels. */
+  private brush: { mode: 'subject' | 'background' | 'erase'; radius: number } =
+    { mode: 'subject', radius: 14 };
+  /** Set while a stroke is in progress, so the model is rebuilt once at the end. */
+  private painting = false;
+  /** Bumped by every stroke, so the cached matte knows it is out of date. */
+  private hintRevision = 0;
+  /** Where the picture sits inside the preview, for turning clicks into pixels. */
+  private previewPlacement: { x: number; y: number; width: number; height: number } | null = null;
+
+  /**
+   * Paint one dab of the current brush at a point on the source image.
+   *
+   * Erase writes HINT_NONE rather than the opposite mark: a correction taken
+   * back should hand the decision to the colour models again, not assert the
+   * reverse.
+   */
+  private paintHint(px: number, py: number): void {
+    const bitmap = this.bitmap;
+    if (!bitmap) return;
+    if (!this.hints) this.hints = new Uint8Array(bitmap.width * bitmap.height);
+    const value = this.brush.mode === 'subject'
+      ? HINT_SUBJECT
+      : this.brush.mode === 'background' ? HINT_BACKGROUND : HINT_NONE;
+    const r = this.brush.radius;
+    const x0 = Math.max(0, Math.floor(px - r));
+    const x1 = Math.min(bitmap.width - 1, Math.ceil(px + r));
+    const y0 = Math.max(0, Math.floor(py - r));
+    const y1 = Math.min(bitmap.height - 1, Math.ceil(py + r));
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        if ((x - px) ** 2 + (y - py) ** 2 > r * r) continue;
+        this.hints[y * bitmap.width + x] = value;
+      }
+    }
+  }
+
+  /** Throw every correction away and go back to what the colours alone say. */
+  private clearHints(): void {
+    if (!this.hints) return;
+    this.hints = null;
+    this.hintRevision++;
+    this.generate(true);
+  }
+
+  /** Whether anything has been marked, for the buttons that undo it. */
+  private hasHints(): boolean {
+    if (!this.hints) return false;
+    for (let i = 0; i < this.hints.length; i++) if (this.hints[i] !== HINT_NONE) return true;
+    return false;
+  }
   private depthField: { key: string; value: DepthField } | null = null;
   /** The texture id already made for this reference, so retries do not pile up copies. */
   private photoTexture: { key: string; id: number } | null = null;
@@ -109,9 +169,14 @@ export class CreatePanel {
   private preview = h('canvas', { class: 'ref-preview' });
   private body = h('div', { class: 'create-body' });
   private statsLine = h('p', { class: 'dim small create-stats' });
+  /** The plain answer to "did it find the thing", above the numbers. */
+  private verdict = h('p', { class: 'create-verdict hidden' });
 
   constructor(private editor: Editor) {
     this.root.append(this.body);
+    // The preview element survives every rebuild of the panel, so its pointer
+    // handlers are attached once here rather than in build().
+    this.wirePreviewBrush();
     this.build();
   }
 
@@ -165,6 +230,7 @@ export class CreatePanel {
     const detail = this.mode === 'photo' ? 512 : this.mode === 'relief' ? 512 : 384;
     this.bitmap = bitmapFromReference(this.reference, detail);
     this.matte = null;
+    this.hints = null;
     this.depthField = null;
   }
 
@@ -324,6 +390,7 @@ export class CreatePanel {
       num('Thickness', this.photo.depthScale, 0.05, (v) => { this.photo.depthScale = v; }, { min: 0.02, max: 4 });
       num('Back fullness', this.photo.back, 0.05, (v) => { this.photo.back = v; }, { min: 0, max: 1 });
       toggle('Project the photo on as a texture', this.photo.texture, (v) => { this.photo.texture = v; });
+      section.appendChild(this.brushControls());
     } else if (this.mode === 'silhouette') {
       num('Depth', this.silhouette.depth, 0.02, (v) => { this.silhouette.depth = v; }, { min: 0.001 });
       num('Height', this.silhouette.targetHeight, 0.05, (v) => { this.silhouette.targetHeight = v; }, { min: 0.01 });
@@ -354,6 +421,7 @@ export class CreatePanel {
       toggle('Smooth shading', this.relief.smooth, (v) => { this.relief.smooth = v; });
     }
 
+    section.appendChild(this.verdict);
     section.appendChild(this.statsLine);
     return section;
   }
@@ -553,6 +621,7 @@ export class CreatePanel {
       this.statsLine.textContent =
         `${stats.verts.toLocaleString()} verts · ${stats.faces.toLocaleString()} faces · ${stats.ms} ms`;
       if (this.mode === 'photo') this.reportSubject();
+      else this.verdict.classList.add('hidden');
       this.editor.setStatus(`${object.name}: ${stats.faces.toLocaleString()} faces from ${this.reference?.name ?? 'reference'}`);
       this.drawPreview();
     } finally {
@@ -609,9 +678,12 @@ export class CreatePanel {
    * that were already in the right place relative to each other.
    */
   private buildPhoto(bitmap: Bitmap): PhotoResult {
-    const matteKey = `${bitmap.width}x${bitmap.height}:${this.frameTime}`;
+    const matteKey = `${bitmap.width}x${bitmap.height}:${this.frameTime}:${this.hintRevision}`;
     if (this.matte?.key !== matteKey) {
-      this.matte = { key: matteKey, value: segmentSubject(bitmap) };
+      this.matte = {
+        key: matteKey,
+        value: segmentSubject(bitmap, this.hints ? { hints: this.hints } : {}),
+      };
       this.depthField = null;
     }
     const matte = this.matte.value;
@@ -657,16 +729,37 @@ export class CreatePanel {
     const matte = this.matte?.value;
     if (!matte) return;
     const percent = Math.round(this.lastCoverage * 100);
-    if (matte.separation < MIN_SEPARATION) {
-      this.statsLine.textContent +=
-        ' — the subject and the background are the same colours here, so the whole frame was used. '
-        + 'Crop to the subject, or shoot it against something that contrasts.';
+    const marked = this.hasHints();
+    // Said plainly, in the place the result appears, and said as a verdict
+    // rather than as a statistic. Somebody who has just watched their photo
+    // turn into a blob needs to know whether the subject was found, and what
+    // to do if it was not — a number appended to a face count answers neither.
+    this.verdict.classList.remove('good', 'bad', 'hidden');
+    if (matte.separation < MIN_SEPARATION && !marked) {
+      this.verdict.classList.add('bad');
+      this.verdict.textContent =
+        'The subject and the background are too close in colour to tell apart, so the '
+        + 'whole frame was used. Draw over the subject and over the background below, or '
+        + 'crop to the subject.';
     } else if (percent < 3) {
-      this.statsLine.textContent += ' — almost nothing was found; try a photo where the subject is nearer the middle.';
+      this.verdict.classList.add('bad');
+      this.verdict.textContent = marked
+        ? 'Still almost nothing — try marking more of the subject.'
+        : 'Almost nothing was found. Draw over the subject below, or try a photo where it '
+          + 'is nearer the middle of the frame.';
+    } else if (percent > 92 && !marked) {
+      this.verdict.classList.add('bad');
+      this.verdict.textContent =
+        'Nearly the whole frame came back as subject, which usually means the background '
+        + 'was not recognised. Draw over some background below to say what to drop.';
     } else {
-      this.statsLine.textContent += ` — subject fills ${percent}% of the frame`;
+      this.verdict.classList.add('good');
+      this.verdict.textContent = marked
+        ? `Subject found with your corrections — it fills ${percent}% of the frame.`
+        : `Subject found — it fills ${percent}% of the frame.`;
     }
   }
+
 
   /**
    * Put the photograph on the model.
@@ -750,6 +843,154 @@ export class CreatePanel {
     this.editor.setShading('material');
   }
 
+  /**
+   * Correcting the subject by hand.
+   *
+   * The colour models are right most of the time and hopeless the rest of it:
+   * a subject photographed against something its own colour cannot be found
+   * by colour, and no amount of work on the segmentation changes that. Two
+   * strokes can. Marking a stripe of the thing and a stripe of what is behind
+   * it takes a photograph that produced nothing and makes it produce the
+   * model — on a test frame where subject and background differ by six values
+   * in each channel, the automatic pass gives up and calls the whole frame
+   * subject; with two strokes it gets 98.8% of the pixels right.
+   *
+   * The alternative for these photographs is a trained depth network, which
+   * means a few hundred megabytes in the download or a server to upload to.
+   * A brush is ten seconds of the user's time and neither of those.
+   */
+  private brushControls(): HTMLElement {
+    const wrap = h('div', { class: 'brush-controls' });
+    wrap.appendChild(h('p', {
+      class: 'dim small',
+      text: 'Draw on the picture above to correct what was found. Subject marks what to '
+        + 'keep, Background marks what to drop.',
+    }));
+
+    const modes: { id: 'subject' | 'background' | 'erase'; label: string }[] = [
+      { id: 'subject', label: 'Subject' },
+      { id: 'background', label: 'Background' },
+      { id: 'erase', label: 'Erase' },
+    ];
+    const group = h('div', { class: 'seg-group brush-modes' });
+    for (const m of modes) {
+      group.appendChild(h('button', {
+        class: `seg${this.brush.mode === m.id ? ' active' : ''}`,
+        text: m.label,
+        on: {
+          click: () => {
+            this.brush.mode = m.id;
+            for (const b of [...group.children]) b.classList.remove('active');
+            group.children[modes.indexOf(m)].classList.add('active');
+          },
+        },
+      }));
+    }
+    wrap.appendChild(group);
+
+    const size = h('input', {
+      type: 'range', class: 'slider',
+      min: '4', max: '60', step: '1', value: `${this.brush.radius}`,
+      on: { input: (e: Event) => { this.brush.radius = Number((e.target as HTMLInputElement).value); } },
+    });
+    wrap.appendChild(row('Brush size', size));
+
+    wrap.appendChild(button('Clear marks', () => this.clearHints(), {
+      title: 'Throw away every correction and go back to what the colours alone find',
+    }));
+    return wrap;
+  }
+
+  /**
+   * The user's own marks, over the top of what the segmentation made of them.
+   *
+   * Green for keep and red for drop rather than more of the ember the matte
+   * already uses: the point of looking at this is to tell your corrections
+   * apart from the result they produced.
+   */
+  private drawHints(
+    ctx: CanvasRenderingContext2D,
+    placement: { x: number; y: number; width: number; height: number },
+  ): void {
+    const hints = this.hints;
+    const bitmap = this.bitmap;
+    if (!hints || !bitmap) return;
+    const layer = document.createElement('canvas');
+    layer.width = bitmap.width;
+    layer.height = bitmap.height;
+    const lctx = layer.getContext('2d');
+    if (!lctx) return;
+    const image = lctx.createImageData(bitmap.width, bitmap.height);
+    let any = false;
+    for (let i = 0; i < hints.length; i++) {
+      if (hints[i] === HINT_SUBJECT) {
+        image.data[i * 4] = 90; image.data[i * 4 + 1] = 220; image.data[i * 4 + 2] = 120;
+        image.data[i * 4 + 3] = 190;
+        any = true;
+      } else if (hints[i] === HINT_BACKGROUND) {
+        image.data[i * 4] = 230; image.data[i * 4 + 1] = 70; image.data[i * 4 + 2] = 80;
+        image.data[i * 4 + 3] = 190;
+        any = true;
+      }
+    }
+    if (!any) return;
+    lctx.putImageData(image, 0, 0);
+    ctx.drawImage(layer, placement.x, placement.y, placement.width, placement.height);
+  }
+
+  /**
+   * Turn a pointer position on the preview into a pixel of the source image.
+   *
+   * The preview letterboxes the picture, so the offsets and the scale both
+   * matter; a click outside the picture is not a paint.
+   */
+  private previewToImage(e: PointerEvent): { x: number; y: number } | null {
+    const placement = this.previewPlacement;
+    const bitmap = this.bitmap;
+    if (!placement || !bitmap) return null;
+    const rect = this.preview.getBoundingClientRect();
+    // The canvas is drawn at its own pixel size and laid out at whatever width
+    // the panel gives it, so page pixels are not canvas pixels.
+    const cx = (e.clientX - rect.left) * (this.preview.width / rect.width);
+    const cy = (e.clientY - rect.top) * (this.preview.height / rect.height);
+    const u = (cx - placement.x) / placement.width;
+    const v = (cy - placement.y) / placement.height;
+    if (u < 0 || v < 0 || u > 1 || v > 1) return null;
+    return { x: u * (bitmap.width - 1), y: v * (bitmap.height - 1) };
+  }
+
+  /** Pointer handling for the correction brush, wired once. */
+  private wirePreviewBrush(): void {
+    const paintAt = (e: PointerEvent): void => {
+      const at = this.previewToImage(e);
+      if (!at) return;
+      this.paintHint(at.x, at.y);
+      this.drawPreview();
+    };
+    this.preview.addEventListener('pointerdown', (e) => {
+      if (this.mode !== 'photo' || !this.bitmap) return;
+      e.preventDefault();
+      this.painting = true;
+      this.preview.setPointerCapture(e.pointerId);
+      paintAt(e);
+    });
+    this.preview.addEventListener('pointermove', (e) => {
+      if (!this.painting) return;
+      paintAt(e);
+    });
+    const finish = (e: PointerEvent): void => {
+      if (!this.painting) return;
+      this.painting = false;
+      if (this.preview.hasPointerCapture(e.pointerId)) this.preview.releasePointerCapture(e.pointerId);
+      // Rebuilt once, at the end of the stroke: re-segmenting on every pointer
+      // move would run a GrabCut sixty times a second.
+      this.hintRevision++;
+      this.generate(true);
+    };
+    this.preview.addEventListener('pointerup', finish);
+    this.preview.addEventListener('pointercancel', finish);
+  }
+
   /** Frame plus the traced outline, so the threshold is something you can see. */
   private drawPreview(): void {
     const ref = this.reference;
@@ -759,6 +1000,7 @@ export class CreatePanel {
     this.preview.width = width;
     this.preview.height = height;
     const placement = drawReferenceInto(this.preview, ref);
+    this.previewPlacement = placement ?? null;
     const ctx = this.preview.getContext('2d');
     if (!ctx || !placement || !this.bitmap || this.mode === 'relief') return;
 
@@ -782,6 +1024,7 @@ export class CreatePanel {
       }
       octx.putImageData(image, 0, 0);
       ctx.drawImage(overlay, placement.x, placement.y, placement.width, placement.height);
+      this.drawHints(ctx, placement);
       return;
     }
 

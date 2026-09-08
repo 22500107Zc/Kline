@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Bitmap } from '../src/imaging/contour';
-import { matteCoverage, matteToMask, segmentSubject } from '../src/imaging/segment';
+import {
+  HINT_BACKGROUND, HINT_SUBJECT, matteCoverage, matteToMask, segmentSubject,
+} from '../src/imaging/segment';
 import { depthFromPhoto, inflationField, symmetryAxis } from '../src/imaging/depth';
 import { meshFromPhoto } from '../src/imaging/photo';
 import { Mesh } from '../src/mesh/Mesh';
@@ -427,4 +429,87 @@ test('the mesh survives being handed to the ordinary modelling operators', () =>
     assert.equal(new Set(loop).size, loop.length, 'a face repeats one of its own corners');
     for (const v of loop) assert.ok(v >= 0 && v < mesh.positions.length, 'a face points at a vertex that is not there');
   }
+});
+
+test('two strokes rescue a photograph the colours cannot separate', () => {
+  // The honest limit of segmenting by colour: a subject photographed against
+  // something its own colour cannot be found by colour, and no amount of work
+  // on the models changes that. What changes it is being told. This is the
+  // case the correction brush exists for — the alternative for these
+  // photographs is a trained depth network, which means a few hundred
+  // megabytes in the download or a server to upload to.
+  const size = 200;
+  const bitmap = frame(size, size, [144, 120, 98]);
+  const inSubject = (x: number, y: number) => (x - 100) ** 2 / 3600 + (y - 100) ** 2 / 2500 <= 1;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const o = (y * size + x) * 4;
+      // Grain, so neither region is a flat colour the models can latch onto.
+      const n = ((x * 5 + y * 11) % 17) - 8;
+      const base = inSubject(x, y) ? [150, 126, 104] : [144, 120, 98];
+      bitmap.data[o] = base[0] + n;
+      bitmap.data[o + 1] = base[1] + n;
+      bitmap.data[o + 2] = base[2] + n;
+    }
+  }
+
+  let trueSubject = 0;
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (inSubject(x, y)) trueSubject++;
+  const truth = trueSubject / (size * size);
+
+  const agreement = (m: { data: Float32Array }): number => {
+    let right = 0;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        if ((m.data[y * size + x] >= 0.5) === inSubject(x, y)) right++;
+      }
+    }
+    return right / (size * size);
+  };
+
+  // Left alone it gives up, and says so by calling the whole frame subject —
+  // which is the behaviour the verdict in the panel reports as a failure.
+  const alone = segmentSubject(bitmap);
+  assert.ok(alone.separation < 4, `separation ${alone.separation} — this frame is meant to be hopeless`);
+  assert.ok(matteCoverage(alone) > 0.98, 'the unaided pass was expected to fall back to the whole frame');
+
+  // One stroke through the subject, one across the background.
+  const hints = new Uint8Array(size * size);
+  for (let x = 75; x < 125; x++) for (let d = -3; d <= 3; d++) hints[(100 + d) * size + x] = HINT_SUBJECT;
+  for (let x = 10; x < 60; x++) for (let d = -3; d <= 3; d++) hints[(25 + d) * size + x] = HINT_BACKGROUND;
+
+  const helped = segmentSubject(bitmap, { hints });
+  assert.ok(
+    agreement(helped) > 0.95,
+    `with two strokes only ${(agreement(helped) * 100).toFixed(1)}% of pixels are right`,
+  );
+  assert.ok(
+    Math.abs(matteCoverage(helped) - truth) < 0.05,
+    `the subject covers ${(truth * 100).toFixed(1)}% but ${(matteCoverage(helped) * 100).toFixed(1)}% was found`,
+  );
+});
+
+test('a mark is obeyed even where the colours disagree with it', () => {
+  // The marks are ground truth, not evidence. A stroke that contradicts what
+  // the colour models believe still wins, or correcting anything is a
+  // negotiation rather than an instruction.
+  const size = 120;
+  const bitmap = paint(frame(size, size, [20, 20, 20]), disc(60, 60, 34), [230, 230, 230]);
+  const hints = new Uint8Array(size * size);
+  // A patch of the bright disc marked as background, and a patch of the dark
+  // surround marked as subject: both the opposite of what colour would say.
+  for (let y = 50; y < 62; y++) for (let x = 50; x < 62; x++) hints[y * size + x] = HINT_BACKGROUND;
+  for (let y = 8; y < 20; y++) for (let x = 8; x < 20; x++) hints[y * size + x] = HINT_SUBJECT;
+
+  const m = segmentSubject(bitmap, { hints });
+  assert.ok(m.data[55 * size + 55] < 0.5, 'a patch marked background came back as subject');
+  assert.ok(m.data[13 * size + 13] >= 0.5, 'a patch marked subject came back as background');
+});
+
+test('an unmarked photograph is segmented exactly as it was before', () => {
+  // The brush must not change what happens to everybody who never touches it.
+  const bitmap = paint(frame(140, 140, [30, 40, 90]), disc(70, 70, 40), [220, 190, 60]);
+  const plain = segmentSubject(bitmap);
+  const empty = segmentSubject(bitmap, { hints: new Uint8Array(140 * 140) });
+  assert.deepEqual(Array.from(empty.data), Array.from(plain.data));
 });
