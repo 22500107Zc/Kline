@@ -808,9 +808,16 @@ export class CreatePanel {
         return;
       }
 
+      // Before anything is touched, either way.
+      //
+      // Building over an object that already exists throws its mesh away, and
+      // that used to happen with no undo step at all: press the button twice
+      // and the first result was gone for good. Only the branch that creates
+      // an object was recording one, which is the branch where there is
+      // nothing to lose.
+      this.editor.beginUndo('Build scene from photo');
       let object = this.editor.scene.get(this.targetId);
       if (!object) {
-        this.editor.beginUndo('Build scene from photo');
         object = this.editor.scene.add('mesh', this.editor.scene.uniqueName('Scene'), result.mesh);
         object.position = this.placementFor(result.mesh);
         this.targetId = object.id;

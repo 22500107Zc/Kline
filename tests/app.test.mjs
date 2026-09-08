@@ -2040,6 +2040,17 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
           nearBoxY: depthNear(near),
           farBoxY: depthNear(far),
           textures: ed.scene.textures.length,
+          // Building over an object that already exists throws its mesh away,
+          // and that used to happen with no undo step: press the button twice
+          // and the first result was gone for good.
+          undoRestored: (() => {
+            const before = model.mesh.faceCount;
+            window.kline.run('edit.undo');
+            const after = ed.scene.get(panel.targetId);
+            const restored = !!after && !!after.mesh && after.mesh.faceCount !== before;
+            window.kline.run('edit.redo');
+            return restored;
+          })(),
           textured: (() => {
             const slot = model.materialSlots[0];
             const mat = ed.scene.materials[slot];
@@ -2058,6 +2069,8 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     assert.ok(out.depth > 0.2, `the scene is ${out.depth} deep, which is a flat sheet`);
     // The whole point: the near box has to come out nearer than the far one.
     // Nearest is towards -Y, so the near box's depth must be the smaller.
+    assert.equal(out.undoRestored, true,
+      'building a scene over an existing object could not be undone — the old mesh was lost');
     assert.ok(
       out.nearBoxY < out.farBoxY,
       `the near box came out at y=${out.nearBoxY.toFixed(3)} and the far one at `
