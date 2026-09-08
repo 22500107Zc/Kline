@@ -100,7 +100,7 @@ jobs:
           test -f dist/ort/ort-wasm-simd-threaded.wasm
           test -f THIRD-PARTY-NOTICES.md
           test -f licences/Apache-2.0.txt
-          echo "model $(du -h dist/models/*.onnx | cut -f1), runtime $(du -h dist/ort/*.wasm | cut -f1)
+          echo "model $(du -h dist/models/*.onnx | cut -f1), runtime $(du -h dist/ort/*.wasm | cut -f1)"
       - name: Build installers
         run: npx electron-builder ${{ matrix.target }} --publish never
         env:

@@ -1,8 +1,8 @@
 {
   "name": "kline",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "private": false,
-  "description": "Kline — an open source 3D modelling application. Runs in a browser tab or as a desktop app.",
+  "description": "Kline \u2014 an open source 3D modelling application. Runs in a browser tab or as a desktop app.",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -17,9 +17,10 @@
     "app:dev": "vite build && electron .",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "npm run test:unit && npm run test:app",
+    "test": "npm run check:workflows && npm run test:unit && npm run test:app",
     "test:unit": "esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=.test-build --log-level=warning && node --test '.test-build/*.test.js'",
-    "test:app": "node --test tests/app.test.mjs"
+    "test:app": "node --test tests/app.test.mjs",
+    "check:workflows": "node tools/check-workflows.mjs"
   },
   "devDependencies": {
     "electron": "^33.4.11",
@@ -49,7 +50,7 @@
   "build": {
     "appId": "org.kline.app",
     "productName": "Kline",
-    "copyright": "Copyright © 2026 Kline contributors",
+    "copyright": "Copyright \u00a9 2026 Kline contributors",
     "directories": {
       "output": "release",
       "buildResources": "build"
