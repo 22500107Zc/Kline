@@ -399,7 +399,19 @@ button:disabled {
 
 .viewport {
   position: relative;
+  /*
+   * Both axes, and the height is the one that was missing.
+   *
+   * A grid item will not shrink below its content by default, and this one's
+   * content is a canvas with a pixel size of its own — so the viewport sized
+   * itself to the canvas while the canvas sized itself to the viewport, and
+   * the pair settled on whatever the first frame happened to measure. It came
+   * out 841px tall in an 810px slot, which put the bottom of the 3D view
+   * underneath the timeline: a strip of the render nobody could see, and a
+   * view whose centre was not where the middle of the window was.
+   */
   min-width: 0;
+  min-height: 0;
   background: #0f0e10;
 }
 

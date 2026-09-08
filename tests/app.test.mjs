@@ -1802,10 +1802,14 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
       const shown = bar && !bar.classList.contains('hidden');
       const rect = bar.getBoundingClientRect();
       const work = document.querySelector('.workspace').getBoundingClientRect();
+      const view = document.querySelector('.viewport').getBoundingClientRect();
       return {
         shown,
         bar: Math.round(rect.height),
         workspace: Math.round(work.height),
+        viewport: Math.round(view.height),
+        viewportBottom: Math.round(view.bottom),
+        workspaceBottom: Math.round(work.bottom),
         window: window.innerHeight,
         buttons: [...bar.querySelectorAll('.btn')].map((b) => Math.round(b.getBoundingClientRect().width)),
         pageWidth: window.innerWidth,
@@ -1833,6 +1837,23 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
         `a button is ${w}px wide in a ${shape.pageWidth}px window — they are stretching to fill`,
       );
     }
+
+    // And the 3D view fits the room it was given.
+    //
+    // A grid item will not shrink below its own content, and this one's
+    // content is a canvas with a pixel size of its own — so the viewport sized
+    // itself to the canvas while the canvas sized itself to the viewport, and
+    // the pair settled on whatever the first frame measured. It came out 31px
+    // taller than its slot with no bar and 68px taller with one, which put the
+    // bottom of the render underneath the timeline where nobody could see it.
+    assert.ok(
+      shape.viewportBottom <= shape.workspaceBottom + 1,
+      `the 3D view runs ${shape.viewportBottom - shape.workspaceBottom}px past the bottom of its container`,
+    );
+    assert.ok(
+      shape.viewport <= shape.workspace + 1,
+      `the 3D view is ${shape.viewport}px tall in a ${shape.workspace}px space`,
+    );
 
     await page.evaluate(() => {
       document.querySelector('.recovery-bar').classList.add('hidden');
