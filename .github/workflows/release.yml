@@ -65,6 +65,42 @@ jobs:
       - name: Verify the bundle exists
         shell: bash
         run: test -f dist/index.html
+
+      # The tag and the version inside the application have to agree.
+      #
+      # They drifted once — a release tagged v0.7.1 built from a package.json
+      # that still said 0.7.0 — and nothing anywhere would have noticed. What
+      # people download reports its own version in the About box and in the
+      # scene files it writes, so a mismatch is a support question nobody can
+      # answer.
+      - name: The tag and package.json must agree
+        if: inputs.tag != '' || startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          [ -n "$tag" ] || tag="${GITHUB_REF_NAME}"
+          want="${tag#v}"
+          have="$(node -p "require('./package.json').version")"
+          echo "tag $tag wants $want; package.json says $have"
+          [ "$want" = "$have" ] || {
+            echo "::error::releasing $tag from a build that calls itself $have"
+            exit 1
+          }
+
+      # Everything the depth feature needs has to be inside the bundle, or the
+      # feature is a button that produces an error message on a machine with
+      # no network. These are copied from public/ by the build; if that ever
+      # stops happening the installers should not go out.
+      - name: The depth model and its runtime must be packaged
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/models/depth-anything-v2-small-int8.onnx
+          test -f dist/ort/ort-wasm-simd-threaded.wasm
+          test -f THIRD-PARTY-NOTICES.md
+          test -f licences/Apache-2.0.txt
+          echo "model $(du -h dist/models/*.onnx | cut -f1), runtime $(du -h dist/ort/*.wasm | cut -f1)
       - name: Build installers
         run: npx electron-builder ${{ matrix.target }} --publish never
         env:
