@@ -7,6 +7,7 @@ import {
 import { DepthOptions, depthFromPhoto, inflationField, symmetryAxis } from '../src/imaging/depth';
 import { PhotoOptions, meshFromPhoto } from '../src/imaging/photo';
 import { Mesh } from '../src/mesh/Mesh';
+import { createCube } from '../src/mesh/primitives';
 import { meshFromDepth } from '../src/imaging/sceneDepth';
 import { patchAligned } from '../src/imaging/neuralDepth';
 
@@ -689,4 +690,97 @@ test('a depth map full of rubbish still produces a usable mesh', () => {
       );
     }
   }
+});
+
+test('the joining lip does not drag creases across the surface', () => {
+  // A model built from a photograph closes over into a thin lip at its
+  // silhouette, and that lip stands perpendicular to the two surfaces it
+  // joins. Smoothed in, it asked for the average of two directions ninety
+  // degrees apart — and where the outline steps in by a grid cell, which a
+  // tapering subject does every few rows, that average swung the surface's own
+  // normals by up to forty-three degrees. It drew a row of hard creases across
+  // the front of the model, visible at a glancing angle.
+  //
+  // The geometry there measures perfectly smooth. It was never the shape, only
+  // what the shading was told about it, which is why looking at the positions
+  // found nothing for a long time.
+  const size = 200;
+  const bitmap = frame(size, size, [150, 126, 104]);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      // A tapering body: the outline moves in by a pixel every few rows, which
+      // is what puts the steps in.
+      const half = 70 - 18 * (y / size) ** 2;
+      const inside = Math.abs(x - size / 2) < half && y > 20 && y < size - 20;
+      const o = (y * size + x) * 4;
+      const c = inside ? [70, 130, 210] : [150, 126, 104];
+      bitmap.data[o] = c[0]; bitmap.data[o + 1] = c[1]; bitmap.data[o + 2] = c[2];
+    }
+  }
+  const { mesh } = meshFromPhoto(bitmap, { resolution: 120 });
+  assert.ok(mesh.faceCount > 0);
+
+  const t = mesh.topology();
+  const box = mesh.bounds();
+  const lo = box.min.z + (box.max.z - box.min.z) * 0.1;
+  const hi = box.min.z + (box.max.z - box.min.z) * 0.9;
+
+  // Down each column of the front surface, away from the top and bottom rims
+  // where the model genuinely does turn over sharply.
+  const columns = new Map();
+  for (let i = 0; i < mesh.positions.length; i++) {
+    const p = mesh.positions[i];
+    if (p.y >= 0 || p.z < lo || p.z > hi) continue;
+    const key = p.x.toFixed(4);
+    const list = columns.get(key) ?? [];
+    list.push({ z: p.z, n: t.shadingNormals[i] });
+    columns.set(key, list);
+  }
+
+  let worst = 0;
+  let where = '';
+  for (const [x, listRaw] of columns) {
+    const list = listRaw.sort((a, b) => a.z - b.z);
+    if (list.length < 10) continue;
+    for (let i = 1; i < list.length; i++) {
+      const a = list[i - 1].n;
+      const b = list[i].n;
+      const dot = Math.max(-1, Math.min(1, a.x * b.x + a.y * b.y + a.z * b.z));
+      const deg = (Math.acos(dot) * 180) / Math.PI;
+      if (deg > worst) { worst = deg; where = `x=${x} z=${list[i].z.toFixed(2)}`; }
+    }
+  }
+  assert.ok(columns.size > 20, `only ${columns.size} columns to look at`);
+  // Neighbouring points on a smooth surface turn by a degree or two. Before
+  // the lip was taken out of the smoothing group this reached forty-three.
+  assert.ok(worst < 20, `neighbouring normals turn ${worst.toFixed(1)}° at ${where}`);
+});
+
+test('a face marked flat leaves its neighbours alone', () => {
+  // The general rule underneath that fix, which is what every modelling
+  // application means by "flat": the face shades itself, and it does not
+  // contribute to anybody else's smooth normal either.
+  const mesh = createCube(2);
+  mesh.setAllSmooth(true);
+  const smoothEverywhere = mesh.topology().shadingNormals.map((n) => n.clone());
+
+  mesh.markDirty();
+  mesh.faceSmooth = mesh.faces.map((_, f) => f !== 0);
+  const t = mesh.topology();
+  // The geometric average is unchanged — bevel, sculpt and solidify still want
+  // every face.
+  for (let i = 0; i < mesh.positions.length; i++) {
+    const a = smoothEverywhere[i];
+    const b = t.vertNormals[i];
+    assert.ok(Math.abs(a.x - b.x) < 1e-6 && Math.abs(a.y - b.y) < 1e-6 && Math.abs(a.z - b.z) < 1e-6,
+      'marking a face flat changed the geometric vertex normal');
+  }
+  // But the corners of the flat face now shade from the other faces only.
+  let moved = 0;
+  for (const v of mesh.faces[0]) {
+    const a = smoothEverywhere[v];
+    const b = t.shadingNormals[v];
+    if (Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.z - b.z) > 1e-6) moved++;
+  }
+  assert.equal(moved, mesh.faces[0].length, 'the flat face is still pulling its corners');
 });

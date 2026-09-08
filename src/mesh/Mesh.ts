@@ -28,6 +28,26 @@ export interface Topology {
   vertEdges: number[][];
   vertFaces: number[][];
   faceNormals: Vec3[];
+  /**
+   * Vertex normals for shading, which is not the same job as `vertNormals`.
+   *
+   * A face marked flat shades itself from its own normal, and — this is the
+   * part that was missing — it must not drag its neighbours' smooth normals
+   * around either. That is what "flat" means in every modelling application:
+   * the face leaves the smoothing group.
+   *
+   * It showed up on models built from photographs. Those close over into a
+   * thin lip at the silhouette, and the lip's faces stand perpendicular to the
+   * surface they join. Averaged in, they swung the surface's own normals by up
+   * to 43 degrees at the points where the outline steps in by a grid cell —
+   * which drew a row of hard creases across the model, visible at a glancing
+   * angle, on geometry that measured perfectly smooth.
+   *
+   * `vertNormals` stays as it was: bevel, sculpt, solidify and the ray tracer
+   * want the geometric average over everything, and a wholly flat-shaded mesh
+   * would otherwise have no vertex normals at all.
+   */
+  shadingNormals: Vec3[];
   faceCenters: Vec3[];
   vertNormals: Vec3[];
 }
@@ -425,18 +445,29 @@ export class Mesh {
 
     // Area-weighted vertex normals.
     const vertNormals: Vec3[] = Array.from({ length: nv }, () => new Vec3());
+    const shadingNormals: Vec3[] = Array.from({ length: nv }, () => new Vec3());
     for (let f = 0; f < this.faces.length; f++) {
       const w = this.faceArea(f);
       const n = faceNormals[f].scale(w > 0 ? w : 1e-6);
-      for (const v of this.faces[f]) vertNormals[v].addInPlace(n);
+      const smooth = this.isFaceSmooth(f);
+      for (const v of this.faces[f]) {
+        vertNormals[v].addInPlace(n);
+        if (smooth) shadingNormals[v].addInPlace(n);
+      }
     }
     for (let i = 0; i < nv; i++) {
       const l = vertNormals[i].length();
       vertNormals[i] = l > 1e-9 ? vertNormals[i].scale(1 / l) : new Vec3(0, 0, 1);
+      const sl = shadingNormals[i].length();
+      // A vertex with no smooth face around it never has its shading normal
+      // read — every face touching it draws with its own — but falling back
+      // keeps the array meaningful for anything that asks anyway.
+      shadingNormals[i] = sl > 1e-9 ? shadingNormals[i].scale(1 / sl) : vertNormals[i];
     }
 
     this._topology = {
       edges, edgeIndex, faceEdges, vertEdges, vertFaces, faceNormals, faceCenters, vertNormals,
+      shadingNormals,
     };
     return this._topology;
   }

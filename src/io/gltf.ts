@@ -162,7 +162,7 @@ export function exportGLTF(scene: Scene, selectionOnly = false): string {
             for (let corner = 0; corner < loop.length; corner++) {
               const v = loop[corner];
               const p = mesh.positions[v];
-              const n = smooth ? t.vertNormals[v] : t.faceNormals[f];
+              const n = smooth ? t.shadingNormals[v] : t.faceNormals[f];
               positions.push(p.x, p.y, p.z);
               normals.push(n.x, n.y, n.z);
               // glTF's V axis runs the other way.

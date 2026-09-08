@@ -163,7 +163,9 @@ export function buildSurface(
       for (const corner of [0, i, i + 1]) {
         const v = loop[corner];
         const p = mesh.positions[v];
-        const nrm = smooth ? t.vertNormals[v] : fn;
+        // Shading normals, not geometric ones: a face marked flat must not
+        // pull its neighbours' smooth normals around.
+        const nrm = smooth ? t.shadingNormals[v] : fn;
         scratch[0] = p.x; scratch[1] = p.y; scratch[2] = p.z;
         scratch[3] = nrm.x; scratch[4] = nrm.y; scratch[5] = nrm.z;
         scratch[6] = uv ? uv[corner * 2] : 0;

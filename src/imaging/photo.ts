@@ -368,6 +368,10 @@ export function meshFromPhoto(bitmap: Bitmap, options: PhotoOptions = {}): Photo
     }
   }
 
+  // Everything pushed so far is cap; everything after this is wall. The split
+  // is what lets the lip be shaded as the hard edge it is.
+  const capFaceCount = mesh.faces.length;
+
   // The wall that joins the two surfaces along the outline. Without it the
   // model is two loose shells, which looks fine in the viewport and fails the
   // moment anyone booleans it, prints it or exports it.
@@ -401,6 +405,21 @@ export function meshFromPhoto(bitmap: Bitmap, options: PhotoOptions = {}): Photo
 
   mesh.faceUV = uv;
   mesh.setAllSmooth(true);
+  // The lip is a hard edge, because it is one.
+  //
+  // The wall stands perpendicular to the two surfaces it joins, so smoothing
+  // it into them is asking for the average of two directions ninety degrees
+  // apart. Where the outline steps in by a grid cell — which a tapering
+  // subject does every few rows — that average swung the surface's own normals
+  // by up to forty-three degrees, and drew a row of hard creases across the
+  // front of the model. The geometry there measures perfectly smooth; it was
+  // never the shape, only what the shading was told about it.
+  //
+  // Marking these flat also stops them contributing to the caps' smooth
+  // normals, which is what "flat" means everywhere else and is what actually
+  // removes the creases. The model stays welded and watertight: nothing is
+  // duplicated, only shaded differently.
+  mesh.faceSmooth = mesh.faces.map((_, f) => f < capFaceCount);
   scaleToHeight(mesh, targetHeight);
   recalculateNormals(mesh);
   mesh.markDirty();
