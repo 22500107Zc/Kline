@@ -195,6 +195,17 @@ gained or lost. Click any of them to frame it.
 It keeps up while you work. Undo a step with a comparison open and the geometry
 it added stops being green while you watch.
 
+It also says what it did **not** read. A comparison that reports "identical"
+over something it never examined is worse than no comparison, because it is
+believed — so UVs, vertex colours, skin weights, seams and smoothing are all
+compared, material *values* are compared as well as which slots an object points
+at, and anything genuinely outside its reach (the pixels inside an embedded
+texture, the output of a modifier stack rather than its input) is listed rather
+than rounded down to "the same". A pairing that is not certain — a part matched
+by its generated identity after a rebuild renumbered it, an object whose
+modifiers mean the mesh compared is not the mesh drawn — is marked as uncertain
+instead of being presented with the same confidence as an exact one.
+
 The hard part is that a mesh has no line numbers. Comparing vertex arrays falls
 apart the moment an operator renumbers anything — and most of them do. So faces
 are identified by where their corners are in space, sorted so that winding and
@@ -202,6 +213,121 @@ starting corner do not matter, which survives an operator rebuilding the mesh
 from scratch. An index-aligned pass runs first to catch geometry that merely
 *moved*, since a sculpted face is neither an addition nor a deletion and
 reporting it as both would be true and useless.
+
+---
+
+## Revise what you generated, without losing what you did to it
+
+Generating a starting point is the easy half. The half every tool skips is
+coming back to it. *"Make that staircase thirty steps instead of twenty"* is a
+sentence anyone would say, and everywhere else the answer is: generate a second
+staircase, and redo your materials on it. Nothing was kept — not the prompt,
+not the recipe, not the settings, not what the geometry looked like before you
+started working on it — so there is nothing to revise, only something to
+replace.
+
+Kline keeps all four, in the file.
+
+**Create New** builds something. **Revise Selected** changes it.
+
+```
+Select the staircase → type "change this staircase from 20 steps to 30" → Revise Selected
+```
+
+The revision is staged, not applied. You see it in the viewport, and a panel
+tells you what it kept, what it changed, and anything it could not reconcile.
+**Accept** keeps it as a single undo step. **Reject** puts the scene back
+exactly as it was, with nothing left in the history.
+
+### What is kept automatically
+
+The trick is that there are three versions of every part in play, not two: what
+the generator made last time, what *you* made of it, and what the generator
+would make now. With all three, each field decides on its own — the generator
+changed it and you did not, take theirs; you changed it and they did not, keep
+yours. So a revision keeps:
+
+- **Materials and texture assignments** — a re-run has no opinion about them.
+- **Names, transforms, parenting** — a part you moved stays where you put it.
+- **Visibility and locking.**
+- **Objects you added yourself.** A handrail you modelled onto a generated
+  staircase has no part identity, and that absence is what marks it as yours:
+  it is never matched, replaced or removed.
+- **Modifier stacks, animation and rig relationships.**
+- **Unrelated objects**, which are not touched at all.
+
+Repeated parts have a defined correspondence when the count changes, rather than
+matching on array position or display name. Twenty steps becoming thirty keeps
+`step#1`–`step#20` and adds ten; thirty becoming twenty removes the top ten
+instead of renumbering everything.
+
+### What causes an explicit conflict
+
+Not everything can survive a regeneration, and Kline does not pretend otherwise.
+A sculpted crease, an unwrapped UV island, a painted weight and a vertex colour
+are all stored against *particular vertices*. When a revision produces different
+vertices, the mapping is gone — no merge brings it back.
+
+So those are conflicts, and they are reported as conflicts:
+
+- **You changed the shape and so did the revision**, differently.
+- **The revision changes the topology** of something you edited. The message
+  names what is stored against the old vertices — "your UV coordinates are
+  stored against the vertices this would replace" — rather than leaving you to
+  find out.
+- **The revision removes a part you had edited.**
+- **A protected part would change.** Tick *Protect from regeneration* on any
+  part and a revision that would touch it reports it instead.
+- **No baseline was recorded**, so your edits cannot be told apart from the
+  generator's. Everything is offered as the generator made it, and the panel
+  says so.
+
+Nothing is applied to a conflicted part. Your version is what stays in the
+scene, and you choose per object: **Keep mine**, **Use the revised one**, **Keep
+both**, or reject the revision entirely. The success condition is preserved work
+or an explicit conflict — never silent loss.
+
+### What is recorded, and what is not
+
+Every generated object carries, in the `.kline` file: what made it (a recipe, a
+generated program, a reference image), the prompt, the program, the settings as
+named values, a schema and generator version, a stable identity for the asset
+and for each of its parts, and the geometry the generator produced.
+
+**Opening a file never re-runs anything.** You see the geometry the file
+contains. A regeneration happens only because somebody asked for one.
+
+Files written before any of this existed simply have none of it, which is an
+ordinary scene — it opens exactly as it always did, and Revise says plainly that
+there is nothing recorded to revise from. The same is true of anything you
+modelled by hand or imported.
+
+Where a dependency is genuinely missing it is named rather than discovered as a
+failure later: a photo model whose picture was not embedded says *"the picture
+this was built from (logo.png) is not in this file"*.
+
+### Where the revision comes from
+
+- **Recipes** revise by *changing a setting and running again* — instant,
+  offline, exactly repeatable. "Thirty steps" changes `count` from 20 to 30.
+  Nothing is asked to reinvent a staircase, so nothing else silently changes.
+  A request that names no setting the object actually has says so rather than
+  quietly doing nothing.
+- **Generated programs** revise by editing the program, which needs a model or
+  you. The existing program goes to the model with the request and an
+  instruction to change as little as possible. Without a model, press **Code**,
+  change it and run it.
+- **Reference images** revise from the Create panel, where the picture and its
+  settings are. Sliders rebuild in place while the model is still exactly what
+  those settings made — there is nothing at risk. Once you have edited it, or
+  when you press **Preview as Revision**, it goes through the same review as
+  everything else. A resolution change replaces every vertex, so a sculpt or an
+  unwrap on it is a conflict, and it is shown as one.
+
+This is not branching or merging in the Git sense, and it is not described as
+such. There are no branches, no merge commits and no history graph — there is a
+recorded baseline, a three-way comparison against it, and a preview you accept
+or reject.
 
 ---
 

@@ -3,6 +3,10 @@ import { Mesh } from '../mesh/Mesh';
 import { PrimitiveKind, buildPrimitive } from '../mesh/primitives';
 import { Scene, SceneObject } from '../scene/Scene';
 import { createMaterial, hexToLinear } from '../scene/Material';
+import {
+  Baseline, BaselinePart, GENERATOR_VERSION, PROVENANCE_SCHEMA, Provenance, ProvenanceSource,
+  ReferenceOrigin, assignPartKeys, newAssetId,
+} from './provenance';
 
 /**
  * The build plan: what "make me a table" turns into.
@@ -192,6 +196,22 @@ export function meshForPart(part: BuildPart): Mesh {
 export interface ExecuteResult {
   root: SceneObject;
   objects: SceneObject[];
+  /** Part keys in the same order as `objects`. */
+  keys: string[];
+}
+
+/** Everything a later revision needs to know about how this build was asked for. */
+export interface BuildOrigin {
+  source: ProvenanceSource;
+  generator: string;
+  prompt?: string;
+  code?: string;
+  params?: Record<string, number | string | boolean | null>;
+  seed?: number;
+  reference?: ReferenceOrigin;
+  /** Reuse an existing identity, when this build is a revision of one. */
+  assetId?: string;
+  revision?: number;
 }
 
 /**
@@ -218,8 +238,10 @@ export function executePlan(scene: Scene, plan: BuildPlan, origin = new Vec3()):
   };
 
   const objects: SceneObject[] = [];
-  for (const part of plan.parts) {
+  const keys = assignPartKeys(plan.parts.map((p) => p.name ?? p.shape));
+  for (const [index, part] of plan.parts.entries()) {
     const obj = scene.add('mesh', part.name ?? part.shape, meshForPart(part));
+    obj.partKey = keys[index];
     obj.position = new Vec3(part.position[0], part.position[1], part.position[2]);
     if (part.rotation) {
       obj.rotation = new Vec3(
@@ -230,7 +252,51 @@ export function executePlan(scene: Scene, plan: BuildPlan, origin = new Vec3()):
     scene.setParent(obj.id, root.id);
     objects.push(obj);
   }
-  return { root, objects };
+  return { root, objects, keys };
+}
+
+/**
+ * The geometry a generator just produced, frozen for comparison later.
+ *
+ * This is the thing that makes a revision possible rather than a replacement.
+ * With it, three states are knowable — what the generator made, what you made
+ * of it, and what the generator would make now — and a change can be applied
+ * to one without discarding the other. Without it there are only two, and no
+ * way to tell which of them moved.
+ */
+export function captureBaseline(objects: SceneObject[], keys: string[]): Baseline {
+  const parts: BaselinePart[] = objects.map((obj, i) => ({
+    key: keys[i] ?? obj.partKey ?? `part#${i + 1}`,
+    name: obj.name,
+    position: obj.position.toArray(),
+    rotation: obj.rotation.toArray(),
+    scale: obj.scale.toArray(),
+    mesh: obj.mesh ? obj.mesh.toJSON() : null,
+  }));
+  return { parts };
+}
+
+/** Attach the record of how an asset was made to its root. */
+export function recordProvenance(
+  root: SceneObject, origin: BuildOrigin, baseline: Baseline,
+): Provenance {
+  const provenance: Provenance = {
+    schema: PROVENANCE_SCHEMA,
+    source: origin.source,
+    assetId: origin.assetId ?? newAssetId(),
+    generator: origin.generator,
+    generatorVersion: GENERATOR_VERSION,
+    prompt: origin.prompt,
+    code: origin.code,
+    params: { ...(origin.params ?? {}) },
+    seed: origin.seed,
+    reference: origin.reference,
+    baseline,
+    createdAt: Date.now(),
+    revision: origin.revision ?? 0,
+  };
+  root.provenance = provenance;
+  return provenance;
 }
 
 /** A compact description of the plan, for the status line. */

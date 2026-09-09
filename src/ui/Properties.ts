@@ -7,6 +7,7 @@ import { LightType, SceneObject } from '../scene/Scene';
 import { button, checkbox, clear, h, numberField, row, select } from './dom';
 import { CreatePanel } from './CreatePanel';
 import { icon } from './icons';
+import { assetRootFor } from '../editor/revision';
 
 type Tab = 'create' | 'object' | 'modifiers' | 'material' | 'world';
 
@@ -107,7 +108,7 @@ export class Properties {
     });
     nameInput.addEventListener('keydown', (e) => e.stopPropagation());
 
-    this.body.appendChild(this.section('Identity', [
+    const identity: (HTMLElement | null)[] = [
       row('Name', nameInput),
       checkbox('Visible in viewport', obj.visible, (v) => {
         ed.beginUndo('Toggle visibility');
@@ -115,7 +116,34 @@ export class Properties {
         ed.requestRender();
         ed.emit('change');
       }),
-    ]));
+    ];
+
+    // Only offered where it can mean something. On an object no generator will
+    // ever touch, a "protect from regeneration" switch is a promise about
+    // nothing, and a control that does nothing teaches people to distrust the
+    // ones that do.
+    const asset = assetRootFor(ed.scene, obj);
+    if (asset) {
+      identity.push(checkbox('Protect from regeneration', obj.protectedFromRegen, (v) => {
+        ed.beginUndo(v ? 'Protect part' : 'Unprotect part');
+        obj.protectedFromRegen = v;
+        ed.emit('change');
+      }));
+      const prov = asset.provenance!;
+      const how = prov.generator.replace(/^recipe:/, 'the ').replace(/^recipe$/, 'a recipe')
+        + (prov.generator.startsWith('recipe:') ? ' recipe' : '');
+      const made = obj === asset
+        ? `Built by ${how}${prov.prompt ? ` from "${prov.prompt}"` : ''}.`
+        : `Part of "${asset.name}", built by ${how}.`;
+      const revised = prov.revision > 0
+        ? ` Revised ${prov.revision} time${prov.revision === 1 ? '' : 's'}.`
+        : '';
+      const missing = prov.reference?.missing
+        ? ` The picture it came from (${prov.reference.name}) is not stored in this file, so it cannot be rebuilt.`
+        : '';
+      identity.push(h('p', { class: 'dim small', text: `${made}${revised}${missing}` }));
+    }
+    this.body.appendChild(this.section('Identity', identity.filter((e): e is HTMLElement => e !== null)));
 
     const vectorRow = (
       label: string, get: () => Vec3, set: (v: Vec3) => void, step: number, scale = 1,

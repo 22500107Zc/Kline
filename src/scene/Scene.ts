@@ -11,6 +11,7 @@ import {
 } from '../anim/animation';
 import { ArmatureData, cloneArmature, createArmature } from '../anim/armature';
 import { BodyShape } from '../physics/rigidbody';
+import { Provenance, cloneProvenance, newAssetId, normaliseProvenance } from '../build/provenance';
 
 /** How an object takes part in a rigid body simulation. */
 export interface PhysicsBody {
@@ -104,6 +105,29 @@ export class SceneObject {
    * travels with a copied object.
    */
   physics: PhysicsBody | null = null;
+  /**
+   * How this object was generated, on the root of a generated asset.
+   *
+   * Null on anything modelled by hand, imported, or made before revisions
+   * existed — which is a supported state everywhere, not a missing field.
+   */
+  provenance: Provenance | null = null;
+  /**
+   * Which generated part this is, on a child of a generated asset.
+   *
+   * Stable across renames, reordering and a save/reload; see `partKeyFor`.
+   * Null on anything the user added themselves, which is exactly what tells
+   * a regeneration to leave it alone.
+   */
+  partKey: string | null = null;
+  /**
+   * Held back from regeneration at the user's request.
+   *
+   * A revision that would change a protected part reports a conflict instead
+   * of changing it. Distinct from `locked`, which is about selection and
+   * picking in the viewport.
+   */
+  protectedFromRegen = false;
 
   private evalCache: { key: string; revision: number; mesh: Mesh } | null = null;
 
@@ -363,6 +387,45 @@ export class Scene {
     if (this.active === id) this.active = this.selection.values().next().value ?? null;
   }
 
+  /**
+   * Copy an object and everything under it.
+   *
+   * The subtree rather than the object alone, because a generated asset *is*
+   * a root plus its parts: copying the root by itself would leave a record of
+   * twenty steps with no steps under it.
+   *
+   * The copy is a new asset, not a second reference to the same one. Asset
+   * ids are how a revision finds what it is revising, so two objects sharing
+   * one would mean revising either changed the record of both. Part keys are
+   * kept, because within the copy they still identify the same parts.
+   */
+  duplicateObject(id: number, parentId: number | null = null): SceneObject | null {
+    const src = this.objects.get(id);
+    if (!src) return null;
+    const copy = this.add(src.type, src.name.replace(/\.\d+$/, ''), src.mesh ? src.mesh.clone() : null);
+    copy.position = src.position.clone();
+    copy.rotation = src.rotation.clone();
+    copy.scale = src.scale.clone();
+    copy.visible = src.visible;
+    copy.locked = src.locked;
+    copy.modifiers = JSON.parse(JSON.stringify(src.modifiers));
+    copy.materialSlots = [...src.materialSlots];
+    copy.light = src.light ? { ...src.light, color: [...src.light.color] as [number, number, number] } : null;
+    copy.camera = src.camera ? { ...src.camera } : null;
+    copy.armature = src.armature ? cloneArmature(src.armature) : null;
+    copy.physics = src.physics ? { ...src.physics } : null;
+    copy.animation = cloneChannels(src.animation);
+    copy.partKey = src.partKey;
+    copy.protectedFromRegen = src.protectedFromRegen;
+    if (src.provenance) {
+      copy.provenance = cloneProvenance(src.provenance);
+      copy.provenance.assetId = newAssetId();
+    }
+    if (parentId !== null) this.setParent(copy.id, parentId);
+    for (const child of src.children) this.duplicateObject(child, copy.id);
+    return copy;
+  }
+
   setParent(childId: number, parentId: number | null): void {
     const child = this.objects.get(childId);
     if (!child) return;
@@ -555,6 +618,9 @@ export class Scene {
         armature: o.armature ? cloneArmature(o.armature) : null,
         physics: o.physics ? { ...o.physics } : null,
         animation: cloneChannels(o.animation),
+        provenance: o.provenance ? cloneProvenance(o.provenance) : null,
+        partKey: o.partKey,
+        protectedFromRegen: o.protectedFromRegen || undefined,
       })),
     };
   }
@@ -637,6 +703,11 @@ export class Scene {
       o.armature = od.armature && typeof od.armature === 'object' ? cloneArmature(od.armature) : null;
       o.physics = od.physics && typeof od.physics === 'object' ? { ...od.physics } : null;
       o.animation = sanitiseChannels(od.animation);
+      // Absent in every file written before revisions existed, and absent on
+      // anything modelled by hand. Both are ordinary.
+      o.provenance = normaliseProvenance(od.provenance);
+      o.partKey = typeof od.partKey === 'string' && od.partKey ? od.partKey : null;
+      o.protectedFromRegen = od.protectedFromRegen === true;
       s.objects.set(o.id, o);
       s.nextId = Math.max(s.nextId, o.id + 1);
     }
@@ -662,8 +733,30 @@ export class Scene {
       }
     }
 
-    s.order = s.order.filter((id) => s.objects.has(id));
-    for (const id of s.objects.keys()) if (!s.order.includes(id)) s.order.push(id);
+    // A child that its parent does not list is unreachable: the outliner walks
+    // down from the roots, so it would be in the file and nowhere on screen.
+    for (const o of s.objects.values()) {
+      if (o.parent === null) continue;
+      const parent = s.objects.get(o.parent);
+      if (parent && !parent.children.includes(o.id)) parent.children.push(o.id);
+    }
+    // `order` is the top level only — a parented object is reached through its
+    // parent. Keeping children here as well listed every one of them twice in
+    // the outliner, once nested and once at the root, from the moment a scene
+    // with any hierarchy was saved and reopened.
+    const top = (id: number): boolean => s.objects.get(id)?.parent === null;
+    const seen = new Set<number>();
+    s.order = s.order.filter((id) => {
+      if (!s.objects.has(id) || !top(id) || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+    for (const id of s.objects.keys()) {
+      if (top(id) && !seen.has(id)) {
+        seen.add(id);
+        s.order.push(id);
+      }
+    }
     s.selection = new Set(
       (Array.isArray(doc.selection) ? doc.selection : []).filter((id) => s.objects.has(id)),
     );
@@ -721,6 +814,12 @@ export interface SerializedObject {
   armature?: ArmatureData | null;
   physics?: PhysicsBody | null;
   animation?: Channel[];
+  /** How a generated asset was made; absent on everything else. */
+  provenance?: Provenance | null;
+  /** Which generated part a child is; absent on user-added objects. */
+  partKey?: string | null;
+  /** Held back from regeneration; absent when it is not. */
+  protectedFromRegen?: boolean;
 }
 
 export interface SerializedScene {

@@ -6,7 +6,8 @@ import {
   extrudeFaces, facesToVerts, flipNormals, makeFace, mergeByDistance, mergeVertices,
   recalculateNormals, smoothVertices, subdivideFaces, triangulateFaces,
 } from '../mesh/ops';
-import { Scene, createPhysicsBody } from '../scene/Scene';
+import { Scene, SceneObject, createPhysicsBody } from '../scene/Scene';
+import { assetRootFor } from './revision';
 import { bevelVertices, markBevelWeight } from '../mesh/bevel';
 import { voxelRemesh, voxelSizeForTarget } from '../mesh/remesh';
 import { BooleanOp, dissolveCoplanar, isSolid, meshBoolean, stitchTJunctions } from '../mesh/boolean';
@@ -153,6 +154,14 @@ export const COMMANDS: Command[] = [
   {
     id: 'file.save', label: 'Save Scene (.kline)', category: 'File', shortcut: 'Ctrl+S',
     run: (ed) => {
+      // Saving mid-preview would write a proposal into the file as though it
+      // were the model. Said out loud rather than silently written: the
+      // proposal is on screen, so nothing about the file looks wrong until it
+      // is reopened somewhere else.
+      if (ed.revision.active) {
+        ed.setStatus('A revision is waiting — accept or reject it before saving, or the file will hold the preview');
+        return;
+      }
       downloadText('scene.kline', JSON.stringify(ed.scene.toJSON(), null, 1), 'application/json');
       ed.setStatus('Saved scene.kline');
     },
@@ -337,16 +346,22 @@ export const COMMANDS: Command[] = [
       ed.beginUndo('Duplicate objects');
       const scene = ed.scene;
       const copies: number[] = [];
+      // Selecting a child as well as its parent would otherwise copy it twice:
+      // once in its own right and once inside the parent's subtree.
+      const chosen = new Set(scene.selection);
+      const nested = (o: SceneObject): boolean => {
+        let p = o.parent;
+        let guard = 0;
+        while (p !== null && guard++ < 64) {
+          if (chosen.has(p)) return true;
+          p = scene.get(p)?.parent ?? null;
+        }
+        return false;
+      };
       for (const src of scene.selectedObjects()) {
-        const copy = scene.add(src.type, src.name.replace(/\.\d+$/, ''), src.mesh ? src.mesh.clone() : null);
-        copy.position = src.position.clone();
-        copy.rotation = src.rotation.clone();
-        copy.scale = src.scale.clone();
-        copy.modifiers = JSON.parse(JSON.stringify(src.modifiers));
-        copy.materialSlots = [...src.materialSlots];
-        copy.light = src.light ? { ...src.light } : null;
-        copy.camera = src.camera ? { ...src.camera } : null;
-        copies.push(copy.id);
+        if (nested(src)) continue;
+        const copy = scene.duplicateObject(src.id, src.parent);
+        if (copy) copies.push(copy.id);
       }
       scene.selection = new Set(copies);
       scene.active = copies[copies.length - 1] ?? null;
@@ -671,6 +686,43 @@ export const COMMANDS: Command[] = [
   {
     id: 'view.compare', label: 'Compare Versions', category: 'View', shortcut: 'Ctrl+D',
     run: (ed) => ed.panels.toggleDiff?.(),
+  },
+  {
+    id: 'object.acceptRevision',
+    label: 'Accept Revision',
+    category: 'Object',
+    mode: 'object',
+    enabled: (ed) => ed.revision.active,
+    run: (ed) => {
+      if (!ed.revision.accept()) ed.setStatus('No revision is waiting to be accepted');
+    },
+  },
+  {
+    id: 'object.rejectRevision',
+    label: 'Reject Revision',
+    category: 'Object',
+    mode: 'object',
+    enabled: (ed) => ed.revision.active,
+    run: (ed) => {
+      if (!ed.revision.reject()) ed.setStatus('No revision is waiting to be rejected');
+    },
+  },
+  {
+    id: 'object.protectFromRegeneration',
+    label: 'Protect From Regeneration',
+    category: 'Object',
+    mode: 'object',
+    enabled: (ed) => !!ed.scene.activeObject && !!assetRootFor(ed.scene, ed.scene.activeObject),
+    run: (ed) => {
+      const obj = ed.scene.activeObject;
+      if (!obj) return;
+      ed.beginUndo('Protect part');
+      obj.protectedFromRegen = !obj.protectedFromRegen;
+      ed.setStatus(obj.protectedFromRegen
+        ? `"${obj.name}" will not be changed by a revision; one that tries will say so`
+        : `"${obj.name}" can be regenerated again`);
+      ed.emit('change');
+    },
   },
   {
     id: 'help.guide', label: 'Getting Started Guide', category: 'Help',

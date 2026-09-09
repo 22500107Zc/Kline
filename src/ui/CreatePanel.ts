@@ -21,9 +21,22 @@ import {
   loadReference, releaseReference, seekVideo, textureFromReference,
 } from '../imaging/load';
 import { BackendInfo, generateMesh, probeBackend, storeEndpoint, storedEndpoint } from '../ai/client';
+import {
+  GENERATOR_VERSION, PROVENANCE_SCHEMA, ParamValue, ReferenceOrigin, newAssetId,
+} from '../build/provenance';
+import { ProposedPart, sameMesh } from '../build/merge';
 import { button, checkbox, clear, h, numberField, row, select } from './dom';
 
 type Mode = 'photo' | 'scene' | 'silhouette' | 'lathe' | 'relief';
+
+/**
+ * The part key a reference-built model carries.
+ *
+ * One mesh, so one part — but it still needs a key, because that is what the
+ * merge matches on and what the comparison pairs by when a rebuild gives the
+ * object a new id.
+ */
+const REFERENCE_PART = 'surface#1';
 
 const MODES: { id: Mode; label: string; blurb: string }[] = [
   {
@@ -490,6 +503,8 @@ export class CreatePanel {
   }
 
   private actionsSection(): HTMLElement {
+    const target = this.editor.scene.get(this.targetId);
+    const revisable = !!target?.provenance;
     return h('section', { class: 'prop-section' }, [
       h('div', { class: 'btn-row' }, [
         button('Add as New Object', () => {
@@ -497,10 +512,72 @@ export class CreatePanel {
           this.assignedName = '';
           this.generate(true);
         }, { title: 'Keep the current result and build another from the same reference' }),
+        // Sliders rebuild in place while the model is still exactly what the
+        // settings produce — there is nothing to lose, and asking someone to
+        // confirm every tick of a slider would be absurd. This is the other
+        // half: once you have made the object yours, or once you want to see
+        // what a change would do before it does it, the same settings go
+        // through the same review as every other revision.
+        revisable
+          ? button('Preview as Revision', () => this.reviseFromSettings(), {
+            title: 'Rebuild with these settings, previewing what it keeps and what it conflicts with',
+          })
+          : null,
         button('Frame', () => this.editor.frameSelected(), { title: 'Zoom the viewport to the result' }),
       ]),
-      h('p', { class: 'dim small', text: 'Tweaks rebuild the object in place. Everything after that is normal modelling — Tab into Edit Mode and keep going.' }),
+      h('p', {
+        class: 'dim small',
+        text: 'Tweaks rebuild the object in place while it is still what these settings made. '
+          + 'Once you have edited it, a rebuild becomes a revision you can review first — '
+          + 'a rebuild replaces every vertex, so sculpting, UVs and painting on it cannot come across.',
+      }),
     ]);
+  }
+
+  /**
+   * Rebuild with the current settings, as a reviewable revision.
+   *
+   * The same generator and the same merge as everything else. What makes this
+   * worth its own button is that it works even when nothing is at risk: seeing
+   * what a change would do before agreeing to it is useful in its own right,
+   * not only as a rescue.
+   */
+  private reviseFromSettings(): void {
+    const object = this.editor.scene.get(this.targetId);
+    if (!object || !this.bitmap) return;
+    if (this.mode === 'scene') {
+      this.statsLine.textContent = 'Press "Build the scene" to re-read the picture with the depth model.';
+      return;
+    }
+    const result = this.buildMesh();
+    if (result.mesh.faceCount === 0) {
+      this.statsLine.textContent = 'Nothing found at this threshold, so there is nothing to revise to.';
+      return;
+    }
+    const proposed: ProposedPart[] = [{
+      key: REFERENCE_PART,
+      name: object.name,
+      position: object.position.toArray(),
+      rotation: object.rotation.toArray(),
+      scale: object.scale.toArray(),
+      mesh: result.mesh.toJSON(),
+    }];
+    const edited = !sameMesh(
+      object.provenance?.baseline.parts?.[0]?.mesh ?? null,
+      object.mesh ? object.mesh.toJSON() : null,
+    );
+    const summary = this.editor.revision.preview(
+      object,
+      proposed,
+      `Rebuild ${object.name} from ${this.reference?.name ?? 'the reference'}`,
+      edited
+        ? ['You have edited this model since it was built. A rebuild replaces every vertex, so '
+          + 'edits stored against the old ones cannot be carried across.']
+        : ['Its placement, material, modifiers and animation are kept — a rebuild only replaces '
+          + 'the geometry.'],
+      { params: this.settingsForMode(), reference: this.referenceOrigin() },
+    );
+    if (summary) this.statsLine.textContent = `${summary.headline} — accept or reject it.`;
   }
 
   /**
@@ -673,10 +750,17 @@ export class CreatePanel {
         if (commit) this.editor.beginUndo('Create from reference');
         object = this.editor.scene.add('mesh', this.nameForMode(), result.mesh);
         object.position = this.placementFor(result.mesh);
+        object.partKey = REFERENCE_PART;
         this.targetId = object.id;
         this.assignedName = object.name;
         this.editor.selectObject(object.id);
         this.editor.frameSelected();
+      } else if (this.stageRevision(object, result.mesh)) {
+        // Somebody has edited this model since it was generated, so a rebuild
+        // is a revision and goes through the same review everything else does
+        // — sliding a slider must not be a way round the preservation rules.
+        this.drawPreview();
+        return;
       } else {
         object.mesh = result.mesh;
         // Keep the name honest as the mode changes, unless it was renamed.
@@ -685,7 +769,11 @@ export class CreatePanel {
           this.assignedName = object.name;
         }
       }
+      // The texture goes on first, so the record can say the picture is in the
+      // file: an asset whose reference is embedded can be revised months later
+      // with nothing but the file, and one whose is not has to say so.
       if (this.wantsTexture()) this.applyPhotoTexture(object);
+      this.recordOrigin(object, result.mesh);
       this.editor.markGeometryDirty(object);
       if (refit) this.editor.frameSelected();
 
@@ -703,6 +791,124 @@ export class CreatePanel {
         this.generateNow(false);
       }
     }
+  }
+
+  // ------------------------------------------------------- record and revise
+
+  /** The settings this mode was run with, as named values a revision can change. */
+  private settingsForMode(): Record<string, ParamValue> {
+    const base: Record<string, ParamValue> = {
+      mode: this.mode,
+      channel: this.mask.channel,
+      threshold: this.mask.threshold,
+      invert: this.mask.invert,
+    };
+    switch (this.mode) {
+      case 'photo':
+        return { ...base, ...this.photo };
+      case 'scene':
+        return { ...base, ...this.scene };
+      case 'silhouette':
+        return { ...base, ...this.silhouette };
+      case 'lathe':
+        return { ...base, ...this.lathe };
+      default:
+        return { ...base, ...this.relief };
+    }
+  }
+
+  /**
+   * Where the picture is, so the model can be rebuilt from the saved file.
+   *
+   * When the photograph is embedded as a texture the asset is self-contained
+   * and a revision can run offline, months later, on another machine. When it
+   * is not, that is recorded as a missing dependency by name rather than
+   * discovered as a failure at the moment somebody asks for a change.
+   */
+  private referenceOrigin(): ReferenceOrigin {
+    const ref = this.reference;
+    return {
+      textureId: this.photoTexture?.id ?? null,
+      name: ref?.name ?? 'reference',
+      frameTime: this.frameTime,
+      width: ref?.width ?? 0,
+      height: ref?.height ?? 0,
+      missing: !this.photoTexture,
+    };
+  }
+
+  /**
+   * Write down what built this model, and what it looked like when new.
+   *
+   * Refreshed on every rebuild from this panel, because while the panel is
+   * open with the picture loaded it *is* the generator: the object on screen
+   * is what these settings produce, and that is what the next revision needs
+   * as its baseline. Nothing here runs on load — reopening a file shows the
+   * geometry the file holds.
+   */
+  private recordOrigin(object: SceneObject, mesh: Mesh): void {
+    const existing = object.provenance;
+    object.partKey = REFERENCE_PART;
+    object.provenance = {
+      schema: PROVENANCE_SCHEMA,
+      source: 'reference',
+      assetId: existing?.assetId ?? newAssetId(),
+      generator: `reference:${this.mode}`,
+      generatorVersion: GENERATOR_VERSION,
+      prompt: existing?.prompt,
+      params: this.settingsForMode(),
+      reference: this.referenceOrigin(),
+      baseline: {
+        parts: [{
+          key: REFERENCE_PART,
+          name: object.name,
+          position: object.position.toArray(),
+          rotation: object.rotation.toArray(),
+          scale: object.scale.toArray(),
+          mesh: mesh.toJSON(),
+        }],
+      },
+      createdAt: Date.now(),
+      revision: existing ? existing.revision + 1 : 0,
+    };
+  }
+
+  /**
+   * Stage a rebuild as a revision when the model is no longer what was built.
+   *
+   * A reference model is one mesh, so a resolution change replaces every
+   * vertex in it — which means a sculpt, an unwrap or a paint pass on it has
+   * nothing to map onto. That is a real conflict and it is reported as one;
+   * pretending a re-sample preserves detail it cannot preserve would be the
+   * worst kind of quiet.
+   *
+   * Returns true when the rebuild was staged and must not also be applied.
+   */
+  private stageRevision(object: SceneObject, mesh: Mesh): boolean {
+    const prov = object.provenance;
+    const baseline = prov?.baseline.parts?.[0];
+    if (!prov || !baseline) return false;
+    if (sameMesh(baseline.mesh, object.mesh ? object.mesh.toJSON() : null)) return false;
+
+    const proposed: ProposedPart[] = [{
+      key: REFERENCE_PART,
+      name: object.name,
+      position: object.position.toArray(),
+      rotation: object.rotation.toArray(),
+      scale: object.scale.toArray(),
+      mesh: mesh.toJSON(),
+    }];
+    const summary = this.editor.revision.preview(
+      object,
+      proposed,
+      `Rebuild ${object.name} from ${this.reference?.name ?? 'the reference'}`,
+      ['You have edited this model since it was built from the picture. Rebuilding it replaces '
+        + 'every vertex, so edits stored against the old ones cannot be carried across.'],
+      { params: this.settingsForMode(), reference: this.referenceOrigin() },
+    );
+    if (!summary) return false;
+    this.statsLine.textContent = `${summary.headline} — accept or reject it.`;
+    return true;
   }
 
   /**
@@ -840,11 +1046,15 @@ export class CreatePanel {
         this.targetId = object.id;
         this.assignedName = object.name;
         this.editor.selectObject(object.id);
+      } else if (this.stageRevision(object, result.mesh)) {
+        say(`${this.editor.revision.summary?.headline ?? 'Ready'} — accept or reject the rebuild.`);
+        return;
       } else {
         object.mesh = result.mesh;
       }
       if (this.scene.texture) this.applyPhotoTexture(object);
       else object.materialSlots = [this.editor.scene.ensureDefaultMaterial()];
+      this.recordOrigin(object, result.mesh);
       this.editor.markGeometryDirty(object);
       this.editor.frameSelected();
 

@@ -2236,6 +2236,314 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     }
   });
 
+  // ------------------------------------------- generate, edit, revise, review
+
+  test('a staircase is revised to thirty steps with your work still on it', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const bar = window.kline.app.buildBar;
+
+      bar.focus('a staircase with 20 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      if (!root) return { ok: false, why: 'nothing was built with a record of how' };
+      const steps = root.children.map((id) => ed.scene.get(id));
+
+      // Make it yours: recolour one step, move another, add a handrail.
+      const slot = ed.scene.addMaterial();
+      ed.scene.materials[slot].color = [0.9, 0.1, 0.1];
+      steps[0].materialSlots = [slot];
+      const movedName = steps[1].name;
+      steps[1].position.z += 0.5;
+      const rail = ed.scene.add('mesh', 'My handrail', steps[0].mesh.clone());
+      ed.scene.setParent(rail.id, root.id);
+      const otherId = ed.scene.add('mesh', 'Unrelated cube', steps[0].mesh.clone()).id;
+      const unrelatedBefore = JSON.stringify(ed.scene.get(otherId).mesh.toJSON());
+
+      ed.selectObject(root.id);
+      bar.focus('change this staircase from 20 steps to 30');
+      await bar.revise();
+
+      const staged = ed.revision.summary;
+      if (!staged) return { ok: false, why: 'no revision was staged' };
+      // Steps only: the handrail is a child too, and it is meant to be.
+      const previewCount = ed.scene.get(root.id).children
+        .map((id) => ed.scene.get(id))
+        .filter((k) => k.partKey && k.partKey.startsWith('step#')).length;
+      ed.revision.accept();
+
+      const after = ed.scene.get(root.id);
+      const kids = after.children.map((id) => ed.scene.get(id));
+      const moved = kids.find((k) => k.name === movedName);
+      return {
+        ok: true,
+        previewCount,
+        stepCount: kids.filter((k) => k.partKey && k.partKey.startsWith('step#')).length,
+        recolouredKept: ed.scene.materials[steps[0].materialSlots[0]].color[0] > 0.8,
+        movedKept: moved ? moved.position.z : null,
+        railKept: kids.some((k) => k.name === 'My handrail' && k.partKey === null),
+        unrelatedUntouched: JSON.stringify(ed.scene.get(otherId).mesh.toJSON()) === unrelatedBefore,
+        conflicts: staged.report.conflicts.length,
+        revision: after.provenance.revision,
+        undoDepth: ed.history.depth,
+      };
+    });
+
+    assert.equal(out.ok, true, out.why);
+    assert.equal(out.previewCount, 30, 'the preview was not visible in the scene');
+    assert.equal(out.stepCount, 30, 'the revision did not reach thirty steps');
+    assert.equal(out.recolouredKept, true, 'the step you recoloured lost its material');
+    assert.ok(out.movedKept !== null && out.movedKept > 0.4, 'the step you moved was moved back');
+    assert.equal(out.railKept, true, 'your own handrail was thrown away');
+    assert.equal(out.unrelatedUntouched, true, 'an unrelated object was touched');
+    assert.equal(out.conflicts, 0, 'nothing here actually disagreed');
+    assert.equal(out.revision, 1);
+  });
+
+  test('a sculpted object reports a conflict instead of losing the sculpt', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const bar = window.kline.app.buildBar;
+      bar.focus('a staircase with 8 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      const target = ed.scene.get(root.children[3]);
+
+      // Sculpt it, and unwrap it, so there is something with nowhere to go.
+      for (const p of target.mesh.positions) p.z += 0.2;
+      target.mesh.faceUV = target.mesh.faces.map(() => [0, 0, 1, 0, 1, 1, 0, 1]);
+      target.mesh.markDirty();
+      const sculpted = JSON.stringify(target.mesh.toJSON());
+
+      ed.selectObject(root.id);
+      bar.focus('make it much bigger');
+      await bar.revise();
+      const staged = ed.revision.summary;
+      if (!staged) return { ok: false, why: 'no revision was staged' };
+      const conflict = staged.report.conflicts.find((c) => c.objectId === target.id);
+      const keptDuringPreview = JSON.stringify(ed.scene.get(target.id).mesh.toJSON()) === sculpted;
+      ed.revision.accept();
+      return {
+        ok: true,
+        conflict: conflict ? { kind: conflict.kind, detail: conflict.detail } : null,
+        keptDuringPreview,
+        keptAfterAccept: JSON.stringify(ed.scene.get(target.id).mesh.toJSON()) === sculpted,
+      };
+    });
+
+    assert.equal(out.ok, true, out.why);
+    assert.ok(out.conflict, 'the sculpt was replaced with no conflict reported');
+    assert.match(out.conflict.detail, /UV coordinates/,
+      'the conflict did not say what could not come across');
+    assert.equal(out.keptDuringPreview, true, 'the preview overwrote the sculpt');
+    assert.equal(out.keptAfterAccept, true, 'accepting a revision destroyed a conflicted object');
+  });
+
+  test('rejecting a revision leaves the scene untouched; accepting it is one undo', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const bar = window.kline.app.buildBar;
+      bar.focus('a staircase with 12 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      ed.selectObject(root.id);
+
+      const strip = (s) => { const d = JSON.parse(s); delete d.nextId; return JSON.stringify(d); };
+      const before = strip(JSON.stringify(ed.scene.toJSON()));
+      const depthBefore = ed.history.depth;
+
+      bar.focus('make it 20 steps');
+      await bar.revise();
+      const previewed = ed.scene.get(root.id).children.length;
+      ed.revision.reject();
+      const afterReject = strip(JSON.stringify(ed.scene.toJSON()));
+
+      bar.focus('make it 20 steps');
+      await bar.revise();
+      ed.revision.accept();
+      const afterAccept = ed.scene.get(root.id).children.length;
+      const depthAfter = ed.history.depth;
+
+      ed.undo();
+      const afterUndo = strip(JSON.stringify(ed.scene.toJSON()));
+      const undoneCount = [...ed.scene.objects.values()].find((o) => o.provenance).children.length;
+      ed.redo();
+      const redoneCount = [...ed.scene.objects.values()].find((o) => o.provenance).children.length;
+
+      // Save, reopen, and check the record came back with the geometry.
+      const doc = JSON.parse(JSON.stringify(ed.scene.toJSON()));
+      ed.loadSceneJSON(doc);
+      const reopened = [...ed.scene.objects.values()].find((o) => o.provenance);
+      const outliner = [...ed.scene.walk()].map((w) => w.obj.id);
+      return {
+        previewed,
+        rejectRestored: afterReject === before,
+        rejectAddedHistory: ed.history.depth !== depthBefore && afterReject === before,
+        afterAccept,
+        oneStep: depthAfter - depthBefore,
+        undoRestored: afterUndo === before,
+        undoneCount,
+        redoneCount,
+        reopened: reopened
+          ? {
+            steps: reopened.children.length,
+            revision: reopened.provenance.revision,
+            count: reopened.provenance.params.count,
+            keys: reopened.children.map((id) => ed.scene.get(id).partKey).filter(Boolean).length,
+          }
+          : null,
+        duplicatedInOutliner: outliner.length !== new Set(outliner).size,
+      };
+    });
+
+    assert.equal(out.previewed, 20, 'the preview was not applied to the scene');
+    assert.equal(out.rejectRestored, true, 'rejecting changed the scene');
+    assert.equal(out.afterAccept, 20);
+    assert.equal(out.oneStep, 1, `accepting a 20-part revision cost ${out.oneStep} undo steps`);
+    assert.equal(out.undoRestored, true, 'undo did not restore geometry, records and relationships together');
+    assert.equal(out.undoneCount, 12);
+    assert.equal(out.redoneCount, 20, 'redo did not put the revision back');
+    assert.ok(out.reopened, 'the reopened file had no generated asset');
+    assert.equal(out.reopened.steps, 20, 'the geometry did not survive save and reopen');
+    assert.equal(out.reopened.revision, 1, 'the revision count did not survive');
+    assert.equal(out.reopened.count, 20, 'the settings did not survive');
+    assert.equal(out.reopened.keys, 20, 'the part identities did not survive');
+    assert.equal(out.duplicatedInOutliner, false, 'reopening listed a child twice in the outliner');
+  });
+
+  test('a logo keeps its placement and material through a depth revision', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      // A white mark on black: the Cut Out route's own case, and the one
+      // people bring a logo to.
+      const c = document.createElement('canvas');
+      c.width = 160;
+      c.height = 160;
+      const g = c.getContext('2d');
+      g.fillStyle = '#000';
+      g.fillRect(0, 0, c.width, c.height);
+      g.fillStyle = '#fff';
+      g.beginPath();
+      g.arc(80, 80, 52, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = '#000';
+      g.beginPath();
+      g.arc(80, 80, 22, 0, Math.PI * 2);
+      g.fill();
+      const blob = await new Promise((ok) => c.toBlob(ok, 'image/png'));
+      window.kline.app.properties.openCreate(new File([blob], 'logo.png', { type: 'image/png' }));
+
+      const ed = window.kline.editor;
+      for (let i = 0; i < 200 && ed.scene.objects.size === 0; i++) {
+        await new Promise((ok) => setTimeout(ok, 50));
+      }
+      const panel = window.kline.app.properties.create;
+      // Cut Out, so the setting being revised is an extrusion depth.
+      [...document.querySelectorAll('.mode-btn')].find((b) => b.textContent.trim() === 'Cut Out').click();
+      panel.mask.channel = 'luma';
+      panel.mask.threshold = 0.5;
+      panel.generate(true);
+      await new Promise((ok) => setTimeout(ok, 300));
+
+      const object = ed.scene.get(panel.targetId);
+      if (!object || !object.provenance) return { ok: false, why: 'no reference asset with a record' };
+
+      // Make it yours: move it and give it a material of your own.
+      object.position.x = 4.25;
+      object.rotation.z = 0.5;
+      const slot = ed.scene.addMaterial();
+      ed.scene.materials[slot].color = [0.1, 0.7, 0.2];
+      object.materialSlots = [slot];
+      const placement = [object.position.x, object.rotation.z];
+      const depthBefore = object.mesh.bounds().size().y;
+
+      // Revise the extrusion depth, preview it, accept it.
+      panel.silhouette.depth = 1.2;
+      panel.reviseFromSettings();
+      const staged = ed.revision.summary;
+      if (!staged) return { ok: false, why: 'the rebuild was not staged for review' };
+      const undoBefore = ed.history.depth;
+      ed.revision.accept();
+
+      const after = ed.scene.get(panel.targetId);
+      return {
+        ok: true,
+        source: after.provenance.source,
+        generator: after.provenance.generator,
+        referenceName: after.provenance.reference ? after.provenance.reference.name : null,
+        referenceEmbedded: after.provenance.reference ? !after.provenance.reference.missing : false,
+        depthBefore,
+        depthAfter: after.mesh.bounds().size().y,
+        recordedDepth: after.provenance.params.depth,
+        placementKept: after.position.x === placement[0] && after.rotation.z === placement[1],
+        materialKept: after.materialSlots[0] === slot,
+        conflicts: staged.report.conflicts.length,
+        oneStep: ed.history.depth - undoBefore,
+      };
+    });
+
+    assert.equal(out.ok, true, out.why);
+    assert.equal(out.source, 'reference');
+    assert.equal(out.generator, 'reference:silhouette');
+    assert.equal(out.referenceName, 'logo.png', 'the picture it came from was not recorded');
+    assert.equal(out.referenceEmbedded, true, 'the picture is not in the file, so it cannot be rebuilt');
+    assert.ok(Math.abs(out.depthBefore - 0.4) < 0.01, `started at ${out.depthBefore} deep`);
+    assert.ok(Math.abs(out.depthAfter - 1.2) < 0.01, `the revision did not change the depth (${out.depthAfter})`);
+    assert.equal(out.recordedDepth, 1.2, 'the new setting was not recorded for next time');
+    assert.equal(out.placementKept, true, 'the revision moved the logo you had placed');
+    assert.equal(out.materialKept, true, 'the revision replaced the material you gave it');
+    assert.equal(out.conflicts, 0, 'a rebuild with no edits to lose should not conflict');
+    assert.equal(out.oneStep, 1);
+  });
+
+  test('the viewport retints when different faces move, not just when more do', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const obj = ed.scene.add('mesh', 'Bar', window.kline.buildPrimitive('grid'));
+      ed.selectObject(obj.id);
+      ed.renderNow();
+      const before = JSON.parse(JSON.stringify(ed.scene.toJSON()));
+
+      // Move exactly one face's worth of vertices, always from the pristine
+      // grid so the two passes are the same edit in two places.
+      const pristine = ed.scene.get(obj.id).mesh.toJSON();
+      const nudge = (from) => {
+        const scene = ed.scene.get(obj.id);
+        scene.mesh = window.kline.meshFromJSON(pristine);
+        const mesh = scene.mesh;
+        for (const v of mesh.faces[from]) mesh.positions[v].z += 0.6;
+        mesh.markDirty();
+        ed.markGeometryDirty(scene);
+      };
+
+      // Two interior faces of the grid, so each nudge moves the same nine
+      // faces — the case where a cache keyed on counts alone cannot tell the
+      // two comparisons apart.
+      nudge(22);
+      ed.compareAgainst(before, 'before');
+      ed.renderNow();
+      const first = ed.renderer.diffDigest();
+      const firstMoved = ed.comparison.diff.objects.find((o) => o.id === obj.id).mesh.moved;
+
+      nudge(77);
+      ed.refreshComparison();
+      ed.renderNow();
+      const second = ed.renderer.diffDigest();
+      const secondMoved = ed.comparison.diff.objects.find((o) => o.id === obj.id).mesh.moved;
+      return { first, second, firstMoved, secondMoved };
+    });
+
+    assert.ok(out.firstMoved > 0, 'nothing registered as moved at all');
+    assert.equal(out.firstMoved, out.secondMoved,
+      'the test needs the same number of faces moved in both passes');
+    assert.notEqual(out.first, out.second,
+      'the renderer kept its cached tints when a different set of faces moved');
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

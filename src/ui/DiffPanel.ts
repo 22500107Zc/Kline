@@ -85,11 +85,26 @@ export class DiffPanel {
       h('span', { class: 'dim', text: ` — ${summarise(diff)}` }),
     );
 
-    const rows = diff.objects
+    const rows: HTMLElement[] = diff.objects
       .filter((o) => o.status !== 'unchanged')
       .map((o) => this.row(o));
+
+    // Said whether or not anything else is listed. "Every object is identical"
+    // over an unread texture or an unevaluated modifier stack is a claim the
+    // comparison has not earned, and it is exactly the kind of claim someone
+    // acts on.
+    for (const note of diff.notExamined) {
+      rows.push(h('p', { class: 'diff-caveat', text: `Not compared: ${note}.` }));
+    }
+    if (diff.materialsChanged && !diff.objects.some((o) => o.materialValuesChanged)) {
+      rows.push(h('p', { class: 'diff-caveat', text: 'The material list changed; no object uses the materials that differ.' }));
+    }
     if (rows.length === 0) {
-      this.body.replaceChildren(h('p', { class: 'dim', text: 'Every object is identical.' }));
+      this.body.replaceChildren(h('p', {
+        class: 'dim',
+        text: 'Identical in everything compared: geometry, transforms, materials, modifiers, '
+          + 'visibility, animation, UVs, vertex colours, weights and seams.',
+      }));
       return;
     }
     this.body.replaceChildren(...rows);
@@ -99,10 +114,17 @@ export class DiffPanel {
     const notes: string[] = [];
     if (entry.previousName) notes.push(`renamed from ${entry.previousName}`);
     if (entry.transformChanged) notes.push('moved');
-    if (entry.materialChanged) notes.push('material');
+    if (entry.materialChanged) notes.push('material slot');
+    if (entry.materialValuesChanged) notes.push('material changed');
     if (entry.modifiersChanged) notes.push('modifiers');
     if (entry.visibilityChanged) notes.push('visibility');
     if (entry.animationChanged) notes.push('animation');
+    if (entry.hierarchyChanged) notes.push('re-parented');
+    if (entry.mesh?.attributes.uv) notes.push('UVs');
+    if (entry.mesh?.attributes.colors) notes.push('vertex colours');
+    if (entry.mesh?.attributes.skin) notes.push('weights');
+    if (entry.mesh?.attributes.seams) notes.push('seams');
+    if (entry.mesh?.attributes.smoothing) notes.push('smoothing');
 
     const mesh = entry.mesh;
     const counts: HTMLElement[] = [];
@@ -124,6 +146,9 @@ export class DiffPanel {
       h('span', { class: 'diff-name', text: entry.name }),
       ...counts,
       notes.length ? h('span', { class: 'dim diff-notes', text: notes.join(', ') }) : null,
+      entry.uncertain
+        ? h('span', { class: 'diff-uncertain', text: '?', title: `Uncertain: ${entry.uncertainty ?? 'this pairing may be wrong'}` })
+        : null,
     ]);
   }
 

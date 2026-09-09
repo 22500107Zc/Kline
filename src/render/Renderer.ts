@@ -3,7 +3,7 @@ import { Mesh } from '../mesh/Mesh';
 import { Scene, SceneObject } from '../scene/Scene';
 import { ViewportCamera } from '../scene/ViewportCamera';
 import { posedSegments } from '../anim/armature';
-import { FACE_CHANGE_CODE, SceneDiff } from '../diff';
+import { FACE_CHANGE_CODE, SceneDiff, faceSignature } from '../diff';
 import { DynamicBuffer, IndexBuffer, Program, applyAttribs, setupAttribs } from './gl';
 import {
   LINE_LAYOUT, LINE_STRIDE, POINT_LAYOUT, SURFACE_LAYOUT,
@@ -229,8 +229,14 @@ export class Renderer {
    * throw away every surface buffer every frame.
    */
   private syncDiff(diff: SceneDiff | null): void {
+    // The signature has to depend on *which* faces changed, not how many.
+    // Counting alone meant that moving a different set of the same number of
+    // faces produced an identical signature, so the version never advanced,
+    // the per-face table was never rebuilt, and every surface buffer kept the
+    // tints from the previous comparison — the viewport quietly showing an
+    // answer to a question nobody had asked any more.
     const signature = diff
-      ? diff.objects.map((o) => `${o.id}:${o.mesh ? `${o.mesh.added},${o.mesh.moved},${o.mesh.removed}` : '-'}`).join('|')
+      ? diff.objects.map((o) => `${o.id}:${o.mesh ? faceSignature(o.mesh.faces) : '-'}`).join('|')
       : '';
     if (signature === this.diffSignature) return;
     this.diffSignature = signature;
@@ -292,6 +298,18 @@ export class Renderer {
         this.cache.delete(id);
       }
     }
+  }
+
+  /**
+   * What the geometry cache currently believes about the comparison.
+   *
+   * Two different comparisons must never produce the same value, because that
+   * is exactly when the cache would keep serving buffers tinted for the
+   * previous one. Exposed so a test can assert that rather than infer it from
+   * pixels, which would pass for the wrong reason as often as the right one.
+   */
+  diffDigest(): string {
+    return `${this.diffVersion}:${this.diffSignature}`;
   }
 
   invalidate(objectId: number): void {
@@ -1113,3 +1131,4 @@ function pushCameraGizmo(
   out.push({ a: corners[3], b: top, color });
   out.push({ a: corners[2], b: top, color });
 }
+

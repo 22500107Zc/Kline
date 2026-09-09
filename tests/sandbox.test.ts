@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_LIMITS, runProgramHere } from '../src/build/sandbox';
+import { programRevisionPrompt } from '../src/build/revise';
 
 const run = (code: string) => runProgramHere(code, DEFAULT_LIMITS);
 
@@ -129,4 +130,47 @@ test('the code prompt documents the same API the sandbox provides', async () => 
   const r = runProgramHere(example);
   assert.equal(r.parts.length, 31, 'thirty treads and a newel post');
   assert.ok(r.parts.every((p) => p.position[2] >= 0));
+});
+
+test('a revision runs generated code through the same sandbox, with nothing added', () => {
+  // Revising a program is still running a program somebody else wrote. The
+  // revision path must not become a second, laxer way in — so the API the
+  // harness exposes is asserted here rather than assumed, and a capability
+  // added for revisions would fail this.
+  const escapes = [
+    'fetch("http://example.com")',
+    'new XMLHttpRequest()',
+    'importScripts("x.js")',
+    'localStorage.setItem("a", "b")',
+    'indexedDB.open("x")',
+    'new Worker("x.js")',
+    'document.body',
+    'window.location',
+    'process.env',
+    'require("fs")',
+  ];
+  for (const attempt of escapes) {
+    assert.throws(
+      () => runProgramHere(`${attempt}; box(0, 0, 0.5, 1, 1, 1);`),
+      undefined,
+      `${attempt} was not blocked`,
+    );
+  }
+  // And the legitimate path still works, so this is a wall and not a ban.
+  const ok = runProgramHere('box(0, 0, 0.5, 1, 1, 1, "#ff0000");');
+  assert.equal(ok.parts.length, 1);
+});
+
+test('the revision prompt carries the program and asks for the smallest change', () => {
+  const prov = {
+    schema: 1, source: 'program' as const, assetId: 'a1', generator: 'program',
+    generatorVersion: 1, code: 'box(0, 0, 0.5, 2, 1, 0.1);', prompt: 'a table',
+    params: {}, baseline: {}, createdAt: 0, revision: 0,
+  };
+  const text = programRevisionPrompt(prov, 'make the tabletop wider');
+  assert.match(text, /box\(0, 0, 0\.5, 2, 1, 0\.1\);/, 'the existing program was not included');
+  assert.match(text, /make the tabletop wider/);
+  assert.match(text, /Change as little as possible/);
+  // Part names are the merge's only handle on which part is which.
+  assert.match(text, /part name/i);
 });

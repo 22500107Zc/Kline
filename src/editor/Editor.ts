@@ -32,6 +32,7 @@ import { RenderSettings, defaultRenderSettings } from '../render/pathtrace/types
 import { buildTraceScene, cameraFromObject, cameraFromViewport } from '../render/pathtrace/build';
 import { Preferences, defaultPreferences, loadPreferences, savePreferences } from './persistence';
 import { RecoveryStore } from './recovery';
+import { RevisionSession } from './revision';
 
 export type EditorMode = 'object' | 'edit' | 'sculpt';
 export type PivotMode = 'median' | 'cursor';
@@ -59,7 +60,7 @@ type Modal =
   | { type: 'box'; rect: Rect; extend: boolean; subtract: boolean }
   | { type: 'knife'; points: [number, number][]; preview: [number, number] | null };
 
-export type EditorEvent = 'change' | 'status' | 'modal' | 'render' | 'frame' | 'diff';
+export type EditorEvent = 'change' | 'status' | 'modal' | 'render' | 'frame' | 'diff' | 'revision';
 
 /**
  * The application controller: owns the scene, the viewport camera, input
@@ -79,6 +80,26 @@ export class Editor {
    * application is in, not a window that happens to be open.
    */
   comparison: { label: string; against: SerializedScene; diff: SceneDiff } | null = null;
+  /**
+   * The staged revision, when one is being previewed.
+   *
+   * On the editor rather than in the panel that started it, because a preview
+   * is a state the whole application is in: the viewport is showing something
+   * that is not committed, and saving, closing or starting another revision
+   * all have to know that.
+   */
+  readonly revision = new RevisionSession({
+    scene: this.scene,
+    snapshot: (label) => this.snapshot(label),
+    restore: (snap) => this.restore(snap),
+    pushHistory: (snap) => this.history.push(snap),
+    setStatus: (msg) => this.setStatus(msg),
+    refresh: () => {
+      for (const id of this.scene.objects.keys()) this.renderer.invalidate(id);
+      this.emit('revision');
+      this.changed();
+    },
+  });
   readonly recovery = new RecoveryStore();
 
   mode: EditorMode = 'object';
@@ -535,7 +556,7 @@ export class Editor {
     this.history.push(this.snapshot(label));
   }
 
-  private restore(s: EditorSnapshot): void {
+  restore(s: EditorSnapshot): void {
     this.scene.adopt(Scene.fromJSON(s.scene));
     this.mode = s.mode;
     this.editObjectId = s.editObject;
@@ -558,6 +579,9 @@ export class Editor {
    * one of the things people most want to undo.
    */
   newScene(): void {
+    // A pending preview belongs to a scene that is about to stop existing;
+    // keeping it would leave Accept holding a snapshot of somewhere else.
+    this.revision.discard();
     for (const id of this.scene.objects.keys()) this.renderer.invalidate(id);
     this.scene.adopt(new Scene());
     this.mode = 'object';
@@ -568,6 +592,7 @@ export class Editor {
 
   /** Replace the whole scene from a parsed .kline document. */
   loadSceneJSON(data: SerializedScene): void {
+    this.revision.discard();
     const restored = Scene.fromJSON(data);
     this.history.clear();
     for (const id of this.scene.objects.keys()) this.renderer.invalidate(id);
@@ -1592,6 +1617,14 @@ export class Editor {
    * may be tens of megabytes. The store serializes overlapping saves itself.
    */
   autosaveNow(announce = true): Promise<boolean> {
+    // Not while a revision is being previewed. The scene on screen is a
+    // proposal nobody has agreed to, and a crash-recovery copy of it would
+    // come back with no way left to reject it — the one state the whole
+    // staging arrangement exists to keep escapable.
+    if (this.revision.active) {
+      if (announce) this.setStatus('Autosave held while a revision is waiting — accept or reject it first');
+      return Promise.resolve(false);
+    }
     const scene = this.scene.toJSON();
     return this.recovery.save(scene, 'Autosave').then((res) => {
       if (res.ok) {

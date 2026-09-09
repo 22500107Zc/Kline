@@ -1,5 +1,7 @@
 import { App } from './ui/App';
 import { COMMANDS, runCommand } from './editor/commands';
+import { buildPrimitive } from './mesh/primitives';
+import { Mesh } from './mesh/Mesh';
 import './style.css';
 
 // Registering the worker is what lets browsers install Kline as a desktop app,
@@ -27,6 +29,8 @@ try {
     editor: app.editor,
     commands: COMMANDS,
     run: (id: string) => runCommand(app.editor, id),
+    buildPrimitive,
+    meshFromJSON: (data: Parameters<typeof Mesh.fromJSON>[0]) => Mesh.fromJSON(data),
   };
   const global = window as unknown as { kline: unknown; kiln: unknown };
   global.kline = handle;

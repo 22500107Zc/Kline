@@ -5,7 +5,10 @@ import { Scene } from '../src/scene/Scene';
 import { createCube, createPlane, createUVSphere } from '../src/mesh/primitives';
 import { catmullClark, extrudeFaces, subdivideFaces } from '../src/mesh/ops';
 import { createModifier } from '../src/modifiers';
-import { diffMesh, diffScene, summarise } from '../src/diff';
+import { FaceChange, MeshDiff, diffMesh, diffScene, faceSignature, summarise } from '../src/diff';
+import { Mesh } from '../src/mesh/Mesh';
+import { buildPrimitive } from '../src/mesh/primitives';
+import { normaliseProvenance } from '../src/build/provenance';
 
 /** A scene holding one mesh, which is what most of these compare. */
 function sceneWith(mesh: ReturnType<typeof createCube>, name = 'Cube'): Scene {
@@ -239,4 +242,156 @@ test('comparing an empty scene with a full one does not throw', () => {
   assert.equal(forward.added, 1);
   assert.equal(back.removed, 1);
   assert.ok(!forward.identical);
+});
+
+// ------------------------------------------- what the comparison did not read
+
+test('the same number of different faces moving is a different signature', () => {
+  // The renderer holds its vertex buffers until something it keys on changes.
+  // Keying on counts alone meant that moving a different set of the same
+  // number of faces looked identical to it, so the viewport went on showing
+  // the tints from the previous comparison.
+  const a: FaceChange[] = ['unchanged', 'moved', 'unchanged', 'unchanged'];
+  const b: FaceChange[] = ['unchanged', 'unchanged', 'moved', 'unchanged'];
+  assert.equal(a.filter((f) => f === 'moved').length, b.filter((f) => f === 'moved').length);
+  assert.notEqual(faceSignature(a), faceSignature(b), 'the cache would not have noticed');
+  assert.equal(faceSignature(a), faceSignature([...a]), 'the same picture must be the same key');
+  assert.notEqual(faceSignature(a), faceSignature([...a, 'unchanged']));
+});
+
+test('a changed material value is reported even though no object was touched', () => {
+  const scene = new Scene();
+  scene.ensureDefaultMaterial();
+  const cube = scene.add('mesh', 'Cube', buildPrimitive('cube'));
+  cube.materialSlots = [0];
+  const before = JSON.parse(JSON.stringify(scene.toJSON()));
+
+  scene.materials[0].color = [1, 0, 0];
+  const diff = diffScene(before, scene.toJSON());
+
+  assert.equal(diff.identical, false, 'turning a material red reported no differences');
+  const row = diff.objects.find((o) => o.id === cube.id)!;
+  assert.equal(row.materialValuesChanged, true);
+  assert.equal(row.materialChanged, false, 'the object still points at the same slot');
+  assert.equal(row.status, 'changed');
+});
+
+test('an unwrap with no vertex moved is a change, not "identical"', () => {
+  const scene = new Scene();
+  const cube = scene.add('mesh', 'Cube', buildPrimitive('cube'));
+  const before = JSON.parse(JSON.stringify(scene.toJSON()));
+
+  cube.mesh!.faceUV = cube.mesh!.faces.map(() => [0, 0, 1, 0, 1, 1, 0, 1]);
+  cube.mesh!.markDirty();
+  const diff = diffScene(before, scene.toJSON());
+
+  assert.equal(diff.identical, false, 'a UV change was reported as no change at all');
+  const row = diff.objects.find((o) => o.id === cube.id)!;
+  assert.equal(row.attributesChanged, true);
+  assert.equal(row.mesh!.attributes.uv, true);
+  assert.equal(row.mesh!.moved, 0, 'no vertex actually moved');
+  assert.match(summarise(diff), /UVs/);
+});
+
+test('vertex colours, weights, seams and smoothing are each examined', () => {
+  const base = () => {
+    const scene = new Scene();
+    scene.add('mesh', 'Cube', buildPrimitive('cube'));
+    return scene;
+  };
+  const check = (name: string, mutate: (m: Mesh) => void, field: keyof MeshDiff['attributes']) => {
+    const scene = base();
+    const cube = [...scene.objects.values()][0];
+    const before = JSON.parse(JSON.stringify(scene.toJSON()));
+    mutate(cube.mesh!);
+    cube.mesh!.markDirty();
+    const diff = diffScene(before, scene.toJSON());
+    assert.equal(diff.identical, false, `${name} was not examined`);
+    assert.equal(diff.objects.find((o) => o.id === cube.id)!.mesh!.attributes[field], true, name);
+  };
+  check('vertex colours', (m) => { m.colors = new Array(m.vertCount * 3).fill(0.5); }, 'colors');
+  check('skin weights', (m) => {
+    m.skin = { bones: new Array(m.vertCount * 4).fill(0), weights: new Array(m.vertCount * 4).fill(0.25) };
+  }, 'skin');
+  check('seams', (m) => { m.seams = new Set(['0-1']); }, 'seams');
+  check('smoothing', (m) => { m.setAllSmooth(true); }, 'smoothing');
+});
+
+test('a modifier stack makes the answer uncertain, and says so', () => {
+  const scene = new Scene();
+  const cube = scene.add('mesh', 'Cube', buildPrimitive('cube'));
+  const before = JSON.parse(JSON.stringify(scene.toJSON()));
+  cube.modifiers = [createModifier('subdivision')];
+  const diff = diffScene(before, scene.toJSON());
+
+  const row = diff.objects.find((o) => o.id === cube.id)!;
+  assert.equal(row.modifiersChanged, true);
+  assert.equal(row.uncertain, true);
+  assert.match(row.uncertainty ?? '', /modifiers/);
+  // And the scene-level answer admits what it did not compare.
+  assert.ok(diff.notExamined.some((n) => /modifier/.test(n)));
+  assert.equal(diff.identical, false);
+});
+
+test('"identical" is never claimed over something that was not read', () => {
+  const scene = new Scene();
+  scene.add('mesh', 'Cube', buildPrimitive('cube'));
+  const before = JSON.parse(JSON.stringify(scene.toJSON()));
+  // The pixels of an embedded texture are not compared; a different texture
+  // list must not therefore come back as "no differences".
+  const after = JSON.parse(JSON.stringify(scene.toJSON()));
+  after.textures = [{ id: 1, name: 'Photo', url: 'data:image/png;base64,AAAA', width: 2, height: 2 }];
+  const diff = diffScene(before, after);
+  assert.equal(diff.identical, false);
+  assert.ok(diff.notExamined.length > 0);
+  assert.match(summarise(diff), /not compared|differ/);
+
+  // And a genuinely identical pair still says so.
+  const same = diffScene(before, JSON.parse(JSON.stringify(before)));
+  assert.equal(same.identical, true);
+  assert.deepEqual(same.notExamined, []);
+  assert.equal(summarise(same), 'No differences');
+});
+
+test('a regenerated part is paired by its identity, not lost and re-added', () => {
+  // A revision replaces objects, so ids do not survive it. Without a second
+  // way to pair them, every part of a revised asset would read as one deletion
+  // plus one unrelated addition.
+  const scene = new Scene();
+  const root = scene.add('empty', 'Asset');
+  root.provenance = normaliseProvenance({
+    source: 'recipe', assetId: 'asset-1', generator: 'recipe:Test', params: {}, baseline: {},
+  });
+  const part = scene.add('mesh', 'Step 1', buildPrimitive('cube'));
+  part.partKey = 'step#1';
+  scene.setParent(part.id, root.id);
+  const before = JSON.parse(JSON.stringify(scene.toJSON()));
+
+  // Rebuilt: same asset, same part key, a brand new object id.
+  scene.remove(part.id);
+  const rebuilt = scene.add('mesh', 'Step 1', buildPrimitive('cube'));
+  rebuilt.partKey = 'step#1';
+  rebuilt.position = new Vec3(0, 0, 1);
+  scene.setParent(rebuilt.id, root.id);
+
+  const diff = diffScene(before, scene.toJSON());
+  const row = diff.objects.find((o) => o.id === rebuilt.id)!;
+  assert.equal(row.status, 'changed', 'the regenerated part read as a brand new object');
+  assert.equal(row.transformChanged, true);
+  assert.equal(row.uncertain, true, 'a match that is not by id must say so');
+  assert.match(row.uncertainty ?? '', /part identity/);
+  assert.equal(diff.removed, 0, 'the old part was reported as deleted');
+  assert.equal(diff.added, 0);
+});
+
+test('faces matched by index and by position are counted apart', () => {
+  const scene = new Scene();
+  const cube = scene.add('mesh', 'Cube', buildPrimitive('cube'));
+  const before = JSON.parse(JSON.stringify(scene.toJSON()));
+  cube.mesh!.positions[0].x += 0.5;
+  cube.mesh!.markDirty();
+  const diff = diffScene(before, scene.toJSON());
+  const mesh = diff.objects.find((o) => o.id === cube.id)!.mesh!;
+  assert.equal(mesh.matchedByIndex, 6, 'a cube has six faces and numbering did not change');
+  assert.equal(mesh.matchedByPosition, 0);
 });

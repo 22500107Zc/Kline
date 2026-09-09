@@ -15,6 +15,7 @@ import { RenderWindow } from './RenderWindow';
 import { UVEditor } from './UVEditor';
 import { GraphEditor } from './GraphEditor';
 import { DiffPanel } from './DiffPanel';
+import { RevisionPanel } from './RevisionPanel';
 import { SetupGuide } from './SetupGuide';
 import { SculptPanel } from './SculptPanel';
 import { formatAge } from '../editor/recovery';
@@ -46,11 +47,17 @@ export class App {
    */
   properties!: Properties;
   private palette!: CommandPalette;
-  private buildBar!: BuildBar;
+  /**
+   * Public because the build prompt is a user-facing action surface: the
+   * command palette, the guide and the end-to-end tests all drive it the same
+   * way a person does.
+   */
+  buildBar!: BuildBar;
   private renderWindow!: RenderWindow;
   private uvEditor!: UVEditor;
   private graphEditor!: GraphEditor;
   private diffPanel!: DiffPanel;
+  private revisionPanel!: RevisionPanel;
   private setupGuide!: SetupGuide;
   private recoveryBar = h('div', { class: 'recovery-bar hidden' });
 
@@ -71,6 +78,7 @@ export class App {
     this.uvEditor = new UVEditor(this.editor);
     this.graphEditor = new GraphEditor(this.editor);
     this.diffPanel = new DiffPanel(this.editor);
+    this.revisionPanel = new RevisionPanel(this.editor);
     this.setupGuide = new SetupGuide(this.editor);
     // Registered rather than key-handled here, so every window reaches the
     // View menu, the command palette and the shortcut list through one
@@ -88,6 +96,7 @@ export class App {
     const viewport = h('main', { class: 'viewport' }, [
       this.canvas, this.buildBar.root, this.boxSelect, this.knifeLine, this.viewportHint,
       sculptPanel.root, this.uvEditor.root, this.graphEditor.root, this.diffPanel.root,
+      this.revisionPanel.root,
       this.setupGuide.root, this.dropVeil, this.shortcuts,
       this.renderWindow.root, this.palette.root,
     ]);

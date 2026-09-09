@@ -1,4 +1,4 @@
-import { BuildPart, BuildPlan, BuildShape, COLOR_NAMES, resolveColor } from './plan';
+import { BuildOrigin, BuildPart, BuildPlan, BuildShape, COLOR_NAMES, resolveColor } from './plan';
 import { RECIPE_KEYS, RecipeOptions, runRecipe } from './recipes';
 
 /**
@@ -42,6 +42,15 @@ const ARRANGEMENTS: { words: string[]; kind: Arrangement }[] = [
 
 export interface InterpretResult {
   plan: BuildPlan | null;
+  /**
+   * How it was built, for the record kept on the asset.
+   *
+   * A recipe's settings are the interesting case: they are numbers with
+   * names — how many steps, how big, what colour — so a later "make it
+   * thirty steps" is a change to one of them and a re-run, rather than a
+   * model being asked to invent a staircase from scratch a second time.
+   */
+  origin: BuildOrigin;
   /** Why nothing matched, when plan is null. */
   reason?: string;
 }
@@ -154,7 +163,8 @@ function arrange(
 /** Turn a prompt into a plan, or explain why it could not. */
 export function interpret(prompt: string): InterpretResult {
   const text = ` ${prompt.toLowerCase().replace(/[^\w#\s-]/g, ' ').replace(/\s+/g, ' ')} `;
-  if (!text.trim()) return { plan: null, reason: 'Nothing to build — type what you want.' };
+  const nothing: BuildOrigin = { source: 'recipe', generator: 'interpreter', prompt };
+  if (!text.trim()) return { plan: null, origin: nothing, reason: 'Nothing to build — type what you want.' };
 
   const color = findColor(text);
   const count = findCount(text);
@@ -178,6 +188,20 @@ export function interpret(prompt: string): InterpretResult {
         parts,
         source: 'built-in recipe',
       },
+      origin: {
+        source: 'recipe',
+        generator: `recipe:${recipe.label}`,
+        prompt,
+        params: {
+          recipe: recipe.key,
+          count: count ?? null,
+          scale,
+          stretch,
+          color: color ?? null,
+          repeats,
+          words: text,
+        },
+      },
     };
   }
 
@@ -188,17 +212,28 @@ export function interpret(prompt: string): InterpretResult {
   const shape = findShape(shapeText) ?? findShape(text);
   if (shape) {
     const n = Math.max(1, Math.min(200, count ?? 1));
+    const kind = arrangement?.kind ?? 'row';
     return {
       plan: {
         name: n > 1 ? `${n} ${shape.word}` : shape.word,
-        parts: arrange(shape.shape, n, arrangement?.kind ?? 'row', scale, stretch, color),
+        parts: arrange(shape.shape, n, kind, scale, stretch, color),
         source: 'built-in shapes',
+      },
+      origin: {
+        source: 'recipe',
+        generator: 'shapes',
+        prompt,
+        params: {
+          shape: shape.shape, word: shape.word, count: n, arrangement: kind,
+          scale, stretch, color: color ?? null,
+        },
       },
     };
   }
 
   return {
     plan: null,
+    origin: nothing,
     reason: 'No built-in recipe matched. Connect a local model, or try a shape ("12 cubes in a circle") or one of the known objects.',
   };
 }

@@ -43,7 +43,7 @@ fallback. One bundle ships to both targets.
 | Path tracer | `src/render/pathtrace` | Pure typed arrays; runs on a worker or the main thread |
 | Modifiers | `src/modifiers` | Each one is a pure `Mesh -> Mesh` function |
 | Scene graph | `src/scene` | Objects, materials, lights, orbit camera |
-| Build prompt | `src/build` | Planner, sandbox and recipes; unit tested |
+| Build prompt | `src/build` | Planner, sandbox, recipes, provenance and merge; unit tested |
 | Reference pipeline | `src/imaging` | Pure, DOM-free except `load.ts`; unit tested |
 | Local model bridge | `src/ai`, `tools/` | Two HTTP endpoints, documented in the server |
 | Renderer | `src/render` | WebGL2 only; GLSL lives in `shaders.ts` |
@@ -81,6 +81,19 @@ caller needs to rebuild its selection.
 to the geometry API, add it to `HARNESS_SOURCE` and to `API_REFERENCE` together
 — a test asserts the documented calls all exist — and never hand the program a
 capability that can reach the network, the DOM or the filesystem.
+
+**A generated object records how it was generated.** Anything that puts
+geometry in the scene from a prompt, a recipe, a program or a picture calls
+`recordProvenance` with the settings it used and `captureBaseline` with the
+geometry it produced, *before* anyone has touched it. Without the baseline a
+later revision cannot tell your edits from the generator's, and the merge
+correctly refuses to guess — which shows up as every part conflicting.
+
+**A revision is staged, never applied.** `editor.revision.preview(...)` merges,
+writes the result into the scene so it can be seen, and holds the previous state
+whole. Accept pushes that held snapshot as one undo entry; reject restores it and
+leaves the history untouched. Nothing else may write to an asset while a preview
+is pending.
 
 **A new build recipe is a function and a keyword.** Add it to `RECIPES` in
 `src/build/recipes.ts`; the tests then check automatically that it is reachable
