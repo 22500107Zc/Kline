@@ -2499,6 +2499,56 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     assert.equal(out.oneStep, 1);
   });
 
+  test('the review panel appears with a revision and leaves with it', async () => {
+    // Logic tests all pass while a panel sits on screen over a decision that
+    // has already been made, because none of them look at the screen.
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const bar = window.kline.app.buildBar;
+      const panel = () => document.querySelector('.revision-panel');
+      const shown = () => {
+        const el = panel();
+        if (!el) return false;
+        const box = el.getBoundingClientRect();
+        return getComputedStyle(el).display !== 'none' && box.width > 0 && box.height > 0;
+      };
+
+      bar.focus('a staircase with 8 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      const beforeAny = shown();
+
+      ed.selectObject(root.id);
+      bar.focus('make it 14 steps');
+      await bar.revise();
+      const duringPreview = shown();
+      const hasAccept = [...document.querySelectorAll('.revision-actions button')]
+        .some((b) => /Accept/.test(b.textContent));
+      ed.revision.accept();
+      const afterAccept = shown();
+      const staleText = (document.querySelector('.revision-headline')?.textContent ?? '').trim();
+
+      // And again, then rejected.
+      bar.focus('make it 20 steps');
+      await bar.revise();
+      const duringSecond = shown();
+      ed.revision.reject();
+      const afterReject = shown();
+      return {
+        beforeAny, duringPreview, hasAccept, afterAccept, staleText, duringSecond, afterReject,
+      };
+    });
+
+    assert.equal(out.beforeAny, false, 'the review panel is on screen with no revision pending');
+    assert.equal(out.duringPreview, true, 'the review panel did not appear for a staged revision');
+    assert.equal(out.hasAccept, true, 'the panel has no Accept button');
+    assert.equal(out.afterAccept, false, 'the review panel stayed on screen after Accept');
+    assert.equal(out.staleText, '', 'the panel kept the last revision\'s summary');
+    assert.equal(out.duringSecond, true, 'the panel did not come back for a second revision');
+    assert.equal(out.afterReject, false, 'the review panel stayed on screen after Reject');
+  });
+
   test('the viewport retints when different faces move, not just when more do', async () => {
     await resetScene(page);
     const out = await page.evaluate(async () => {

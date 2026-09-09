@@ -2363,6 +2363,14 @@ button:disabled {
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
 }
 
+/* Every overlay here declares its own hidden state: there is no global rule,
+   and a panel that sets `display: flex` later in the file would otherwise
+   win against one. Without this the review panel stayed on screen after
+   Accept — buttons and all, over a decision already made. */
+.revision-panel.hidden {
+  display: none;
+}
+
 .revision-headline {
   padding: 8px 12px;
   border-bottom: 1px solid var(--edge);

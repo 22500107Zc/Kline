@@ -44,6 +44,9 @@ export class RevisionPanel {
     if (!summary) {
       this.root.classList.add('hidden');
       this.body.replaceChildren();
+      // The headline as well: it names a revision that is over, and leaving it
+      // behind would greet the next one with the last one's summary.
+      this.headline.replaceChildren();
       return;
     }
     this.root.classList.remove('hidden');
