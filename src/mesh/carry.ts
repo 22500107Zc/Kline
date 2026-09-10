@@ -33,6 +33,8 @@ export interface CarryReport {
   total: number;
   /** The furthest any sample had to reach, in world units. */
   worst: number;
+  /** The size the reach is measured against. */
+  span: number;
 }
 
 /**
@@ -51,7 +53,7 @@ const FAR_FRACTION = 0.05;
  * treated with suspicion.
  */
 export function carryAttributes(from: Mesh, to: Mesh): CarryReport {
-  const report: CarryReport = { carried: [], uncertain: 0, total: to.vertCount, worst: 0 };
+  const report: CarryReport = { carried: [], uncertain: 0, total: to.vertCount, worst: 0, span: 1 };
   const wantsSkin = !!from.skin && from.skin.bones.length >= from.vertCount * 4;
   const wantsColors = !!from.colors && from.colors.length >= from.vertCount * 3;
   const wantsMask = !!from.mask && from.mask.length >= from.vertCount;
@@ -64,9 +66,16 @@ export function carryAttributes(from: Mesh, to: Mesh): CarryReport {
   const sampler = new SurfaceSampler(from);
   if (sampler.empty) return report;
 
-  const box = from.bounds();
-  const span = box.valid ? Math.max(box.size().x, box.size().y, box.size().z, 1e-6) : 1;
+  // Measured against the larger of the two shapes. A part that doubles in size
+  // puts every new vertex a long way from the old surface, and calling all of
+  // them suspect on that basis says nothing useful about the transfer.
+  const fromBox = from.bounds();
+  const toBox = to.bounds();
+  const spanOf = (b: ReturnType<Mesh['bounds']>): number =>
+    (b.valid ? Math.max(b.size().x, b.size().y, b.size().z, 1e-6) : 1);
+  const span = Math.max(spanOf(fromBox), spanOf(toBox));
   const far = span * FAR_FRACTION;
+  report.span = span;
 
   const bones = wantsSkin ? new Int32Array(to.vertCount * 4) : null;
   const weights = wantsSkin ? new Float32Array(to.vertCount * 4) : null;
@@ -149,11 +158,20 @@ function carryUV(from: Mesh, to: Mesh): string[] {
 /** One line describing what a carry achieved, and how much to trust it. */
 export function describeCarry(report: CarryReport): string {
   if (!report.carried.length) return 'There was nothing stored against the old vertices to carry.';
-  const doubt = report.uncertain > 0
-    ? ` ${report.uncertain} of ${report.total} vertices had no close match on the old shape, so `
-      + 'check those areas.'
-    : ' Every vertex found a close match on the old shape.';
-  return `Carried your ${report.carried.join(', ')} onto the new shape by nearest surface point.${doubt}`;
+  const what = `Carried your ${report.carried.join(', ')} onto the new shape by nearest surface point.`;
+  if (report.uncertain === 0) return `${what} Every vertex found a close match on the old shape.`;
+  // All of them being far apart is one situation — the shape moved or resized
+  // as a whole, and the mapping is a broad one — and a handful being far apart
+  // is a different one, where particular areas are worth looking at. Reporting
+  // both the same way makes the first sound like a failure and buries the
+  // second.
+  const percent = Math.round((report.worst / Math.max(report.span, 1e-6)) * 100);
+  if (report.uncertain === report.total) {
+    return `${what} The shape moved or resized as a whole (by up to ${percent}% of its size), `
+      + 'so this is a broad match rather than a close one — worth a look over.';
+  }
+  return `${what} ${report.uncertain} of ${report.total} vertices had no close match, `
+    + 'so check those areas.';
 }
 
 export { Vec3 };
