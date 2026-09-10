@@ -1,5 +1,5 @@
 import { Mesh } from '../mesh/Mesh';
-import { Vec3, decomposeMatrix } from '../core/math';
+import { Mat4, Vec3, decomposeMatrix } from '../core/math';
 import { Scene, SceneObject, SerializedObject, SerializedScene } from '../scene/Scene';
 import { createMaterial, hexToLinear } from '../scene/Material';
 import {
@@ -9,7 +9,7 @@ import {
   BASELINE_VERSION, Baseline, BaselinePart, Provenance, cloneProvenance, hasBaseline,
   regenerability,
 } from '../build/provenance';
-import { EditorSnapshot } from './history';
+import { EditorSnapshot, SnapshotStore } from './history';
 import { carryAttributes, describeCarry } from '../mesh/carry';
 
 /**
@@ -56,6 +56,15 @@ interface PendingRevision {
 /** Everything the session needs from the editor, kept narrow for testability. */
 export interface RevisionHost {
   scene: Scene;
+  /**
+   * The history's blob cache, so a document built during a review shares its
+   * meshes with the snapshots either side of it instead of copying them. A
+   * review is exactly when the meshes are biggest and most duplicated.
+   *
+   * A function rather than a value because the host hands this object over
+   * from a field initialiser, before its own history exists.
+   */
+  snapshotStore?(): SnapshotStore | undefined;
   snapshot(label: string): EditorSnapshot;
   restore(snapshot: EditorSnapshot): void;
   pushHistory(snapshot: EditorSnapshot): void;
@@ -303,6 +312,106 @@ export class RevisionSession {
   }
 
   /**
+   * The objects on screen that *are* the proposal.
+   *
+   * Not "everything under the asset": something you made during the review and
+   * hung on a proposed part is yours, and is governed by the history like the
+   * rest of your work. The proposal is the generated parts and the root that
+   * holds them.
+   */
+  private proposalIds(): Set<number> {
+    const pending = this.pending;
+    const out = new Set<number>();
+    if (!pending) return out;
+    const scene = this.host.scene;
+    const walk = (id: number): void => {
+      const obj = scene.get(id);
+      if (!obj || out.has(id)) return;
+      if (obj.partKey || id === pending.rootId) out.add(id);
+      for (const child of obj.children) walk(child);
+    };
+    walk(pending.rootId);
+    return out;
+  }
+
+  /**
+   * The document as it stands with nobody having agreed to anything.
+   *
+   * The scene on screen during a review is two things at once: your document,
+   * which you are still editing and which the history is about, and a proposal
+   * laid over one asset in it, which nobody has accepted and which Reject is
+   * entitled to erase without trace. Snapshotting the two together is what let
+   * a rejected shape come back: an unrelated edit made during a review pushed
+   * a whole-scene snapshot with the proposal inside it, Reject put the asset
+   * back but could not reach into the history, and one Ctrl+Z later the
+   * rejected geometry was on screen again with no way to tell it had been.
+   *
+   * So this is what the history records instead — everything of yours exactly
+   * as it stands, the asset as it stood before the preview. Rejecting is then
+   * genuinely traceless, and accepting adds exactly one step.
+   */
+  committedScene(): SerializedScene | null {
+    return this.pending ? this.sceneWithAssetReverted(this.pending, false) : null;
+  }
+
+  /**
+   * A restored document with the proposal put back on top.
+   *
+   * The other half of holding the proposal outside the history. Undo, redo and
+   * a cancelled modal transform all restore a document that, by the rule
+   * above, has the asset in its pre-preview form — so each of them would take
+   * the preview off the screen, and there would be nothing to accept or reject
+   * but a panel describing a change nobody could see any more.
+   *
+   * Stepping through your own history while a proposal is up is allowed, and
+   * this is what keeps the proposal up while you do. Anything you made during
+   * the review is *not* re-applied: it is document state, and if the step being
+   * restored is from before you made it, it should go.
+   */
+  withProposal(doc: SerializedScene): SerializedScene {
+    const pending = this.pending;
+    if (!pending) return doc;
+    const now = this.host.scene.toJSON(this.host.snapshotStore?.());
+    const live = this.proposalIds();
+
+    // Whatever the restored document says about the generated parts is
+    // discarded — the proposal is the authority on those, and holding both
+    // would mean two objects with one id.
+    const docAsset = assetIdsIn(doc, pending.rootId);
+    const base = doc.objects.filter((o) => !live.has(o.id)
+      && !(docAsset.has(o.id) && (o.partKey || o.id === pending.rootId)));
+    const proposal = now.objects.filter((o) => live.has(o.id));
+
+    // Lifting is measured against wherever the object actually is: a restored
+    // object against the document being restored, a proposed one against the
+    // screen.
+    const wasAt = worldMatrices(doc);
+    for (const [id, m] of worldMatrices(now)) if (live.has(id)) wasAt.set(id, m);
+
+    const { objects } = stitch([...proposal, ...base], wasAt);
+    const present = new Set(objects.map((o) => o.id));
+    const topLevel = objects.filter((o) => o.parent === null).map((o) => o.id);
+    const listed = new Set<number>();
+    const order = [...doc.order, ...now.order, ...topLevel].filter((id) => {
+      if (listed.has(id) || !present.has(id) || !topLevel.includes(id)) return false;
+      listed.add(id);
+      return true;
+    });
+
+    return {
+      ...doc,
+      // The proposal's parts may have been given materials that the restored
+      // document has never heard of, and their slots are indices into the
+      // list. Materials only ever grow, so the longer list is the safe one.
+      materials: now.materials.length >= doc.materials.length ? now.materials : doc.materials,
+      objects,
+      order,
+      selection: doc.selection.filter((id) => present.has(id)),
+      active: doc.active !== null && present.has(doc.active) ? doc.active : null,
+    };
+  }
+
+  /**
    * Put the scene back exactly as it was.
    *
    * Restoring the held snapshot rather than undoing the changes one by one:
@@ -332,22 +441,19 @@ export class RevisionSession {
    * it stands, this asset exactly as it stood — so both get it from here and
    * cannot drift apart.
    */
-  private sceneWithAssetReverted(pending: PendingRevision): SerializedScene {
-    const now = this.host.scene.toJSON();
+  private sceneWithAssetReverted(
+    pending: PendingRevision,
+    /**
+     * Whether anything that could not be done exactly is worth telling the
+     * person about. False when the result is only being *measured* — the
+     * history takes a committed document on every unrelated edit during a
+     * review, and a warning about a detachment that has not happened and may
+     * never happen does not belong on the panel each time.
+     */
+    record = true,
+  ): SerializedScene {
+    const now = this.host.scene.toJSON(this.host.snapshotStore?.());
     const was = pending.before.scene;
-
-    const assetIdsIn = (doc: SerializedScene, rootId: number): Set<number> => {
-      const byId = new Map<number, SerializedObject>();
-      for (const o of doc.objects) byId.set(o.id, o);
-      const out = new Set<number>();
-      const walk = (id: number): void => {
-        if (out.has(id)) return;
-        out.add(id);
-        for (const child of byId.get(id)?.children ?? []) walk(child);
-      };
-      walk(rootId);
-      return out;
-    };
 
     const subtreeNow = assetIdsIn(now, pending.rootId);
     const oldIds = assetIdsIn(was, pending.rootId);
@@ -363,29 +469,32 @@ export class RevisionSession {
       if (oldIds.has(o.id) || o.partKey || o.id === pending.rootId) liveIds.add(o.id);
     }
 
+    // Where everything is standing right now, read before anything is taken
+    // apart. What survives the reconstruction has to survive it in place, and
+    // after the proposal is gone there is nothing left to work that out from.
+    const wasAt = worldMatrices(now);
+
+    // The restored copies are the authority on the asset's own shape; anything
+    // of yours keeps the state it is in. An id in both belongs to the asset.
     const restored = was.objects.filter((o) => oldIds.has(o.id));
-    const kept = now.objects.filter((o) => !liveIds.has(o.id));
+    const kept = now.objects.filter((o) => !liveIds.has(o.id) && !oldIds.has(o.id));
 
-    // Anything you parented under the asset while reviewing belongs to you and
-    // has to survive the asset being put back. Its parent may be about to stop
-    // existing, so it is lifted to the top level rather than orphaned.
-    const survivingIds = new Set(oldIds);
-    for (const o of kept) survivingIds.add(o.id);
-    for (const o of kept) {
-      if (o.parent !== null && !survivingIds.has(o.parent)) o.parent = null;
-      o.children = o.children.filter((c) => survivingIds.has(c));
-    }
-    for (const o of restored) {
-      o.children = o.children.filter((c) => oldIds.has(c));
+    const { objects, warnings } = stitch([...kept, ...restored], wasAt);
+    if (record) {
+      for (const warning of warnings) {
+        if (!pending.summary.notes.includes(warning)) pending.summary.notes.push(warning);
+      }
     }
 
-    const objects = [...kept, ...restored];
     const present = new Set(objects.map((o) => o.id));
     const topLevel = objects.filter((o) => o.parent === null).map((o) => o.id);
-    const order = [
-      ...now.order.filter((id) => present.has(id) && topLevel.includes(id)),
-      ...topLevel.filter((id) => !now.order.includes(id)),
-    ];
+    const listed = new Set<number>();
+    const order = [...now.order, ...topLevel].filter((id) => {
+      if (listed.has(id) || !present.has(id)) return false;
+      if (!topLevel.includes(id)) return false;
+      listed.add(id);
+      return true;
+    });
 
     return {
       ...now,
@@ -588,11 +697,18 @@ export class RevisionSession {
           }
           mine.mesh = rebuilt;
         }
-        mine.name = source.name;
-        mine.position = new Vec3(...source.position);
-        mine.rotation = new Vec3(...source.rotation);
-        mine.scale = new Vec3(...source.scale);
-        mine.protectedFromRegen = false;
+        // The shape, and nothing else.
+        //
+        // This used to write the name and all three transforms across as well,
+        // which quietly undid two different things. A name or a placement the
+        // merge had already settled in your favour — because you changed it
+        // and the generator did not — was reset to the generator's, without
+        // ever being in dispute. And a *separate* conflict you had already
+        // answered "keep mine" was reopened and answered the other way, by a
+        // button that said nothing about it. Which of your decisions survived
+        // came down to the order you happened to press them in.
+        //
+        // Each field is its own question here, and answering one answers one.
         mine.invalidate();
       } else if (choice === 'both' && mine && mine.id === pending.rootId) {
         // A model built from a picture is one mesh, so the asset's root *is*
@@ -616,10 +732,11 @@ export class RevisionSession {
             if (copy?.partKey) scene.remove(child);
           }
         }
+        // The asset keeps the generated shape where you had put it: the
+        // argument was about geometry, and a placement conflict — if there is
+        // one — is its own row with its own answer. Your copy beside it keeps
+        // everything, including the shape you are holding on to.
         if (source.mesh) mine.mesh = Mesh.fromJSON(source.mesh);
-        mine.position = new Vec3(...source.position);
-        mine.rotation = new Vec3(...source.rotation);
-        mine.scale = new Vec3(...source.scale);
         mine.invalidate();
       } else if (choice === 'both') {
         const root = scene.get(pending.rootId);
@@ -753,6 +870,161 @@ export class RevisionSession {
       if (part.scale) obj.scale = new Vec3(...part.scale);
     }
   }
+}
+
+/** Every id under a root in a serialized document, the root included. */
+function assetIdsIn(doc: SerializedScene, rootId: number): Set<number> {
+  const byId = new Map<number, SerializedObject>();
+  for (const o of doc.objects) byId.set(o.id, o);
+  const out = new Set<number>();
+  const walk = (id: number): void => {
+    if (out.has(id)) return;
+    out.add(id);
+    for (const child of byId.get(id)?.children ?? []) walk(child);
+  };
+  walk(rootId);
+  return out;
+}
+
+/**
+ * World placement of every object in a serialized document.
+ *
+ * The scoped reconstruction below builds a document out of two others, so it
+ * cannot ask the live scene where anything is — half the objects in the result
+ * are not in it. This walks the parent chain in the document itself.
+ */
+function worldMatrices(doc: SerializedScene): Map<number, Mat4> {
+  const byId = new Map<number, SerializedObject>();
+  for (const o of doc.objects) byId.set(o.id, o);
+  const out = new Map<number, Mat4>();
+  const localOf = (o: SerializedObject): Mat4 =>
+    Mat4.compose(new Vec3(...o.position), new Vec3(...o.rotation), new Vec3(...o.scale));
+  const resolve = (id: number, guard: Set<number>): Mat4 => {
+    const hit = out.get(id);
+    if (hit) return hit;
+    const o = byId.get(id);
+    if (!o) return new Mat4();
+    // A cycle in a hand-edited or damaged document would otherwise recurse
+    // forever; treat the object as its own root and carry on.
+    if (guard.has(id)) return localOf(o);
+    guard.add(id);
+    const local = localOf(o);
+    const world = o.parent !== null && byId.has(o.parent)
+      ? resolve(o.parent, guard).multiply(local)
+      : local;
+    out.set(id, world);
+    return world;
+  };
+  for (const o of doc.objects) resolve(o.id, new Set());
+  return out;
+}
+
+/** How far a rebuilt transform may sit from the one it is replacing. */
+const PLACEMENT_TOLERANCE = 1e-4;
+
+/**
+ * Make a document that was assembled out of pieces into a coherent one.
+ *
+ * Three things can be wrong with such a document, and all three used to be:
+ *
+ *   - An object's parent is not in it. The old code set `parent = null` and
+ *     stopped there, which keeps the object's *local* transform and so moves
+ *     it: a detail modelled onto a part sitting two metres up dropped to the
+ *     floor, and on a rotated or scaled parent it also turned and resized.
+ *     Surviving the reconstruction is not the same as surviving it intact.
+ *   - Links are one-way. A restored parent's `children` list was filtered to
+ *     the objects restored beside it, so a survivor still naming that parent
+ *     was not named back — an object simultaneously in the hierarchy and not
+ *     in it, which the outliner and every world-space walk disagree about.
+ *   - An id appears twice, or an object is its own ancestor.
+ *
+ * `wasAt` gives the world placement each object should end up keeping. An
+ * object whose parent survives is left alone: following a parent is what
+ * parenting is for, and a bolt attached to a bracket should go back with the
+ * bracket rather than hang in the air where the bracket used to be. Only an
+ * object being *lifted* — its parent is gone — has a placement to preserve,
+ * and it is preserved against the world.
+ *
+ * Returns anything that could not be done exactly, for the caller to say out
+ * loud rather than leave for somebody to notice.
+ */
+function stitch(
+  objects: SerializedObject[],
+  wasAt: Map<number, Mat4>,
+): { objects: SerializedObject[]; warnings: string[] } {
+  const warnings: string[] = [];
+
+  // One entry per id, first occurrence winning. Two objects sharing an id is
+  // not a hierarchy problem that can be repaired — it is two different objects
+  // — but it must not reach the scene, where the second would shadow the first.
+  const byId = new Map<number, SerializedObject>();
+  for (const o of objects) if (!byId.has(o.id)) byId.set(o.id, o);
+  const kept = [...byId.values()];
+
+  // Lift anything whose parent did not come through, keeping where it is.
+  for (const o of kept) {
+    if (o.parent === null || byId.has(o.parent)) continue;
+    o.parent = null;
+    const world = wasAt.get(o.id);
+    if (!world) continue;
+    const { position, rotation, scale } = decomposeMatrix(world);
+    // Position, rotation and scale cannot express every affine transform: a
+    // rotated child of a non-uniformly scaled parent is sheared, and no
+    // combination of the three reproduces shear. Rather than write a
+    // silently-wrong placement, the difference is measured and reported.
+    const rebuilt = Mat4.compose(position, rotation, scale);
+    const size = Math.max(Math.abs(scale.x), Math.abs(scale.y), Math.abs(scale.z), 1);
+    let worst = 0;
+    for (let i = 0; i < 16; i++) worst = Math.max(worst, Math.abs(rebuilt.m[i] - world.m[i]));
+    o.position = [position.x, position.y, position.z];
+    o.rotation = [rotation.x, rotation.y, rotation.z];
+    o.scale = [scale.x, scale.y, scale.z];
+    if (worst > PLACEMENT_TOLERANCE * size) {
+      warnings.push(
+        `"${o.name}" was detached from a part that is no longer there. Its parent's scale and `
+        + 'rotation combined into a shear, which position/rotation/scale cannot hold, so it has '
+        + 'been placed as closely as they can — check it.',
+      );
+    }
+  }
+
+  // Both directions of every link agree, or the link is not there.
+  for (const o of kept) {
+    const seen = new Set<number>();
+    o.children = o.children.filter((c) => {
+      if (seen.has(c) || c === o.id) return false;
+      const child = byId.get(c);
+      if (!child || child.parent !== o.id) return false;
+      seen.add(c);
+      return true;
+    });
+  }
+  for (const o of kept) {
+    if (o.parent === null) continue;
+    const parent = byId.get(o.parent);
+    if (!parent) continue;
+    if (!parent.children.includes(o.id)) parent.children.push(o.id);
+  }
+
+  // A cycle survives every check above — each link is reciprocal and every
+  // parent is present — and hangs the first walk that trusts it.
+  for (const o of kept) {
+    const seen = new Set<number>([o.id]);
+    let at = o.parent;
+    while (at !== null) {
+      if (seen.has(at)) {
+        const parent = byId.get(o.parent!);
+        if (parent) parent.children = parent.children.filter((c) => c !== o.id);
+        o.parent = null;
+        warnings.push(`"${o.name}" was parented in a loop and has been lifted to the top level.`);
+        break;
+      }
+      seen.add(at);
+      at = byId.get(at)?.parent ?? null;
+    }
+  }
+
+  return { objects: kept, warnings };
 }
 
 /** Reuse a material of the same colour rather than adding a near-duplicate. */

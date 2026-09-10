@@ -2954,6 +2954,198 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     assert.equal(out.assetBack, 8, 'Reject did not put the asset back');
   });
 
+  test('a rejected revision cannot be brought back by undoing something else', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const k = window.kline, ed = k.editor;
+      const bar = k.app.buildBar;
+      bar.focus('a staircase with 12 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      const stepsBefore = ed.scene.get(root.id).children.length;
+
+      // Something of your own, standing well clear of the asset.
+      ed.selectObject(root.id);
+      k.run('add.cube');
+      const mine = ed.scene.get(ed.scene.active);
+      mine.position.x = 12;
+      const mineId = mine.id;
+
+      // Stage a revision, then — while it is on screen and undecided — do some
+      // ordinary work elsewhere, through the real commands.
+      ed.selectObject(root.id);
+      bar.focus('make it 20 steps');
+      await bar.revise();
+      if (!ed.revision.active) return { ok: false, why: 'no revision was staged' };
+      const previewed = ed.scene.get(root.id).children.length;
+
+      ed.selectObject(mineId);
+      k.run('object.duplicate');
+      const copyId = ed.scene.active;
+      k.run('add.uvsphere');
+      const sphereId = ed.scene.active;
+
+      ed.revision.reject();
+      const afterReject = ed.scene.get(root.id).children.length;
+
+      // The moment of truth: stepping back through your own work must not put
+      // the rejected proposal back on the screen.
+      const seen = [];
+      for (let i = 0; i < 4; i++) {
+        ed.undo();
+        const asset = [...ed.scene.objects.values()].find((o) => o.provenance);
+        seen.push(asset ? asset.children.length : -1);
+      }
+      const redone = [];
+      for (let i = 0; i < 4; i++) {
+        ed.redo();
+        const asset = [...ed.scene.objects.values()].find((o) => o.provenance);
+        redone.push(asset ? asset.children.length : -1);
+      }
+      return {
+        ok: true,
+        stepsBefore,
+        previewed,
+        afterReject,
+        seen,
+        redone,
+        survived: !!ed.scene.get(copyId) && !!ed.scene.get(sphereId),
+      };
+    });
+
+    assert.equal(out.ok, true, out.why);
+    assert.equal(out.previewed, 20, 'the preview did not apply');
+    assert.equal(out.afterReject, 12, 'rejecting did not put the asset back');
+    assert.deepEqual(
+      out.seen.filter((n) => n !== 12 && n !== -1), [],
+      `undoing unrelated work brought a rejected 20-step revision back: saw ${out.seen.join(', ')}`,
+    );
+    assert.deepEqual(
+      out.redone.filter((n) => n !== 12 && n !== -1), [],
+      `redoing unrelated work brought a rejected revision back: saw ${out.redone.join(', ')}`,
+    );
+  });
+
+  test('accepting after unrelated work is one step, and the work below it is still undoable', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const k = window.kline, ed = k.editor;
+      const bar = k.app.buildBar;
+      bar.focus('a staircase with 12 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+
+      ed.selectObject(root.id);
+      k.run('add.cube');
+      const mineId = ed.scene.active;
+      ed.scene.get(mineId).position.x = 12;
+
+      ed.selectObject(root.id);
+      bar.focus('make it 20 steps');
+      await bar.revise();
+      if (!ed.revision.active) return { ok: false, why: 'no revision was staged' };
+      const depthBefore = ed.history.depth;
+
+      // Unrelated work during the review, through a real command.
+      ed.selectObject(mineId);
+      k.run('object.duplicate');
+      const copyId = ed.scene.active;
+      const depthAfterEdit = ed.history.depth;
+
+      ed.revision.accept();
+      const cost = ed.history.depth - depthAfterEdit;
+      const accepted = ed.scene.get(root.id).children.length;
+
+      ed.undo();                                     // the revision
+      const afterFirst = [...ed.scene.objects.values()].find((o) => o.provenance);
+      const revisionUndone = afterFirst.children.length;
+      const copyStillThere = !!ed.scene.get(copyId);
+
+      ed.undo();                                     // your duplicate
+      const copyGone = !ed.scene.get(copyId);
+
+      ed.redo();
+      ed.redo();
+      const back = [...ed.scene.objects.values()].find((o) => o.provenance);
+      return {
+        ok: true,
+        stagedCost: depthAfterEdit - depthBefore,
+        cost,
+        accepted,
+        revisionUndone,
+        copyStillThere,
+        copyGone,
+        redoneSteps: back.children.length,
+        redoneRevision: back.provenance.revision,
+        redoneCopy: !!ed.scene.get(copyId),
+      };
+    });
+
+    assert.equal(out.ok, true, out.why);
+    assert.equal(out.stagedCost, 1, 'the unrelated edit did not record exactly one step');
+    assert.equal(out.cost, 1, `accepting cost ${out.cost} undo steps instead of one`);
+    assert.equal(out.accepted, 20, 'accepting did not keep the revision');
+    assert.equal(out.revisionUndone, 12, 'undoing the revision did not take it back');
+    assert.equal(out.copyStillThere, true, 'undoing the revision also undid your unrelated work');
+    assert.equal(out.copyGone, true, 'your unrelated work was not undoable after the revision');
+    assert.equal(out.redoneSteps, 20, 'redo did not put the revision back');
+    assert.equal(out.redoneRevision, 1, 'the record did not come back with it');
+    assert.equal(out.redoneCopy, true, 'redo did not put your work back');
+  });
+
+  test('undo during a live review moves your work and leaves the proposal on screen', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const k = window.kline, ed = k.editor;
+      const bar = k.app.buildBar;
+      bar.focus('a staircase with 12 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+
+      ed.selectObject(root.id);
+      k.run('add.cube');
+      const mineId = ed.scene.active;
+
+      ed.selectObject(root.id);
+      bar.focus('make it 20 steps');
+      await bar.revise();
+      if (!ed.revision.active) return { ok: false, why: 'no revision was staged' };
+
+      ed.undo();
+      const stillReviewing = ed.revision.active;
+      const asset = [...ed.scene.objects.values()].find((o) => o.provenance);
+      const stepsDuring = asset ? asset.children.length : -1;
+      const cubeGone = !ed.scene.get(mineId);
+
+      ed.redo();
+      const cubeBack = !!ed.scene.get(mineId);
+      const stepsAfterRedo = [...ed.scene.objects.values()]
+        .find((o) => o.provenance).children.length;
+
+      // And the review can still be answered from there.
+      ed.revision.reject();
+      return {
+        ok: true,
+        stillReviewing,
+        stepsDuring,
+        cubeGone,
+        cubeBack,
+        stepsAfterRedo,
+        afterReject: [...ed.scene.objects.values()].find((o) => o.provenance).children.length,
+        rejectKeptYourCube: !!ed.scene.get(mineId),
+      };
+    });
+
+    assert.equal(out.ok, true, out.why);
+    assert.equal(out.cubeGone, true, 'undo did not undo your own work');
+    assert.equal(out.stillReviewing, true, 'an undo cancelled the review');
+    assert.equal(out.stepsDuring, 20, 'undoing your work took the proposal off the screen');
+    assert.equal(out.cubeBack, true, 'redo did not put your work back');
+    assert.equal(out.stepsAfterRedo, 20, 'redo took the proposal off the screen');
+    assert.equal(out.afterReject, 12, 'Reject stopped working after stepping through history');
+    assert.equal(out.rejectKeptYourCube, true, 'Reject destroyed work you did during the review');
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

@@ -50,6 +50,7 @@ function hostFor(scene: Scene): {
   });
   const session = new RevisionSession({
     scene,
+    snapshotStore: () => history.store,
     snapshot,
     restore: (snap) => { scene.adopt(Scene.fromJSON(snap.scene)); },
     pushHistory: (snap) => history.push(snap),
@@ -1280,4 +1281,612 @@ test('Keep Both on a one-mesh reference asset leaves a coherent structure', () =
   assert.equal(again.report.conflicts.length, 0, 'the settled argument came back');
   session.accept();
   assert.ok(scene.get(yours!.id), 'your copy was swept up by the next revision');
+});
+
+// ------------------------------------------------- field-scoped resolutions
+
+/**
+ * An asset whose shape, name and placement were all edited by hand, against a
+ * revision that proposes a different one of each. Three separate arguments.
+ */
+function threeWayScene(): { scene: Scene; root: SceneObject; part: SceneObject; proposed: never[] } {
+  const scene = new Scene();
+  const root = scene.add('empty', 'Asset');
+  const part = scene.add('mesh', 'Body', buildPrimitive('cube'));
+  part.partKey = 'body#1';
+  scene.setParent(part.id, root.id);
+  root.provenance = normaliseProvenance({
+    schema: 2, source: 'program', assetId: 'a1', generator: 'program', params: {},
+    baseline: {
+      version: 2,
+      parts: [{
+        key: 'body#1', name: 'Body', position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1],
+        mesh: part.mesh!.toJSON(), materialSlots: [], materials: [], modifiers: [], animation: [],
+        visible: true, locked: false,
+      }],
+    },
+  });
+
+  // Your three edits: a different shape, a different name, a different place.
+  part.mesh = buildPrimitive('cylinder');
+  part.name = 'My body';
+  part.position = new Vec3(1, 2, 3);
+
+  const proposed = [{
+    key: 'body#1', name: 'Generated body',
+    position: [9, 9, 9] as [number, number, number],
+    rotation: [0, 0, 0] as [number, number, number],
+    scale: [1, 1, 1] as [number, number, number],
+    mesh: buildPrimitive('uvsphere').toJSON(),
+  }];
+  return { scene, root, part, proposed: proposed as never };
+}
+
+test('taking the revised shape does not take the name and placement with it', () => {
+  const { scene, root, part, proposed } = threeWayScene();
+  const { session } = hostFor(scene);
+  const summary = session.preview(scene.get(root.id)!, proposed, 'reshape')!;
+
+  const fields = summary.report.conflicts.map((c) => c.field).sort();
+  assert.deepEqual(fields, ['geometry', 'name', 'position'],
+    'three independent edits should be three independent questions');
+
+  // Answer the one about the shape, and only that one.
+  assert.equal(session.resolveConflict('body#1', 'theirs', 'geometry'), true);
+
+  const live = scene.get(part.id)!;
+  assert.ok(live.mesh!.vertCount > 8, 'the revised shape was not taken');
+  assert.equal(live.name, 'My body',
+    'resolving the shape renamed the part — the name was never in question here');
+  assert.deepEqual(live.position.toArray(), [1, 2, 3],
+    'resolving the shape moved the part back to where the generator wanted it');
+
+  // And the other two are still open, still waiting to be answered.
+  const stillOpen = session.summary!.report.conflicts.map((c) => c.field).sort();
+  assert.deepEqual(stillOpen, ['name', 'position'],
+    'resolving the shape silently closed the other arguments');
+});
+
+test('conflicts settle the same way whichever order they are answered in', () => {
+  const outcome = (order: ('geometry' | 'name' | 'position')[]): string => {
+    const { scene, root, part, proposed } = threeWayScene();
+    const { session } = hostFor(scene);
+    session.preview(scene.get(root.id)!, proposed, 'reshape');
+    // The shape is taken; the name and the placement you chose are kept.
+    for (const field of order) {
+      session.resolveConflict('body#1', field === 'geometry' ? 'theirs' : 'mine', field);
+    }
+    const live = scene.get(part.id)!;
+    return JSON.stringify({
+      verts: live.mesh!.vertCount,
+      name: live.name,
+      position: live.position.toArray(),
+      open: session.summary!.report.conflicts.length,
+    });
+  };
+
+  const first = outcome(['geometry', 'name', 'position']);
+  assert.equal(outcome(['name', 'position', 'geometry']), first,
+    'answering the shape last gave a different result from answering it first');
+  assert.equal(outcome(['position', 'geometry', 'name']), first,
+    'the order the questions were answered in changed the answer');
+  assert.match(first, /"name":"My body"/, 'the name you chose did not survive');
+  assert.match(first, /"position":\[1,2,3\]/, 'the placement you chose did not survive');
+  assert.match(first, /"open":0/, 'not every conflict was settled');
+});
+
+// -------------------------------------------------- placement through revert
+
+/**
+ * An asset of two generated parts, both moved, turned and resized, with your
+ * own detail attached to each: one to a part the revision keeps, one to a part
+ * it drops.
+ */
+function attachedScene(): {
+  scene: Scene; root: SceneObject;
+  keeper: SceneObject; doomed: SceneObject;
+  onKeeper: SceneObject; onDoomed: SceneObject;
+} {
+  const scene = new Scene();
+  const root = scene.add('empty', 'Rig');
+  root.position = new Vec3(10, 0, 0);
+  root.rotation = new Vec3(0, 0, Math.PI / 3);
+
+  const keeper = scene.add('mesh', 'Bracket', buildPrimitive('cube'));
+  keeper.partKey = 'bracket#1';
+  keeper.position = new Vec3(2, 3, 4);
+  keeper.rotation = new Vec3(Math.PI / 5, 0, Math.PI / 7);
+  keeper.scale = new Vec3(2, 2, 2);
+  scene.setParent(keeper.id, root.id);
+
+  const doomed = scene.add('mesh', 'Arm', buildPrimitive('cube'));
+  doomed.partKey = 'arm#1';
+  doomed.position = new Vec3(-1, 5, 2);
+  doomed.rotation = new Vec3(0, Math.PI / 4, Math.PI / 6);
+  doomed.scale = new Vec3(3, 3, 3);
+  scene.setParent(doomed.id, root.id);
+
+  const onKeeper = scene.add('mesh', 'Bolt', buildPrimitive('cube'));
+  onKeeper.position = new Vec3(0.5, 0, 0.25);
+  scene.setParent(onKeeper.id, keeper.id);
+
+  const onDoomed = scene.add('mesh', 'Washer', buildPrimitive('cube'));
+  onDoomed.position = new Vec3(0, 0.75, 0);
+  onDoomed.rotation = new Vec3(0, 0, Math.PI / 9);
+  scene.setParent(onDoomed.id, doomed.id);
+
+  const partOf = (o: SceneObject) => ({
+    key: o.partKey!, name: o.name,
+    position: o.position.toArray() as [number, number, number],
+    rotation: o.rotation.toArray() as [number, number, number],
+    scale: o.scale.toArray() as [number, number, number],
+    mesh: o.mesh!.toJSON(),
+  });
+  root.provenance = normaliseProvenance({
+    schema: 2, source: 'program', assetId: 'a1', generator: 'program', params: {},
+    baseline: {
+      version: 2,
+      parts: [keeper, doomed].map((o) => ({
+        ...partOf(o), materialSlots: [], materials: [], modifiers: [], animation: [],
+        visible: true, locked: false,
+      })),
+    },
+  });
+  return { scene, root, keeper, doomed, onKeeper, onDoomed };
+}
+
+/** World placement, as sixteen numbers, so a test compares the real thing. */
+function worldOf(scene: Scene, id: number): number[] {
+  return [...scene.get(id)!.worldMatrix(scene).m];
+}
+
+const closeTo = (a: number[], b: number[], why: string): void => {
+  assert.equal(a.length, b.length, why);
+  for (let i = 0; i < a.length; i++) {
+    assert.ok(Math.abs(a[i] - b[i]) < 1e-6,
+      `${why} (entry ${i}: ${a[i].toFixed(6)} vs ${b[i].toFixed(6)})`);
+  }
+};
+
+test('a detail on a dropped part keeps its place in the world through Reject', () => {
+  const { scene, root, doomed, onDoomed, onKeeper, keeper } = attachedScene();
+  const { session } = hostFor(scene);
+
+  const washerBefore = worldOf(scene, onDoomed.id);
+  const boltBefore = worldOf(scene, onKeeper.id);
+
+  // The revision keeps the bracket and drops the arm entirely.
+  const proposed = [{
+    key: 'bracket#1', name: 'Bracket',
+    position: keeper.position.toArray() as [number, number, number],
+    rotation: keeper.rotation.toArray() as [number, number, number],
+    scale: keeper.scale.toArray() as [number, number, number],
+    mesh: buildPrimitive('uvsphere').toJSON(),
+  }];
+  const summary = session.preview(scene.get(root.id)!, proposed as never, 'drop the arm')!;
+  // Dropping a part you have hung your own work on is a question, not a
+  // foregone conclusion. Answer it the generator's way.
+  const removal = summary.report.conflicts.find((c) => c.key === 'arm#1');
+  assert.ok(removal, 'dropping a part carrying your work went through unasked');
+  session.resolveConflict('arm#1', 'theirs', removal!.field);
+  assert.ok(!scene.get(doomed.id), 'the arm was not dropped');
+
+  // Lifted clear of the part that went, and still exactly where it was.
+  closeTo(worldOf(scene, onDoomed.id), washerBefore,
+    'your washer moved when the part under it was dropped');
+
+  session.reject();
+
+  // Reject puts the arm back, and the washer belongs to it again — at the same
+  // place in the world it has been the whole time.
+  assert.ok(scene.get(doomed.id), 'Reject did not put the dropped part back');
+  closeTo(worldOf(scene, onDoomed.id), washerBefore, 'your washer moved when the revision was rejected');
+  closeTo(worldOf(scene, onKeeper.id), boltBefore, 'your bolt moved when the revision was rejected');
+});
+
+test('reverting a moved part carries the work attached to it', () => {
+  const { scene, root, keeper, onKeeper } = attachedScene();
+  const { session } = hostFor(scene);
+
+  const boltLocal = onKeeper.position.toArray();
+  const proposed = [
+    {
+      key: 'bracket#1', name: 'Bracket',
+      // The revision picks the bracket up and puts it somewhere else entirely.
+      position: [-40, 12, 7] as [number, number, number],
+      rotation: [0, 0, 0] as [number, number, number],
+      scale: [1, 1, 1] as [number, number, number],
+      mesh: keeper.mesh!.toJSON(),
+    },
+    {
+      key: 'arm#1', name: 'Arm',
+      position: [-1, 5, 2] as [number, number, number],
+      rotation: [0, Math.PI / 4, Math.PI / 6] as [number, number, number],
+      scale: [3, 3, 3] as [number, number, number],
+      mesh: buildPrimitive('cube').toJSON(),
+    },
+  ];
+  session.preview(scene.get(root.id)!, proposed as never, 'move the bracket');
+
+  // A bolt on a bracket goes where the bracket goes: that is what attaching it
+  // meant, and freezing it in world space would leave it hanging in the air.
+  assert.deepEqual(scene.get(onKeeper.id)!.position.toArray(), boltLocal,
+    'the bolt was detached from the bracket it is bolted to');
+  assert.equal(scene.get(onKeeper.id)!.parent, keeper.id);
+
+  session.reject();
+  assert.deepEqual(scene.get(onKeeper.id)!.position.toArray(), boltLocal,
+    'rejecting changed how the bolt is attached');
+  assert.equal(scene.get(onKeeper.id)!.parent, keeper.id, 'the bolt lost its bracket');
+});
+
+test('a scoped revert leaves the hierarchy sound: reciprocal, single-entry, walkable', () => {
+  const { scene, root, doomed, onDoomed } = attachedScene();
+  const { session } = hostFor(scene);
+
+  const proposed = [{
+    key: 'bracket#1', name: 'Bracket',
+    position: [2, 3, 4] as [number, number, number],
+    rotation: [0, 0, 0] as [number, number, number],
+    scale: [1, 1, 1] as [number, number, number],
+    mesh: buildPrimitive('uvsphere').toJSON(),
+  }];
+  session.preview(scene.get(root.id)!, proposed as never, 'drop the arm');
+  // Something new of yours, made during the review and hung on the asset.
+  const during = scene.add('mesh', 'Shim', buildPrimitive('cube'));
+  scene.setParent(during.id, root.id);
+  session.reject();
+
+  const doc = scene.toJSON();
+  const byId = new Map(doc.objects.map((o) => [o.id, o]));
+
+  // No id twice, and no id in the outliner twice.
+  assert.equal(byId.size, doc.objects.length, 'an object appears twice in the document');
+  assert.equal(new Set(doc.order).size, doc.order.length, 'an object is listed twice in the outliner');
+
+  for (const o of doc.objects) {
+    if (o.parent !== null) {
+      const parent = byId.get(o.parent);
+      assert.ok(parent, `"${o.name}" names a parent that is not there`);
+      assert.ok(parent!.children.includes(o.id), `"${o.name}" is not in its parent's children`);
+    }
+    for (const child of o.children) {
+      assert.equal(byId.get(child)?.parent, o.id, `"${o.name}" claims a child that disowns it`);
+    }
+    // Every top-level object is listed exactly once, and no child is.
+    assert.equal(doc.order.includes(o.id), o.parent === null,
+      `"${o.name}" is ${o.parent === null ? 'missing from' : 'wrongly in'} the outliner`);
+  }
+
+  // Everything is reachable by walking down from the roots.
+  const seen = new Set<number>();
+  const walk = (id: number): void => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    for (const c of byId.get(id)?.children ?? []) walk(c);
+  };
+  for (const id of doc.order) walk(id);
+  assert.equal(seen.size, doc.objects.length, 'an object cannot be reached from any root');
+
+  assert.ok(scene.get(doomed.id), 'the dropped part did not come back');
+  assert.ok(scene.get(onDoomed.id), 'your washer was lost');
+  assert.ok(scene.get(during.id), 'work made during the review was lost');
+});
+
+test('work hung on a part the revision invented keeps its place when the part goes', () => {
+  const { scene, root, keeper } = attachedScene();
+  const { session } = hostFor(scene);
+
+  // The revision keeps both parts and adds a third, well away from the origin
+  // and turned and scaled, so that "kept its local transform" and "kept its
+  // place in the world" cannot possibly be the same answer.
+  const proposed = [
+    {
+      key: 'bracket#1', name: 'Bracket',
+      position: keeper.position.toArray() as [number, number, number],
+      rotation: keeper.rotation.toArray() as [number, number, number],
+      scale: keeper.scale.toArray() as [number, number, number],
+      mesh: keeper.mesh!.toJSON(),
+    },
+    {
+      key: 'mount#1', name: 'Mount',
+      position: [12, -7, 3] as [number, number, number],
+      rotation: [Math.PI / 3, Math.PI / 8, -Math.PI / 5] as [number, number, number],
+      scale: [4, 4, 4] as [number, number, number],
+      mesh: buildPrimitive('cube').toJSON(),
+    },
+  ];
+  session.preview(scene.get(root.id)!, proposed as never, 'add a mount');
+
+  const mount = [...scene.objects.values()].find((o) => o.partKey === 'mount#1')!;
+  assert.ok(mount, 'the revision did not add the new part');
+
+  // You bolt something of your own onto the part the revision proposed.
+  const yours = scene.add('mesh', 'Sensor', buildPrimitive('cube'));
+  yours.position = new Vec3(0, 0.5, 0.25);
+  yours.rotation = new Vec3(0, Math.PI / 11, 0);
+  scene.setParent(yours.id, mount.id);
+  const sensorWorld = worldOf(scene, yours.id);
+
+  session.reject();
+
+  // The mount was never agreed to and goes. What you made is yours, stays, and
+  // stays where you put it — not dropped back to the origin by having its
+  // parent taken away and its local transform left behind.
+  assert.ok(!scene.get(mount.id), 'the proposed part survived a rejection');
+  const survivor = scene.get(yours.id);
+  assert.ok(survivor, 'your sensor was destroyed with the part it was attached to');
+  assert.equal(survivor!.parent, null, 'your sensor still points at a part that is gone');
+  closeTo(worldOf(scene, yours.id), sensorWorld,
+    'your sensor moved when the part under it was rejected');
+});
+
+test('accepting, then undoing, also keeps that work in place', () => {
+  const { scene, root, keeper } = attachedScene();
+  const { session, history } = hostFor(scene);
+  const proposed = [
+    {
+      key: 'bracket#1', name: 'Bracket',
+      position: keeper.position.toArray() as [number, number, number],
+      rotation: keeper.rotation.toArray() as [number, number, number],
+      scale: keeper.scale.toArray() as [number, number, number],
+      mesh: keeper.mesh!.toJSON(),
+    },
+    {
+      key: 'mount#1', name: 'Mount',
+      position: [12, -7, 3] as [number, number, number],
+      rotation: [Math.PI / 3, Math.PI / 8, -Math.PI / 5] as [number, number, number],
+      scale: [4, 4, 4] as [number, number, number],
+      mesh: buildPrimitive('cube').toJSON(),
+    },
+  ];
+  const staged = session.preview(scene.get(root.id)!, proposed as never, 'add a mount')!;
+  // The arm is not in this proposal and carries work of yours, so its removal
+  // is a question. Keep it, which is the answer that leaves the rest to test.
+  for (const c of [...staged.report.conflicts]) session.resolveConflict(c.key, 'mine', c.field);
+  const mount = [...scene.objects.values()].find((o) => o.partKey === 'mount#1')!;
+  const yours = scene.add('mesh', 'Sensor', buildPrimitive('cube'));
+  yours.position = new Vec3(0, 0.5, 0.25);
+  scene.setParent(yours.id, mount.id);
+  const sensorWorld = worldOf(scene, yours.id);
+
+  assert.equal(session.accept(), true);
+  assert.equal(history.depth, 1, 'accepting a revision should cost exactly one undo step');
+
+  const back = history.undo({
+    label: 'redo', scene: scene.toJSON(), mode: 'object', editObject: null,
+    selectMode: 'vertex' as SelectMode, verts: [], edges: [], faces: [],
+  })!;
+  scene.adopt(Scene.fromJSON(back.scene));
+
+  assert.ok(!scene.get(mount.id), 'undoing the revision left the new part behind');
+  assert.ok(scene.get(yours.id), 'undoing the revision destroyed work made during it');
+  closeTo(worldOf(scene, yours.id), sensorWorld, 'undoing the revision moved your sensor');
+});
+
+test('a scene reconstructed this way still saves and reloads intact', () => {
+  const { scene, root, keeper } = attachedScene();
+  const { session } = hostFor(scene);
+  session.preview(scene.get(root.id)!, [{
+    key: 'bracket#1', name: 'Bracket',
+    position: keeper.position.toArray() as [number, number, number],
+    rotation: keeper.rotation.toArray() as [number, number, number],
+    scale: keeper.scale.toArray() as [number, number, number],
+    mesh: buildPrimitive('uvsphere').toJSON(),
+  }] as never, 'reshape');
+  const mine = scene.add('mesh', 'Shim', buildPrimitive('cube'));
+  mine.position = new Vec3(3, 3, 3);
+  scene.setParent(mine.id, scene.get(root.id)!.id);
+  const shimWorld = worldOf(scene, mine.id);
+  session.reject();
+
+  const reloaded = Scene.fromJSON(JSON.parse(JSON.stringify(scene.toJSON())));
+  assert.equal(reloaded.objects.size, scene.objects.size, 'reloading lost or duplicated an object');
+  closeTo([...reloaded.get(mine.id)!.worldMatrix(reloaded).m], shimWorld,
+    'your work moved across a save and reload');
+  assert.equal(reloaded.get(root.id)!.provenance?.assetId, 'a1', 'the record did not survive');
+  // Written twice, the same bytes come out: nothing here is order-dependent.
+  assert.equal(JSON.stringify(reloaded.toJSON().objects), JSON.stringify(scene.toJSON().objects));
+});
+
+// ------------------------------------------------ the preview and the history
+
+/**
+ * A host wired the way the Editor is wired, so these exercise the real
+ * contract rather than a convenient one: the history records what
+ * `committedScene` says, and going back to a recorded step puts the proposal
+ * back on top through `withProposal`.
+ */
+function editorLike(scene: Scene): {
+  session: RevisionSession; history: History;
+  edit(label: string, change: () => void): void;
+  undo(): void; redo(): void;
+} {
+  const history = new History();
+  let session!: RevisionSession;
+  const snapshot = (label: string) => ({
+    label,
+    scene: session.committedScene() ?? scene.toJSON(history.store),
+    mode: 'object' as const,
+    editObject: null,
+    selectMode: 'vertex' as SelectMode,
+    verts: [], edges: [], faces: [],
+  });
+  const restore = (snap: ReturnType<typeof snapshot>): void => {
+    scene.adopt(Scene.fromJSON(session.withProposal(snap.scene)));
+  };
+  session = new RevisionSession({
+    scene,
+    snapshotStore: () => history.store,
+    snapshot,
+    restore,
+    pushHistory: (snap) => history.push(snap),
+    setStatus: () => {},
+    refresh: () => {},
+  });
+  return {
+    session,
+    history,
+    // The shape of Editor.beginUndo: record, then change.
+    edit(label, change) {
+      history.push(snapshot(label));
+      change();
+    },
+    undo() {
+      const s = history.undo(snapshot('redo'));
+      if (s) restore(s);
+    },
+    redo() {
+      const s = history.redo(snapshot('undo'));
+      if (s) restore(s);
+    },
+  };
+}
+
+/** A cube of the asset's own, plus one object of yours standing beside it. */
+function assetAndBystander(): { scene: Scene; root: SceneObject; part: SceneObject; mine: SceneObject } {
+  const scene = new Scene();
+  const root = scene.add('empty', 'Asset');
+  const part = scene.add('mesh', 'Body', buildPrimitive('cube'));
+  part.partKey = 'body#1';
+  scene.setParent(part.id, root.id);
+  root.provenance = normaliseProvenance({
+    schema: 2, source: 'program', assetId: 'a1', generator: 'program', params: {},
+    baseline: {
+      version: 2,
+      parts: [{
+        key: 'body#1', name: 'Body', position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1],
+        mesh: part.mesh!.toJSON(), materialSlots: [], materials: [], modifiers: [], animation: [],
+        visible: true, locked: false,
+      }],
+    },
+  });
+  const mine = scene.add('mesh', 'Mine', buildPrimitive('cube'));
+  mine.position = new Vec3(5, 0, 0);
+  return { scene, root, part, mine };
+}
+
+const sphereProposal = [{
+  key: 'body#1', name: 'Body',
+  position: [0, 0, 0] as [number, number, number],
+  rotation: [0, 0, 0] as [number, number, number],
+  scale: [1, 1, 1] as [number, number, number],
+  mesh: buildPrimitive('uvsphere').toJSON(),
+}];
+
+test('a rejected shape cannot come back through an unrelated undo', () => {
+  const { scene, root, part, mine } = assetAndBystander();
+  const app = editorLike(scene);
+  const cubeFaces = scene.get(part.id)!.mesh!.faceCount;
+
+  app.session.preview(scene.get(root.id)!, sphereProposal as never, 'make it round');
+  assert.notEqual(scene.get(part.id)!.mesh!.faceCount, cubeFaces, 'the preview did not apply');
+
+  // While looking at it you move something else. That edit is yours and is
+  // undoable; the proposal in front of you is not yours and is not.
+  app.edit('Move Mine', () => { scene.get(mine.id)!.position = new Vec3(9, 0, 0); });
+
+  app.session.reject();
+  assert.equal(scene.get(part.id)!.mesh!.faceCount, cubeFaces, 'Reject did not put the shape back');
+  assert.equal(scene.get(mine.id)!.position.x, 9, 'Reject undid your unrelated move');
+
+  // The whole point: undoing that unrelated move must not resurrect the shape
+  // you rejected. It used to, because the snapshot taken for the move had the
+  // proposal inside it.
+  app.undo();
+  assert.equal(scene.get(mine.id)!.position.x, 5, 'undo did not undo your move');
+  assert.equal(scene.get(part.id)!.mesh!.faceCount, cubeFaces,
+    'a shape you rejected came back through an unrelated undo');
+
+  app.redo();
+  assert.equal(scene.get(mine.id)!.position.x, 9, 'redo did not redo your move');
+  assert.equal(scene.get(part.id)!.mesh!.faceCount, cubeFaces,
+    'a shape you rejected came back through an unrelated redo');
+});
+
+test('an object created during a review survives a rejection and stays undoable', () => {
+  const { scene, root, part } = assetAndBystander();
+  const app = editorLike(scene);
+  const cubeFaces = scene.get(part.id)!.mesh!.faceCount;
+  app.session.preview(scene.get(root.id)!, sphereProposal as never, 'make it round');
+
+  let madeId = 0;
+  app.edit('Add Cube', () => {
+    const made = scene.add('mesh', 'Made', buildPrimitive('cube'));
+    made.position = new Vec3(-4, 0, 0);
+    madeId = made.id;
+  });
+  app.edit('Move Made', () => { scene.get(madeId)!.position = new Vec3(-8, 0, 0); });
+
+  app.session.reject();
+  assert.ok(scene.get(madeId), 'Reject destroyed an object you made while deciding');
+  assert.equal(scene.get(madeId)!.position.x, -8);
+
+  app.undo();
+  assert.equal(scene.get(madeId)!.position.x, -4, 'the move was not undone');
+  app.undo();
+  assert.ok(!scene.get(madeId), 'undoing the creation did not remove it');
+  assert.equal(scene.get(part.id)!.mesh!.faceCount, cubeFaces, 'the rejected shape reappeared');
+
+  app.redo();
+  assert.ok(scene.get(madeId), 'redo did not put it back');
+  app.redo();
+  assert.equal(scene.get(madeId)!.position.x, -8, 'redo did not replay the move');
+  assert.equal(scene.get(part.id)!.mesh!.faceCount, cubeFaces,
+    'the rejected shape reappeared through redo');
+});
+
+test('accepting is one step, and the steps under it are still your own', () => {
+  const { scene, root, part, mine } = assetAndBystander();
+  const app = editorLike(scene);
+  const cubeFaces = scene.get(part.id)!.mesh!.faceCount;
+
+  app.session.preview(scene.get(root.id)!, sphereProposal as never, 'make it round');
+  app.edit('Move Mine', () => { scene.get(mine.id)!.position = new Vec3(9, 0, 0); });
+  assert.equal(app.session.accept(), true);
+
+  const roundFaces = scene.get(part.id)!.mesh!.faceCount;
+  assert.notEqual(roundFaces, cubeFaces);
+  assert.equal(scene.get(root.id)!.provenance!.revision, 1, 'the record did not advance');
+
+  // One step for the whole revision.
+  app.undo();
+  assert.equal(scene.get(part.id)!.mesh!.faceCount, cubeFaces, 'undo did not take the revision back');
+  assert.equal(scene.get(root.id)!.provenance!.revision, 0, 'the record did not go back with it');
+  assert.equal(scene.get(mine.id)!.position.x, 9, 'undoing the revision also undid your move');
+
+  // Then your own work, underneath it, one step at a time.
+  app.undo();
+  assert.equal(scene.get(mine.id)!.position.x, 5, 'your move was not undoable after the revision');
+
+  app.redo();
+  assert.equal(scene.get(mine.id)!.position.x, 9);
+  app.redo();
+  assert.equal(scene.get(part.id)!.mesh!.faceCount, roundFaces, 'redo did not put the revision back');
+  assert.equal(scene.get(root.id)!.provenance!.revision, 1, 'the record did not come back');
+});
+
+test('stepping through your own history during a review leaves the proposal up', () => {
+  const { scene, root, part, mine } = assetAndBystander();
+  const app = editorLike(scene);
+  const cubeFaces = scene.get(part.id)!.mesh!.faceCount;
+
+  app.edit('Move Mine', () => { scene.get(mine.id)!.position = new Vec3(9, 0, 0); });
+  app.session.preview(scene.get(root.id)!, sphereProposal as never, 'make it round');
+  const roundFaces = scene.get(part.id)!.mesh!.faceCount;
+
+  app.undo();
+  assert.equal(scene.get(mine.id)!.position.x, 5, 'undo did not reach your earlier move');
+  assert.equal(scene.get(part.id)!.mesh!.faceCount, roundFaces,
+    'undoing your own work took the proposal off the screen');
+  assert.equal(app.session.active, true, 'the review was cancelled by an undo');
+
+  app.redo();
+  assert.equal(scene.get(mine.id)!.position.x, 9);
+  assert.equal(scene.get(part.id)!.mesh!.faceCount, roundFaces, 'redo took the proposal away');
+
+  // And it can still be answered, either way, from there.
+  app.session.reject();
+  assert.equal(scene.get(part.id)!.mesh!.faceCount, cubeFaces, 'Reject stopped working');
+  assert.equal(scene.get(mine.id)!.position.x, 9, 'Reject undid your work');
 });

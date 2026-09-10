@@ -90,6 +90,7 @@ export class Editor {
    */
   readonly revision = new RevisionSession({
     scene: this.scene,
+    snapshotStore: () => this.history.store,
     snapshot: (label) => this.snapshot(label),
     restore: (snap) => this.restore(snap),
     pushHistory: (snap) => this.history.push(snap),
@@ -538,10 +539,25 @@ export class Editor {
 
   // ----------------------------------------------------------------- history
 
+  /**
+   * The document, for the history to hold.
+   *
+   * While a revision is being reviewed the scene on screen is your document
+   * with a proposal laid over one asset in it, and only the first of those two
+   * belongs in the history: the proposal is not something anybody has agreed
+   * to, and Reject is meant to leave no trace of it. Recording them together
+   * is what let a rejected shape reappear — an edit made elsewhere during a
+   * review captured the proposal in its snapshot, and undoing that edit after
+   * the rejection put the rejected geometry back on screen.
+   *
+   * So during a review the asset is recorded as it stood before the preview,
+   * and everything else exactly as it stands. Off the review path this is the
+   * scene, unchanged and at no extra cost.
+   */
   snapshot(label: string): EditorSnapshot {
     return {
       label,
-      scene: this.scene.toJSON(this.history.store),
+      scene: this.revision.committedScene() ?? this.scene.toJSON(this.history.store),
       mode: this.mode,
       editObject: this.editObjectId,
       selectMode: this.selectMode,
@@ -603,8 +619,18 @@ export class Editor {
     return !this.revision.active || !this.revision.touches(this.mutating(''));
   }
 
+  /**
+   * Go to a recorded state.
+   *
+   * The counterpart of `snapshot`: because the history holds the document
+   * without the proposal, restoring one of its entries would take the preview
+   * off the screen — through undo, through redo, or through cancelling a modal
+   * transform on some unrelated object. The proposal is put back over the
+   * restored document so that stepping through your own history during a
+   * review does what it says and nothing more.
+   */
   restore(s: EditorSnapshot): void {
-    this.scene.adopt(Scene.fromJSON(s.scene));
+    this.scene.adopt(Scene.fromJSON(this.revision.withProposal(s.scene)));
     this.mode = s.mode;
     this.editObjectId = s.editObject;
     this.selectMode = s.selectMode;
