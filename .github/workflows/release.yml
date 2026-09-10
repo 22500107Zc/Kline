@@ -17,9 +17,15 @@ on:
         required: false
         type: string
       prerelease:
-        description: 'Mark the release as a prerelease'
+        description: 'Mark the release as a prerelease (it will NOT be the download the links point at)'
         required: false
-        default: true
+        # Ticked by default, this quietly broke every release cut from the
+        # Actions tab: the page published fine and every download button on it
+        # served an older release's installers, because /releases/latest/
+        # skips prereleases. Typing a version tag is the act of releasing that
+        # version, so that is what it now does unless this is ticked on
+        # purpose.
+        default: false
         type: boolean
 
 permissions:

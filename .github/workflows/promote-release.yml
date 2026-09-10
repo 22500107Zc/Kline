@@ -1,0 +1,70 @@
+name: Promote a release
+
+# Marking a release as the current one, from the Actions tab.
+#
+# Every download link on a release page, and every link in the README, points
+# at /releases/latest/download/<file>. That endpoint skips prereleases. So a
+# release published with the prerelease box left ticked is worse than one that
+# was never published: the page is there, the installers are attached to it,
+# and every button on it silently hands over the assets of whatever older
+# release still holds the "Latest" badge. Nothing looks wrong from the outside
+# — the download works, it is just the wrong app, and how far back it goes
+# depends on how many releases in a row were ticked.
+#
+# Rebuilding the whole matrix to change one boolean costs six minutes and a
+# gigabyte of re-uploaded installers, so this does only the boolean. The
+# assets that are already attached are not touched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to promote, e.g. v0.9.2. Its assets are left alone.'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark it as the current release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "no release is published for $TAG"
+            exit 1
+          fi
+
+          # A release with no installers on it must never take the badge: the
+          # links would resolve to nothing at all, which is a worse failure
+          # than resolving to an old build.
+          assets=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '[.assets[].name] | join(" ")')
+          echo "attached: ${assets:-<nothing>}"
+          missing=0
+          for want in Kline-Setup.exe Kline.AppImage Kline-arm64.dmg Kline-x64.dmg; do
+            case " $assets " in
+              *" $want "*) ;;
+              *) echo "MISSING $want"; missing=1 ;;
+            esac
+          done
+          if [ "$missing" = 1 ]; then
+            echo
+            echo "$TAG is missing installers — not promoting it, because the"
+            echo "download links on it would resolve to nothing."
+            exit 1
+          fi
+
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --prerelease=false --latest
+
+          echo
+          echo "latest is now:"
+          gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName
