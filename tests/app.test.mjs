@@ -2596,7 +2596,7 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
 
   // ------------------------------------- the document is held during a review
 
-  test('every way of editing the document is held while a revision waits', async () => {
+  test('only the asset under review is held; the rest of the scene is yours', async () => {
     await resetScene(page);
     const out = await page.evaluate(async () => {
       const ed = window.kline.editor;
@@ -2609,33 +2609,35 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
       await bar.revise();
       if (!ed.revision.active) return { ok: false, why: 'no revision was staged' };
 
-      const before = JSON.stringify(ed.scene.toJSON());
+      // The selection is part of a serialised scene, so compare what actually
+      // matters: the objects and their geometry, not what happens to be
+      // highlighted.
+      const shape = () => JSON.stringify([...ed.scene.objects.values()]
+        .map((o) => [o.id, o.name, o.position.toArray(), o.mesh ? o.mesh.faceCount : 0]));
+      const before = shape();
       const blocked = {};
-      // Commands: covers menus, the toolbar, the palette and every shortcut.
+
+      // The asset under review is showing a proposal, so editing it is held —
+      // an edit there would be destroyed whichever button came next.
+      ed.selectObject(root.children[0]);
+      blocked.editingTheAsset = ed.beginUndo('nudge a proposed step') === false;
+      blocked.editableFlag = ed.editable === false;
       window.kline.run('object.delete');
-      window.kline.run('mesh.subdivide');
+      blocked.deletingAPart = shape() === before;
+
+      // Anything that would take the proposal out of the review is held too:
+      // a file containing a version nobody agreed to is the whole problem.
       window.kline.run('file.new');
-      window.kline.run('object.duplicate');
-      window.kline.run('file.importObj');
-      blocked.commands = JSON.stringify(ed.scene.toJSON()) === before;
+      blocked.newDocument = ed.revision.active && shape() === before;
+      const saved = await ed.autosaveNow(false);
+      blocked.autosave = saved === false;
 
-      // Panels and direct editor calls, which do not go through a command.
-      blocked.addPrimitive = ed.addPrimitive('cube') === null;
-      blocked.addLight = ed.addLight('point') === null;
-      blocked.keyframe = ed.insertKeyframe() === 0;
-      blocked.beginUndo = ed.beginUndo('a panel edit') === false;
-      blocked.editable = ed.editable === false;
-
-      // Another revision request must not stack on this one.
+      // Another revision request must not silently replace this one.
       bar.focus('make it 20 steps');
       await bar.revise();
       blocked.secondRevision = ed.revision.summary.label.includes('14');
 
-      // Saving and autosaving a proposal would put it in the file.
-      const saved = await ed.autosaveNow(false);
-      blocked.autosave = saved === false;
-
-      const untouched = JSON.stringify(ed.scene.toJSON()) === before;
+      const untouched = shape() === before;
       ed.revision.reject();
       return { ok: true, blocked, untouched, afterReject: ed.scene.get(root.id).children.length };
     });
@@ -2891,6 +2893,65 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     assert.ok(Math.abs(out.depthAfter - 1.4) < 0.01, `the revision did not apply (${out.depthAfter})`);
     assert.equal(out.placementKept, true, 'your placement was reset');
     assert.equal(out.materialKept, true, 'your material was replaced');
+  });
+
+  test('you can keep modelling while a revision waits, and Reject spares it', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const bar = window.kline.app.buildBar;
+      bar.focus('a staircase with 8 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      ed.selectObject(root.id);
+      bar.focus('make it 14 steps');
+      await bar.revise();
+      if (!ed.revision.active) return { ok: false, why: 'no revision was staged' };
+
+      // Carry on working on something else entirely, through the real
+      // commands a person would use.
+      const made = ed.addPrimitive('cube');
+      const worked = made !== null;
+      if (made) made.position.x = 5;
+      ed.selectObject(made.id);
+      window.kline.run('object.duplicate');
+      // Duplicate leaves you dragging the copy; confirming keeps it, and
+      // cancelling would roll the whole compound operation back.
+      ed.confirmModal();
+      const copies = [...ed.scene.objects.values()].filter((o) => o.name.startsWith('Cube')).length;
+
+      // Editing the asset under review is the one thing still held.
+      ed.selectObject(root.children[0]);
+      const assetHeld = ed.beginUndo('nudge a proposed step') === false;
+      // And saving a proposal into a file is still refused.
+      const savedDuring = await ed.autosaveNow(false);
+
+      ed.selectObject(made.id);
+      ed.revision.reject();
+      const survivor = ed.scene.get(made.id);
+      return {
+        ok: true,
+        worked,
+        copies,
+        assetHeld,
+        saveHeld: savedDuring === false,
+        survived: !!survivor,
+        keptPosition: survivor ? survivor.position.x : null,
+        copiesAfter: [...ed.scene.objects.values()].filter((o) => o.name.startsWith('Cube')).length,
+        assetBack: ed.scene.get(root.id).children.length,
+        historyClean: ed.history.canUndo,
+      };
+    });
+
+    assert.equal(out.ok, true, out.why);
+    assert.equal(out.worked, true, 'adding an unrelated object during a review was blocked');
+    assert.ok(out.copies >= 2, 'duplicating an unrelated object during a review was blocked');
+    assert.equal(out.assetHeld, true, 'the asset under review was editable');
+    assert.equal(out.saveHeld, true, 'a proposal could be written to a recovery copy');
+    assert.equal(out.survived, true, 'Reject deleted work made during the review');
+    assert.equal(out.keptPosition, 5, 'Reject undid unrelated work');
+    assert.equal(out.copiesAfter, out.copies, 'Reject removed copies made during the review');
+    assert.equal(out.assetBack, 8, 'Reject did not put the asset back');
   });
 
   test('nothing logged an error to the console along the way', () => {

@@ -8,7 +8,7 @@ import {
   meshFromHeightfield, meshFromLathe, meshFromSilhouette,
 } from '../imaging/generate';
 import { PhotoOptions, PhotoResult, meshFromPhoto } from '../imaging/photo';
-import { estimateDepth, patchAligned } from '../imaging/neuralDepth';
+import { decodeDepth, encodeDepth, estimateDepth, patchAligned } from '../imaging/neuralDepth';
 import { meshFromDepth } from '../imaging/sceneDepth';
 import { DepthField, DepthOptions, depthFromPhoto } from '../imaging/depth';
 import {
@@ -84,6 +84,8 @@ export class CreatePanel {
     texture: true,
   };
   private sceneRunning = false;
+  /** The last depth map read for this frame, cached into the record. */
+  private sceneDepth: { width: number; height: number; data: Float32Array; ms: number } | null = null;
   private sceneNote = h('p', { class: 'dim small' });
   private targetId: number | null = null;
   /** The name this panel gave the target, so a user rename is never clobbered. */
@@ -589,7 +591,28 @@ export class CreatePanel {
     const object = this.editor.scene.get(this.targetId);
     if (!object || !this.bitmap) return;
     if (this.mode === 'scene') {
-      this.statsLine.textContent = 'Press "Build the scene" to re-read the picture with the depth model.';
+      // Rebuilt from the stored depth map rather than from the network. The
+      // slow half already happened, once, and its answer is in the file.
+      const cached = this.sceneDepth
+        ?? decodeDepth(this.editor.scene.get(this.targetId)?.provenance?.params.depth);
+      if (!cached) {
+        this.statsLine.textContent = 'No depth reading is stored for this object. '
+          + 'Press "Build the scene" to read the picture again.';
+        return;
+      }
+      const rebuilt = meshFromDepth(this.bitmap, cached, {
+        resolution: this.scene.resolution,
+        targetWidth: this.scene.targetWidth,
+        relief: this.scene.relief,
+        cut: this.scene.cut,
+        smoothing: this.scene.smoothing,
+      });
+      if (rebuilt.mesh.faceCount === 0) {
+        this.statsLine.textContent = 'These settings leave no surface to build.';
+        return;
+      }
+      this.sceneDepth = cached;
+      this.stageProposal(object, rebuilt.mesh);
       return;
     }
     const result = this.buildMesh();
@@ -597,13 +620,18 @@ export class CreatePanel {
       this.statsLine.textContent = 'Nothing found at this threshold, so there is nothing to revise to.';
       return;
     }
+    this.stageProposal(object, result.mesh);
+  }
+
+  /** Offer a rebuilt mesh as a revision of this object, and say what it costs. */
+  private stageProposal(object: SceneObject, mesh: Mesh): void {
     const proposed: ProposedPart[] = [{
       key: REFERENCE_PART,
       name: object.name,
       position: object.position.toArray(),
       rotation: object.rotation.toArray(),
       scale: object.scale.toArray(),
-      mesh: result.mesh.toJSON(),
+      mesh: mesh.toJSON(),
     }];
     const edited = !sameMesh(
       object.provenance?.baseline.parts?.[0]?.mesh ?? null,
@@ -614,8 +642,9 @@ export class CreatePanel {
       proposed,
       `Rebuild ${object.name} from ${this.reference?.name ?? 'the reference'}`,
       edited
-        ? ['You have edited this model since it was built. A rebuild replaces every vertex, so '
-          + 'edits stored against the old ones cannot be carried across.']
+        ? ['You have edited this model since it was built. A rebuild replaces every vertex — '
+          + 'choosing the rebuilt shape carries your UVs, vertex colours, weights and sculpt '
+          + 'mask across by nearest surface point, and says how well they landed.']
         : ['Its placement, material, modifiers and animation are kept — a rebuild only replaces '
           + 'the geometry.'],
       { params: this.settingsForMode(), reference: this.referenceOrigin() },
@@ -1052,7 +1081,12 @@ export class CreatePanel {
       generator: `reference:${this.mode}`,
       generatorVersion: GENERATOR_VERSION,
       prompt: existing?.prompt,
-      params: { ...this.settingsForMode(), hints: this.encodedHints() },
+      params: {
+        ...this.settingsForMode(),
+        hints: this.encodedHints(),
+        // Only for the depth route, and only what it cannot recompute cheaply.
+        depth: this.mode === 'scene' && this.sceneDepth ? encodeDepth(this.sceneDepth) : null,
+      },
       reference: this.referenceOrigin(),
       baseline: {
         parts: [{
@@ -1250,6 +1284,10 @@ export class CreatePanel {
       }
       if (this.scene.texture) this.applyPhotoTexture(object);
       else object.materialSlots = [this.editor.scene.ensureDefaultMaterial()];
+      // The depth map goes in the file with everything else, so this scene can
+      // be revised later without the network — on a machine that has never
+      // downloaded it.
+      this.sceneDepth = depth;
       this.recordOrigin(object, result.mesh);
       this.editor.markGeometryDirty(object);
       this.editor.frameSelected();

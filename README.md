@@ -239,16 +239,19 @@ tells you what it kept, what it changed, and anything it could not reconcile.
 **Accept** keeps it as a single undo step. **Reject** puts the scene back
 exactly as it was, with nothing left in the history.
 
-### The document is held while you review
+### Keep working while you review
 
-A staged revision is applied to the scene so you can see it, and the scene as
-it was is held whole. That only stays honest if nothing else edits the document
-in between — otherwise Reject destroys work nobody offered up, and Accept
-sweeps in changes nobody meant to include. So while a proposal is on screen the
-document is held: editing, adding, importing, saving, autosaving, exporting,
-opening a file, starting a new one and starting a second revision all decline
-and say why. Orbiting, framing, shading and the comparison view keep working,
-because reviewing needs them.
+A staged revision is applied to the scene so you can see it, and the transaction
+is scoped to *that asset* — not to the document. So you can carry on modelling
+while you decide: add objects, duplicate, sculpt something else, change
+materials elsewhere. Reject puts the asset back and leaves everything you did in
+the meantime exactly as it is. Accept takes in the asset and nothing else, as one
+undo step, so undoing the revision does not undo your afternoon.
+
+Two things are held, both because a proposal would otherwise escape as though it
+were the model: editing the asset *under review* (an edit there would be
+destroyed whichever button came next), and writing the document out — save,
+autosave, export, open, new. Everything else is yours.
 
 ### What is kept automatically
 
@@ -345,6 +348,16 @@ So those are conflicts, and they are reported as conflicts:
 - **A removal would take work of yours with it** — anything you modelled and
   parented under the part being removed. Agreeing to the removal lifts your
   work clear and keeps it where it was in the world.
+
+### Per-vertex work is carried, not written off
+
+Choosing the revised shape after a topology change does not simply discard what
+was stored against the old vertices. Your UV coordinates, vertex colours, skin
+weights and sculpt mask are resampled onto the new surface by nearest surface
+point, blended across the triangle they land on. It is an approximation — a
+weight sampled at the nearest point is not a weight the old vertex had, because
+there is no old vertex — and it says so: the panel reports what was carried and
+how many vertices had no close match, so you know which areas to check.
 
 Nothing is written to a disputed field until it is answered, and a revision
 with anything unanswered cannot be accepted. There is one action to settle the

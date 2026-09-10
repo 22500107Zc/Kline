@@ -21,6 +21,7 @@ import {
 } from '../src/editor/revision';
 import { buildPrimitive } from '../src/mesh/primitives';
 import { createModifier } from '../src/modifiers';
+import { catmullClark } from '../src/mesh/ops';
 
 /** Build a scene containing one generated asset, exactly as the Build bar does. */
 function build(prompt: string): { scene: Scene; root: SceneObject } {
@@ -1054,4 +1055,229 @@ test('an answer that outlived its question is refused, not applied', () => {
     rebuildRecipe(fresh.root.provenance!, { scale: 2 })!.parts,
     'in time', [], {}, fresh.root.provenance!.assetId,
   ));
+});
+
+// ----------------------- the review is scoped to its asset, not to the document
+
+test('work done elsewhere during a review survives Reject', () => {
+  const { scene, root } = build('a staircase with 8 steps');
+  const { session, history } = hostFor(scene);
+  const bystander = scene.add('mesh', 'Not part of this', buildPrimitive('cube'));
+
+  session.preview(root, rebuildRecipe(root.provenance!, { count: 14 })!.parts, '14 steps');
+
+  // While deciding, the creator gets on with something else entirely.
+  bystander.position = new Vec3(4, 4, 4);
+  bystander.name = 'A thing I made while thinking';
+  const invented = scene.add('mesh', 'Invented mid-review', buildPrimitive('uvsphere'));
+  const slot = scene.addMaterial();
+  scene.materials[slot].color = [0.2, 0.9, 0.4];
+  bystander.materialSlots = [slot];
+
+  assert.equal(session.reject(), true);
+
+  // The asset went back...
+  assert.equal(childrenOf(scene, scene.get(root.id)!).length, 8, 'the asset did not go back');
+  // ...and none of the rest did.
+  const kept = scene.get(bystander.id);
+  assert.ok(kept, 'Reject deleted an object made during the review');
+  assert.deepEqual(kept!.position.toArray(), [4, 4, 4], 'Reject undid unrelated work');
+  assert.equal(kept!.name, 'A thing I made while thinking');
+  assert.equal(kept!.materialSlots[0], slot, 'Reject took back a material you made');
+  assert.ok(scene.get(invented.id), 'Reject deleted an object invented during the review');
+  assert.equal(history.canUndo, false, 'a rejected revision left a step in the history');
+});
+
+test('accepting takes in the asset and nothing else, as one undo step', () => {
+  const { scene, root } = build('a staircase with 8 steps');
+  const { session, history } = hostFor(scene);
+
+  session.preview(root, rebuildRecipe(root.provenance!, { count: 14 })!.parts, '14 steps');
+  const bystander = scene.add('mesh', 'Made during the review', buildPrimitive('cube'));
+  bystander.position = new Vec3(2, 0, 0);
+  assert.equal(session.accept(), true);
+  assert.equal(history.depth, 1);
+
+  // Undo puts the asset back and leaves the unrelated object where it is,
+  // because it was never part of what was accepted.
+  const step = history.undo({
+    label: 'redo', scene: scene.toJSON(history.store), mode: 'object', editObject: null,
+    selectMode: 'vertex', verts: [], edges: [], faces: [],
+  })!;
+  scene.adopt(Scene.fromJSON(step.scene));
+  assert.equal(childrenOf(scene, scene.get(root.id)!).length, 8, 'undo did not restore the asset');
+  const survivor = scene.get(bystander.id);
+  assert.ok(survivor, 'undoing the revision deleted work that was never part of it');
+  assert.deepEqual(survivor!.position.toArray(), [2, 0, 0]);
+});
+
+test('the asset under review is the only thing held', () => {
+  const { scene, root } = build('a staircase with 8 steps');
+  const { session } = hostFor(scene);
+  const kids = childrenOf(scene, root);
+  session.preview(root, rebuildRecipe(root.provenance!, { count: 14 })!.parts, '14 steps');
+
+  assert.equal(session.touches([kids[0].id]), true, 'a part under review is not held');
+  assert.equal(session.touches([root.id]), true, 'the asset root is not held');
+  const outside = scene.add('mesh', 'Elsewhere', buildPrimitive('cube'));
+  assert.equal(session.touches([outside.id]), false, 'an unrelated object was held');
+  session.reject();
+  assert.equal(session.touches([kids[0].id]), false, 'the hold outlived the review');
+});
+
+test('an object parented under the asset during a review is not lost by Reject', () => {
+  const { scene, root } = build('a staircase with 8 steps');
+  const { session } = hostFor(scene);
+  session.preview(root, rebuildRecipe(root.provenance!, { count: 14 })!.parts, '14 steps');
+
+  // Hung onto one of the *proposed* steps, which is about to stop existing.
+  const live = childrenOf(scene, scene.get(root.id)!);
+  const mine = scene.add('mesh', 'Hung on a proposal', buildPrimitive('cube'));
+  scene.setParent(mine.id, live[live.length - 1].id);
+
+  session.reject();
+  const survivor = scene.get(mine.id);
+  assert.ok(survivor, 'an object you made was deleted with the proposal it hung from');
+  assert.equal(survivor!.parent, null, 'it should be lifted to the top level, not orphaned');
+  assert.ok(scene.order.includes(mine.id), 'it is not reachable in the outliner');
+});
+
+// ------------------------------- per-vertex work is carried, not written off
+
+test('choosing the revised shape carries weights, colours and UVs across', () => {
+  const scene = new Scene();
+  const root = scene.add('empty', 'Asset');
+  const part = scene.add('mesh', 'Body', buildPrimitive('uvsphere'));
+  part.partKey = 'body#1';
+  scene.setParent(part.id, root.id);
+  const baseMesh = part.mesh!.toJSON();
+  root.provenance = normaliseProvenance({
+    schema: 2, source: 'program', assetId: 'a1', generator: 'program', params: {},
+    baseline: {
+      version: 2,
+      parts: [{
+        key: 'body#1', name: 'Body', position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1],
+        mesh: baseMesh, materialSlots: [], materials: [], modifiers: [], animation: [],
+        visible: true, locked: false,
+      }],
+    },
+  });
+
+  // Rig it, paint it and unwrap it — three separate things stored against
+  // these particular vertices.
+  const mesh = part.mesh!;
+  mesh.skin = {
+    bones: new Int32Array(mesh.vertCount * 4),
+    weights: new Float32Array(mesh.vertCount * 4),
+  };
+  for (let v = 0; v < mesh.vertCount; v++) {
+    // Bone 1 above the equator, bone 0 below: a boundary the transfer has to
+    // land in roughly the right place.
+    const upper = mesh.positions[v].z > 0;
+    mesh.skin.bones[v * 4] = upper ? 1 : 0;
+    mesh.skin.weights[v * 4] = 1;
+  }
+  mesh.colors = new Float32Array(mesh.vertCount * 3);
+  for (let v = 0; v < mesh.vertCount; v++) {
+    mesh.colors[v * 3] = mesh.positions[v].z > 0 ? 1 : 0;
+  }
+  mesh.faceUV = mesh.faces.map(() => new Array(mesh.faces[0].length * 2).fill(0.5));
+  mesh.markDirty();
+
+  // A revision that rebuilds it with different topology.
+  const denser = catmullClark(buildPrimitive('uvsphere'), 1);
+  const proposed = [{
+    key: 'body#1', name: 'Body',
+    position: [0, 0, 0] as [number, number, number],
+    rotation: [0, 0, 0] as [number, number, number],
+    scale: [1, 1, 1] as [number, number, number],
+    mesh: denser.toJSON(),
+  }];
+  const { session } = hostFor(scene);
+  const summary = session.preview(scene.get(root.id)!, proposed, 'denser')!;
+  const conflict = summary.report.conflicts.find((c) => c.field === 'geometry')!;
+  assert.ok(conflict, 'a topology change over rigged work should be a conflict');
+
+  session.resolveConflict('body#1', 'theirs', 'geometry');
+  const after = scene.get(part.id)!.mesh!;
+  assert.notEqual(after.vertCount, mesh.vertCount, 'the new shape was not applied');
+  assert.ok(after.skin, 'the skin weights were thrown away');
+  assert.ok(after.colors, 'the vertex colours were thrown away');
+  assert.equal(after.hasUV, true, 'the UVs were thrown away');
+
+  // And they landed in the right places, not merely in some place.
+  let right = 0;
+  let counted = 0;
+  for (let v = 0; v < after.vertCount; v++) {
+    const z = after.positions[v].z;
+    if (Math.abs(z) < 0.15) continue;   // near the boundary, either answer is fair
+    counted++;
+    const bone = after.skin!.bones[v * 4];
+    if ((z > 0 && bone === 1) || (z < 0 && bone === 0)) right++;
+  }
+  assert.ok(counted > 20, 'not enough vertices away from the boundary to judge');
+  assert.ok(right / counted > 0.95,
+    `weights landed on the wrong side for ${counted - right} of ${counted} vertices`);
+
+  // The panel says it happened, and how much to trust it.
+  assert.ok(session.summary!.notes.some((n) => /Carried your/.test(n)),
+    'carrying work across was done silently');
+});
+
+test('Keep Both on a one-mesh reference asset leaves a coherent structure', () => {
+  const scene = new Scene();
+  const asset = scene.add('mesh', 'Badge', buildPrimitive('cube'));
+  asset.partKey = 'surface#1';
+  asset.position = new Vec3(2, 0, 0);
+  const baseMesh = asset.mesh!.toJSON();
+  asset.provenance = normaliseProvenance({
+    schema: 2, source: 'reference', assetId: 'a1', generator: 'reference:silhouette',
+    params: { mode: 'silhouette', depth: 0.4 },
+    reference: { textureId: 1, name: 'badge.png', frameTime: 0, width: 4, height: 4 },
+    baseline: {
+      version: 2,
+      parts: [{
+        key: 'surface#1', name: 'Badge', position: [2, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1],
+        mesh: baseMesh, materialSlots: [], materials: [], modifiers: [], animation: [],
+        visible: true, locked: false,
+      }],
+    },
+  });
+  // Sculpted, so a rebuild is a real disagreement.
+  for (const p of asset.mesh!.positions) p.z += 0.2;
+  asset.mesh!.markDirty();
+  const sculpted = JSON.stringify(asset.mesh!.toJSON());
+
+  const proposed = [{
+    key: 'surface#1', name: 'Badge',
+    position: [2, 0, 0] as [number, number, number],
+    rotation: [0, 0, 0] as [number, number, number],
+    scale: [1, 1, 1] as [number, number, number],
+    mesh: buildPrimitive('uvsphere').toJSON(),
+  }];
+  const { session } = hostFor(scene);
+  const summary = session.preview(asset, proposed, 'deeper')!;
+  const conflict = summary.report.conflicts.find((c) => c.field === 'geometry')!;
+  session.resolveConflict(conflict.key, 'both', 'geometry');
+  session.accept();
+
+  const all = [...scene.objects.values()];
+  const assets = all.filter((o) => o.provenance);
+  assert.equal(assets.length, 1, 'keeping both produced two objects claiming the same asset');
+  assert.equal(assets[0].id, asset.id, 'the asset lost its identity');
+  assert.equal(assets[0].partKey, 'surface#1', 'the asset lost its part identity');
+  assert.ok(assets[0].mesh!.faceCount > 6, 'the asset did not take the generated shape');
+
+  const yours = all.find((o) => o.id !== asset.id && o.name.includes('yours'));
+  assert.ok(yours, 'your version was not kept');
+  assert.equal(yours!.partKey, null, 'your copy still carries a generated identity');
+  assert.equal(yours!.provenance, null, 'your copy would be regenerated again');
+  assert.equal(JSON.stringify(yours!.mesh!.toJSON()), sculpted, 'your sculpt was not what was kept');
+  assert.equal(yours!.parent, asset.parent, 'your copy is not a sibling of the asset');
+
+  // And the next revision knows exactly what it owns.
+  const again = session.preview(scene.get(asset.id)!, proposed, 'again')!;
+  assert.equal(again.report.conflicts.length, 0, 'the settled argument came back');
+  session.accept();
+  assert.ok(scene.get(yours!.id), 'your copy was swept up by the next revision');
 });

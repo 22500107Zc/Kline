@@ -343,7 +343,7 @@ export const COMMANDS: Command[] = [
     id: 'object.duplicate', label: 'Duplicate', category: 'Object', mode: 'object', shortcut: 'Shift+D',
     enabled: hasObjectSelection,
     run: (ed) => {
-      if (!ed.beginUndo('Duplicate objects')) return;
+      if (!ed.beginUndo('Duplicate objects', true)) return;
       const scene = ed.scene;
       const copies: number[] = [];
       // Selecting a child as well as its parent would otherwise copy it twice:
@@ -1450,9 +1450,18 @@ export const COMMANDS_BY_ID = new Map(COMMANDS.map((c) => [c.id, c]));
  * disk, because the thing on screen is a proposal and none of those would know
  * that.
  */
-function allowedDuringRevision(id: string): boolean {
-  if (id.startsWith('view.') || id.startsWith('select.') || id.startsWith('help.')) return true;
-  return id === 'object.acceptRevision' || id === 'object.rejectRevision';
+/**
+ * The few actions that must not run while a revision is being reviewed.
+ *
+ * Editing is not on the list: the transaction is scoped to the asset, so
+ * modelling something else during a review is safe and is allowed. What is
+ * held is anything that would take the proposal *out* of the review — writing
+ * it to a file, exporting it, or replacing the document it belongs to — where
+ * a proposal nobody agreed to would escape as though it were the model.
+ */
+function heldDuringRevision(id: string): boolean {
+  return id === 'file.save' || id === 'file.open' || id === 'file.new'
+    || id === 'file.autosave' || id.startsWith('file.export');
 }
 
 export function runCommand(editor: Editor, id: string): void {
@@ -1463,8 +1472,11 @@ export function runCommand(editor: Editor, id: string): void {
   // during a review would write a proposal into the file as though it were the
   // model. So the boundary is drawn here as well, in one place, rather than
   // relying on each command to remember.
-  if (editor.revision.active && !allowedDuringRevision(id)) {
-    editor.setStatus(`${cmd.label} is held while a revision is waiting — accept or reject it first`);
+  if (editor.revision.active && heldDuringRevision(id)) {
+    editor.setStatus(
+      `${cmd.label} would write a revision nobody has agreed to. Accept or reject it first — `
+      + 'the rest of the scene is yours to edit.',
+    );
     return;
   }
   if (cmd.enabled && !cmd.enabled(editor)) {

@@ -227,3 +227,54 @@ export async function estimateDepth(
   }
   return { width: w, height: h, data, ms: Date.now() - started };
 }
+
+/**
+ * The depth map, small enough to keep in the project file.
+ *
+ * Without it, a scene built from a photograph can only be revised by running
+ * the network again — which needs the model file, a couple of seconds, and a
+ * machine willing to do it. Storing the result means changing the relief or
+ * the break-at-edges threshold months later is instant and works offline, on a
+ * machine that has never downloaded the model at all.
+ *
+ * Quantised to 16 bits, which is finer than the network's own agreement with
+ * itself and about 300KB at the default size — the photograph beside it is
+ * usually larger.
+ */
+export function encodeDepth(depth: NeuralDepth): string {
+  const quantised = new Uint16Array(depth.data.length);
+  for (let i = 0; i < depth.data.length; i++) {
+    const v = depth.data[i];
+    quantised[i] = Math.max(0, Math.min(65535, Math.round((Number.isFinite(v) ? v : 0) * 65535)));
+  }
+  const bytes = new Uint8Array(quantised.buffer);
+  let binary = '';
+  // In chunks: String.fromCharCode.apply on a few hundred thousand arguments
+  // overflows the call stack.
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return `${depth.width}x${depth.height}:${btoa(binary)}`;
+}
+
+/** Read a stored depth map back, or null if it is not one. */
+export function decodeDepth(encoded: unknown): NeuralDepth | null {
+  if (typeof encoded !== 'string') return null;
+  const at = encoded.indexOf(':');
+  if (at < 0) return null;
+  const [w, h] = encoded.slice(0, at).split('x').map(Number);
+  if (!Number.isInteger(w) || !Number.isInteger(h) || w <= 0 || h <= 0) return null;
+  try {
+    const binary = atob(encoded.slice(at + 1));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const quantised = new Uint16Array(bytes.buffer, 0, Math.floor(bytes.length / 2));
+    if (quantised.length !== w * h) return null;
+    const data = new Float32Array(quantised.length);
+    for (let i = 0; i < quantised.length; i++) data[i] = quantised[i] / 65535;
+    return { width: w, height: h, data, ms: 0 };
+  } catch {
+    return null;
+  }
+}

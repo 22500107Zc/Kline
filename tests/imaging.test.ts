@@ -4,6 +4,13 @@ import { Bitmap, maskFromBitmap, signedArea, simplifyLoop, splitComponents, sugg
 import { HINT_BACKGROUND, HINT_SUBJECT } from '../src/imaging/segment';
 import { triangulatePolygon } from '../src/imaging/triangulate';
 import { meshFromHeightfield, meshFromLathe, meshFromSilhouette } from '../src/imaging/generate';
+import { decodeDepth, encodeDepth } from '../src/imaging/neuralDepth';
+import { meshFromDepth } from '../src/imaging/sceneDepth';
+
+/** A plain 64x48 bitmap, for the depth surface to be built over. */
+function bitmap64(): Bitmap {
+  return bitmap(64, 48, (x, y) => (x + y) % 3 !== 0);
+}
 import { Mesh } from '../src/mesh/Mesh';
 
 /** Build a test bitmap from a paint callback: return true where the subject is. */
@@ -318,4 +325,36 @@ test('inverting a heightfield mirrors the displacement', () => {
   };
   assert.ok(highSide(normal) > 0);
   assert.ok(highSide(inverted) < 0);
+});
+
+test('a depth reading survives the project file exactly enough to rebuild from', () => {
+  // Storing it is what lets a scene built from a photograph be revised months
+  // later, offline, on a machine that never downloaded the network.
+  const width = 64;
+  const height = 48;
+  const data = new Float32Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) data[y * width + x] = (x / (width - 1)) * 0.5 + (y / (height - 1)) * 0.5;
+  }
+  const encoded = encodeDepth({ width, height, data, ms: 12 });
+  const back = decodeDepth(encoded)!;
+  assert.ok(back, 'the depth reading did not survive');
+  assert.equal(back.width, width);
+  assert.equal(back.height, height);
+  let worst = 0;
+  for (let i = 0; i < data.length; i++) worst = Math.max(worst, Math.abs(data[i] - back.data[i]));
+  assert.ok(worst < 1 / 60000, `quantising lost ${worst}, which is more than 16 bits should`);
+
+  // And the same settings over the stored reading build the same surface.
+  const bitmap = bitmap64();
+  const fresh = meshFromDepth(bitmap, { width, height, data, ms: 0 }, { resolution: 32 });
+  const rebuilt = meshFromDepth(bitmap, back, { resolution: 32 });
+  assert.equal(rebuilt.mesh.faceCount, fresh.mesh.faceCount,
+    'rebuilding from the stored reading gave a different surface');
+
+  assert.equal(decodeDepth('nonsense'), null);
+  assert.equal(decodeDepth(null), null);
+  assert.equal(decodeDepth('4x4:not-base-64!!'), null);
+  assert.equal(decodeDepth(`${width}x${height + 1}:${encoded.split(':')[1]}`), null,
+    'a reading whose size does not match must be refused, not reshaped');
 });

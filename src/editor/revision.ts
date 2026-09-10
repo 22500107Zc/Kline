@@ -10,6 +10,7 @@ import {
   regenerability,
 } from '../build/provenance';
 import { EditorSnapshot } from './history';
+import { carryAttributes, describeCarry } from '../mesh/carry';
 
 /**
  * A revision you can look at before you agree to it.
@@ -178,6 +179,27 @@ export class RevisionSession {
   }
 
   /**
+   * Whether any of these objects is part of the asset under review.
+   *
+   * The line the transaction is drawn around. Inside it, the scene is showing
+   * a proposal and editing would be lost whichever way the review went;
+   * outside it, the scene is yours and always was.
+   */
+  touches(ids: number[]): boolean {
+    const pending = this.pending;
+    if (!pending) return false;
+    const scene = this.host.scene;
+    const inside = new Set<number>();
+    const walk = (id: number): void => {
+      if (inside.has(id)) return;
+      inside.add(id);
+      for (const child of scene.get(id)?.children ?? []) walk(child);
+    };
+    walk(pending.rootId);
+    return ids.some((id) => inside.has(id));
+  }
+
+  /**
    * Work out what a revision would do, apply it so it can be seen, and hold
    * the scene as it was.
    *
@@ -292,10 +314,89 @@ export class RevisionSession {
     const pending = this.pending;
     if (!pending) return false;
     this.pending = null;
-    this.host.restore(pending.before);
-    this.host.setStatus(`Rejected: ${pending.label}. Nothing changed.`);
+    // Only the asset goes back. Restoring the whole scene would also undo
+    // anything you did elsewhere while you were deciding — work you never
+    // offered up and were never asked about, destroyed by a button labelled
+    // "reject this revision".
+    this.host.restore({ ...pending.before, scene: this.sceneWithAssetReverted(pending) });
+    this.host.setStatus(`Rejected: ${pending.label}. The rest of your work is untouched.`);
     this.host.refresh();
     return true;
+  }
+
+  /**
+   * The scene as it is now, with just this asset put back as it was.
+   *
+   * The whole transaction, in one function. Reject adopts it; Accept pushes it
+   * as the undo entry. Both need the same thing — everything else exactly as
+   * it stands, this asset exactly as it stood — so both get it from here and
+   * cannot drift apart.
+   */
+  private sceneWithAssetReverted(pending: PendingRevision): SerializedScene {
+    const now = this.host.scene.toJSON();
+    const was = pending.before.scene;
+
+    const assetIdsIn = (doc: SerializedScene, rootId: number): Set<number> => {
+      const byId = new Map<number, SerializedObject>();
+      for (const o of doc.objects) byId.set(o.id, o);
+      const out = new Set<number>();
+      const walk = (id: number): void => {
+        if (out.has(id)) return;
+        out.add(id);
+        for (const child of byId.get(id)?.children ?? []) walk(child);
+      };
+      walk(rootId);
+      return out;
+    };
+
+    const subtreeNow = assetIdsIn(now, pending.rootId);
+    const oldIds = assetIdsIn(was, pending.rootId);
+
+    // Being inside the asset's subtree is not the same as being part of the
+    // proposal. Something you made during the review and hung on a proposed
+    // part is yours: it has no generated identity and it did not exist before,
+    // so it is kept and lifted clear rather than swept away with the proposal
+    // it happened to be attached to.
+    const liveIds = new Set<number>();
+    for (const o of now.objects) {
+      if (!subtreeNow.has(o.id)) continue;
+      if (oldIds.has(o.id) || o.partKey || o.id === pending.rootId) liveIds.add(o.id);
+    }
+
+    const restored = was.objects.filter((o) => oldIds.has(o.id));
+    const kept = now.objects.filter((o) => !liveIds.has(o.id));
+
+    // Anything you parented under the asset while reviewing belongs to you and
+    // has to survive the asset being put back. Its parent may be about to stop
+    // existing, so it is lifted to the top level rather than orphaned.
+    const survivingIds = new Set(oldIds);
+    for (const o of kept) survivingIds.add(o.id);
+    for (const o of kept) {
+      if (o.parent !== null && !survivingIds.has(o.parent)) o.parent = null;
+      o.children = o.children.filter((c) => survivingIds.has(c));
+    }
+    for (const o of restored) {
+      o.children = o.children.filter((c) => oldIds.has(c));
+    }
+
+    const objects = [...kept, ...restored];
+    const present = new Set(objects.map((o) => o.id));
+    const topLevel = objects.filter((o) => o.parent === null).map((o) => o.id);
+    const order = [
+      ...now.order.filter((id) => present.has(id) && topLevel.includes(id)),
+      ...topLevel.filter((id) => !now.order.includes(id)),
+    ];
+
+    return {
+      ...now,
+      // Materials and textures are never rolled back: the list only grows, the
+      // asset's slots are indices into it, and a material you made during the
+      // review is yours.
+      objects,
+      order,
+      selection: now.selection.filter((id) => present.has(id)),
+      active: now.active !== null && present.has(now.active) ? now.active : null,
+    };
   }
 
   /**
@@ -326,8 +427,14 @@ export class RevisionSession {
       );
       return false;
     }
-    this.pending = null;
     const scene = this.host.scene;
+    // Computed before the provenance is installed, so the undo entry holds the
+    // record as it was as well as the geometry as it was.
+    const undoEntry: EditorSnapshot = {
+      ...pending.before,
+      scene: this.sceneWithAssetReverted(pending),
+    };
+    this.pending = null;
     const root = scene.get(pending.rootId);
     if (root) {
       const live = new Map<string, SceneObject>();
@@ -350,7 +457,7 @@ export class RevisionSession {
     // The held snapshot becomes the undo entry, so undoing puts back the whole
     // revision — geometry, provenance, materials and hierarchy together —
     // rather than an object at a time.
-    this.host.pushHistory(pending.before);
+    this.host.pushHistory(undoEntry);
     this.host.setStatus(`Accepted: ${pending.label} — ${pending.summary.headline}`);
     this.host.refresh();
     return true;
@@ -466,12 +573,53 @@ export class RevisionSession {
         // removing it and "keep both" has nothing to add.
         if (choice === 'theirs' && mine) scene.remove(mine.id);
       } else if (choice === 'theirs' && mine) {
-        if (source.mesh) mine.mesh = Mesh.fromJSON(source.mesh);
+        if (source.mesh) {
+          const previous = mine.mesh;
+          const rebuilt = Mesh.fromJSON(source.mesh);
+          // Everything stored against the old vertices that can be resampled
+          // onto the new surface comes across. It is an approximation and it
+          // says so — but "your weights are gone" was never the only possible
+          // answer, only the easy one.
+          if (previous) {
+            const carried = carryAttributes(previous, rebuilt);
+            if (carried.carried.length) {
+              pending.summary.notes.push(`"${mine.name}": ${describeCarry(carried)}`);
+            }
+          }
+          mine.mesh = rebuilt;
+        }
         mine.name = source.name;
         mine.position = new Vec3(...source.position);
         mine.rotation = new Vec3(...source.rotation);
         mine.scale = new Vec3(...source.scale);
         mine.protectedFromRegen = false;
+        mine.invalidate();
+      } else if (choice === 'both' && mine && mine.id === pending.rootId) {
+        // A model built from a picture is one mesh, so the asset's root *is*
+        // its only part. Adding a sibling under it would leave the root being
+        // both the container and one of the things it contains, and the next
+        // revision would not know which it was looking at.
+        //
+        // So your version leaves the asset entirely and becomes an object of
+        // your own, beside it. The asset keeps its identity, its record and
+        // the generated geometry; you keep yours, free of anything that will
+        // regenerate it again.
+        const yours = scene.duplicateObject(mine.id, mine.parent);
+        if (yours) {
+          yours.provenance = null;
+          yours.partKey = null;
+          yours.protectedFromRegen = false;
+          yours.name = scene.uniqueName(`${mine.name} (yours)`);
+          // Its children came across with it; the asset keeps its own.
+          for (const child of [...yours.children]) {
+            const copy = scene.get(child);
+            if (copy?.partKey) scene.remove(child);
+          }
+        }
+        if (source.mesh) mine.mesh = Mesh.fromJSON(source.mesh);
+        mine.position = new Vec3(...source.position);
+        mine.rotation = new Vec3(...source.rotation);
+        mine.scale = new Vec3(...source.scale);
         mine.invalidate();
       } else if (choice === 'both') {
         const root = scene.get(pending.rootId);

@@ -564,10 +564,22 @@ export class Editor {
    * handlers, and the honest response to "you cannot do that yet" is to say so
    * and do nothing.
    */
-  beginUndo(label: string): boolean {
-    if (this.revision.active) {
+  beginUndo(label: string, creates = false): boolean {
+    // Editing during a review is allowed, and is the reason the revision
+    // transaction is scoped to its asset rather than to the whole document:
+    // Reject puts that asset back and leaves everything you did in the
+    // meantime alone, and Accept takes in the asset and nothing else. What is
+    // *not* allowed is editing the asset under review — those objects are
+    // showing a proposal nobody has agreed to, so an edit to one would be
+    // silently thrown away by whichever button you pressed next.
+    // A creation touches nothing that already exists, so it is never held —
+    // the selection it happens to be made alongside is not its target. Judging
+    // it by the selection blocked "add a cube" simply because the asset under
+    // review was the thing last clicked on.
+    if (!creates && this.revision.active && this.revision.touches(this.mutating(label))) {
       this.setStatus(
-        `"${label}" is held while a revision is waiting — accept or reject it first.`,
+        `That object is showing a proposed revision. Accept or reject it first — `
+        + 'everything else in the scene is yours to edit.',
       );
       return false;
     }
@@ -575,12 +587,20 @@ export class Editor {
     return true;
   }
 
+  /** The objects an edit is about to touch: the selection, or the edit target. */
+  private mutating(_label: string): number[] {
+    const ids = new Set<number>(this.scene.selection);
+    if (this.scene.active !== null) ids.add(this.scene.active);
+    if (this.editObjectId !== null) ids.add(this.editObjectId);
+    return [...ids];
+  }
+
   /**
    * Whether the document can be edited right now, for callers that mutate
    * without an undo step of their own.
    */
   get editable(): boolean {
-    return !this.revision.active;
+    return !this.revision.active || !this.revision.touches(this.mutating(''));
   }
 
   restore(s: EditorSnapshot): void {
@@ -742,7 +762,7 @@ export class Editor {
 
   addPrimitive(kind: PrimitiveKind): SceneObject | null {
     const label = PRIMITIVES.find((p) => p.kind === kind)?.label ?? kind;
-    if (!this.beginUndo(`Add ${label}`)) return null;
+    if (!this.beginUndo(`Add ${label}`, true)) return null;
     const obj = this.scene.add('mesh', label, buildPrimitive(kind));
     obj.position = this.scene.cursor.clone();
     this.selectObject(obj.id);
@@ -751,7 +771,7 @@ export class Editor {
   }
 
   addLight(type: LightType): SceneObject | null {
-    if (!this.beginUndo('Add light')) return null;
+    if (!this.beginUndo('Add light', true)) return null;
     const obj = this.scene.add('light', type[0].toUpperCase() + type.slice(1));
     if (obj.light) obj.light.type = type;
     obj.position = this.scene.cursor.add(new Vec3(0, 0, 3));
@@ -760,7 +780,7 @@ export class Editor {
   }
 
   addCamera(): SceneObject | null {
-    if (!this.beginUndo('Add camera')) return null;
+    if (!this.beginUndo('Add camera', true)) return null;
     const obj = this.scene.add('camera', 'Camera');
     obj.position = this.camera.eye();
     const f = this.camera.forward();
@@ -770,7 +790,7 @@ export class Editor {
   }
 
   addEmpty(): SceneObject | null {
-    if (!this.beginUndo('Add empty')) return null;
+    if (!this.beginUndo('Add empty', true)) return null;
     const obj = this.scene.add('empty', 'Empty');
     obj.position = this.scene.cursor.clone();
     this.selectObject(obj.id);
@@ -778,7 +798,7 @@ export class Editor {
   }
 
   addArmature(): SceneObject | null {
-    if (!this.beginUndo('Add armature')) return null;
+    if (!this.beginUndo('Add armature', true)) return null;
     const obj = this.scene.add('armature', 'Armature');
     obj.position = this.scene.cursor.clone();
     this.selectObject(obj.id);
