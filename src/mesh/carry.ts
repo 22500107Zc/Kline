@@ -102,6 +102,11 @@ export interface CarryReport {
   /** Faces of the target that received coordinates, and how many were tried. */
   uvFilled: number;
   uvFaces: number;
+  /** Faces whose every corner took a source vertex's own coordinates. */
+  uvCopiedFaces: number;
+  /** Corner samples taken, and how many of those were copies rather than blends. */
+  uvCorners: number;
+  uvCopiedCorners: number;
 }
 
 /**
@@ -126,7 +131,7 @@ export function carryAttributes(from: Mesh, to: Mesh): CarryReport {
   const report: CarryReport = {
     carried: [], attributes: [], uncertain: 0, total: 0, targetVerts: to.vertCount,
     worst: 0, span: 1, median: 0, coincident: false, quality: 'failed',
-    uvFilled: 0, uvFaces: 0,
+    uvFilled: 0, uvFaces: 0, uvCopiedFaces: 0, uvCorners: 0, uvCopiedCorners: 0,
   };
   const wantsSkin = !!from.skin && from.skin.bones.length >= from.vertCount * 4;
   const wantsColors = !!from.colors && from.colors.length >= from.vertCount * 3;
@@ -295,13 +300,32 @@ function carryUV(from: Mesh, to: Mesh, report: CarryReport): void {
   // Counted against the faces that could take coordinates at all: a face with
   // fewer than three corners is not a surface and is never a shortfall.
   report.uvFaces = to.faces.reduce((n, f) => n + (f.length >= 3 ? 1 : 0), 0);
-  const stats: TransferStats = { considered: 0, filled: 0, reseamed: 0 };
+  const stats: TransferStats = {
+    considered: 0, filled: 0, reseamed: 0, corners: 0, copied: 0, copiedFaces: 0,
+  };
   report.uvFilled = transferUV(from, to, false, stats);
   if (report.uvFilled > 0) report.carried.push('UV coordinates');
-  report.attributes.push(attribute('UV coordinates', report.uvFaces, report.uvFilled,
-    stats.reseamed
-      ? [`${stats.reseamed} faces straddled a seam and were re-sampled rather than copied`]
-      : []));
+
+  const lossy: string[] = [];
+  if (stats.reseamed) {
+    lossy.push(`${stats.reseamed} faces straddled a seam and were re-sampled rather than copied`);
+  }
+  // The gap this closes. Seam handling was the only thing recorded here, so a
+  // transfer that never hit a seam was reported as a straight copy — including
+  // the case where the target is a *subdivision* of the source. Those new
+  // vertices sit exactly on the old surface and every face receives
+  // coordinates, so neither the geometry nor the coverage gives anything away;
+  // what they receive is an average of three source corners, and only the
+  // transfer itself is in a position to know that.
+  const interpolated = stats.corners - stats.copied;
+  if (interpolated > 0) {
+    lossy.push(`${interpolated} of ${stats.corners} corners fell between source vertices and `
+      + 'were interpolated rather than copied');
+  }
+  report.uvCopiedFaces = stats.copiedFaces;
+  report.uvCorners = stats.corners;
+  report.uvCopiedCorners = stats.copied;
+  report.attributes.push(attribute('UV coordinates', report.uvFaces, report.uvFilled, lossy));
 }
 
 /**

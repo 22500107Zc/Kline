@@ -32,6 +32,15 @@ interface TriRef {
  * A mesh prepared for closest-point queries, bucketed into a uniform grid so a
  * transfer is not an all-pairs sweep.
  */
+/** How much of the barycentric weight one corner must hold to *be* the point. */
+const AT_A_CORNER = 1 - 1e-9;
+
+/** How far apart two points may be and still be the same point, in world units. */
+const SAME_POINT = 1e-9;
+
+/** How far apart two coordinates may be and still be the same coordinate. */
+const SAME_UV = 1e-9;
+
 export class SurfaceSampler {
   private tris: TriRef[] = [];
   private cells = new Map<number, number[]>();
@@ -161,7 +170,24 @@ export class SurfaceSampler {
   }
 
   /** Coordinates at the point on the surface nearest `p`, or null if unmapped. */
-  sampleUV(p: Vec3): [number, number] | null {
+  /**
+   * Sample coordinates, and say how they were arrived at.
+   *
+   * The plain `sampleUV` blends three source corners by their barycentric
+   * weights and hands back the result, which is right and is also the entire
+   * problem for anything trying to report on the transfer's fidelity: a value
+   * that lands in the middle of a source triangle is an average of three
+   * coordinates, not one of them, and there is no way to tell that from the
+   * answer alone. A caller wanting to claim "these are the coordinates that
+   * were there" needs to know that the sample sat *on* a source vertex and
+   * took that vertex's own value.
+   *
+   * `copied` is that, and it is deliberately strict: the point has to coincide
+   * with the corner in space, the corner has to carry essentially all of the
+   * barycentric weight, and the value handed back has to match what is stored
+   * against that corner. Anything short of all three is an interpolation.
+   */
+  sampleUVAt(p: Vec3): { uv: [number, number]; copied: boolean; distSq: number } | null {
     const hit = this.closest(p);
     if (!hit) return null;
     const uv = this.mesh.uvFor(hit.tri.face);
@@ -172,10 +198,20 @@ export class SurfaceSampler {
     const vb = uv[hit.tri.cb * 2 + 1];
     const uc = uv[hit.tri.cc * 2];
     const vc = uv[hit.tri.cc * 2 + 1];
-    return [
+    const out: [number, number] = [
       ua * hit.u + ub * hit.v + uc * hit.w,
       va * hit.u + vb * hit.v + vc * hit.w,
     ];
+
+    const corners: [number, number, number][] = [
+      [hit.u, ua, va], [hit.v, ub, vb], [hit.w, uc, vc],
+    ];
+    const at = corners.find(([weight]) => weight >= AT_A_CORNER);
+    const copied = !!at
+      && hit.distSq <= SAME_POINT * SAME_POINT
+      && Math.abs(out[0] - at[1]) <= SAME_UV
+      && Math.abs(out[1] - at[2]) <= SAME_UV;
+    return { uv: out, copied, distSq: hit.distSq };
   }
 
   /** Sample every corner of a polygon against one source face, for coherence. */
@@ -221,6 +257,21 @@ export interface TransferStats {
   filled: number;
   /** Faces re-sampled coherently because their corners straddled a seam. */
   reseamed: number;
+  /** Corner samples taken on the direct path. */
+  corners: number;
+  /**
+   * Corner samples that copied a source vertex's own coordinates.
+   *
+   * The rest were blended across a source triangle. That is the ordinary case
+   * and it is correct — a target vertex in the middle of a source face has no
+   * coordinates of its own to inherit — but it is not preservation, and it was
+   * invisible here until it was counted. A subdivided copy of a surface sits
+   * exactly on that surface and covers every face, so nothing about the
+   * geometry or the coverage gave it away.
+   */
+  copied: number;
+  /** Faces whose every corner copied a source vertex, with no re-sampling. */
+  copiedFaces: number;
 }
 
 export function transferUV(
@@ -244,13 +295,19 @@ export function transferUV(
     const points = loop.map((v) => target.positions[v]);
     const run: number[] = [];
     let ok = true;
+    let allCopied = true;
     for (const p of points) {
-      const uv = sampler.sampleUV(p);
-      if (!uv) {
+      const sample = sampler.sampleUVAt(p);
+      if (!sample) {
         ok = false;
         break;
       }
-      run.push(uv[0], uv[1]);
+      if (stats) {
+        stats.corners++;
+        if (sample.copied) stats.copied++;
+      }
+      if (!sample.copied) allCopied = false;
+      run.push(sample.uv[0], sample.uv[1]);
     }
     if (!ok) continue;
 
@@ -281,6 +338,7 @@ export function transferUV(
     }
     target.setUV(f, run);
     filled++;
+    if (stats && allCopied) stats.copiedFaces++;
   }
   if (filled) target.markDirty();
   if (stats) stats.filled = filled;

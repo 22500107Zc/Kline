@@ -298,3 +298,56 @@ test('every attribute asked for gets a verdict, including on a total failure', (
   assert.ok(report.attributes.every((a) => a.outcome === 'failed'));
   assert.equal(report.quality, 'failed');
 });
+
+test('a subdivided coincident surface is resampled, not copied', () => {
+  // One triangle, mapped into a small corner of the map so the transfer takes
+  // the direct path and the seam fallback never runs — the case where the old
+  // report had nothing left to object to.
+  const from = new Mesh();
+  from.positions = [new Vec3(0, 0, 0), new Vec3(1, 0, 0), new Vec3(0, 1, 0)];
+  from.faces = [[0, 1, 2]];
+  from.faceMaterial = [0];
+  from.setUV(0, [0.1, 0.1, 0.3, 0.1, 0.1, 0.3]);
+  from.markDirty();
+
+  // The same triangle, subdivided about a new interior vertex. Every vertex
+  // lies exactly on the source surface, so the geometry could not correspond
+  // more closely — and the middle one is not a source vertex, so its
+  // coordinates are a blend of three that are, not a copy of any.
+  const to = new Mesh();
+  to.positions = [
+    new Vec3(0, 0, 0), new Vec3(1, 0, 0), new Vec3(0, 1, 0), new Vec3(1 / 3, 1 / 3, 0),
+  ];
+  to.faces = [[0, 1, 3], [1, 2, 3], [2, 0, 3]];
+  to.faceMaterial = [0, 0, 0];
+  to.markDirty();
+
+  const report = carryAttributes(from, to);
+
+  // The transfer works: every face gets coordinates.
+  assert.equal(report.uvFilled, 3, 'the transfer did not cover the target');
+  assert.equal(report.uvFaces, 3);
+  assert.equal(report.coincident, true, 'the surfaces do occupy the same space');
+
+  const uv = report.attributes.find((a) => a.name === 'UV coordinates');
+  assert.ok(uv, 'coordinates were asked for and no verdict was recorded');
+  assert.equal(uv.delivered, 3, 'coverage should be complete');
+  assert.equal(uv.outcome, 'resampled',
+    'an interpolated coordinate was reported as a preserved one');
+  assert.ok(uv.lossy.length > 0, 'an interpolated transfer gave no reason');
+  assert.match(uv.lossy.join(' '), /interpolat|between/i);
+
+  assert.notEqual(report.quality, 'exact',
+    'a transfer that interpolated new coordinates claimed exact preservation');
+  const said = describeCarry(report);
+  assert.doesNotMatch(said, /copied from the vertex it belonged to/);
+  assert.doesNotMatch(said, /nothing was approximated/);
+
+  // The interior vertex really did get a blended value: the centroid of the
+  // three source coordinates, which is not any one of them.
+  const face = to.uvFor(0);
+  assert.ok(face, 'the first face got no coordinates');
+  const middle = [face[4], face[5]];
+  assert.ok(Math.abs(middle[0] - (0.1 + 0.3 + 0.1) / 3) < 1e-6, `u was ${middle[0]}`);
+  assert.ok(Math.abs(middle[1] - (0.1 + 0.1 + 0.3) / 3) < 1e-6, `v was ${middle[1]}`);
+});
