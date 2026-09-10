@@ -2594,6 +2594,305 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
       'the renderer kept its cached tints when a different set of faces moved');
   });
 
+  // ------------------------------------- the document is held during a review
+
+  test('every way of editing the document is held while a revision waits', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const bar = window.kline.app.buildBar;
+      bar.focus('a staircase with 8 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      ed.selectObject(root.id);
+      bar.focus('make it 14 steps');
+      await bar.revise();
+      if (!ed.revision.active) return { ok: false, why: 'no revision was staged' };
+
+      const before = JSON.stringify(ed.scene.toJSON());
+      const blocked = {};
+      // Commands: covers menus, the toolbar, the palette and every shortcut.
+      window.kline.run('object.delete');
+      window.kline.run('mesh.subdivide');
+      window.kline.run('file.new');
+      window.kline.run('object.duplicate');
+      window.kline.run('file.importObj');
+      blocked.commands = JSON.stringify(ed.scene.toJSON()) === before;
+
+      // Panels and direct editor calls, which do not go through a command.
+      blocked.addPrimitive = ed.addPrimitive('cube') === null;
+      blocked.addLight = ed.addLight('point') === null;
+      blocked.keyframe = ed.insertKeyframe() === 0;
+      blocked.beginUndo = ed.beginUndo('a panel edit') === false;
+      blocked.editable = ed.editable === false;
+
+      // Another revision request must not stack on this one.
+      bar.focus('make it 20 steps');
+      await bar.revise();
+      blocked.secondRevision = ed.revision.summary.label.includes('14');
+
+      // Saving and autosaving a proposal would put it in the file.
+      const saved = await ed.autosaveNow(false);
+      blocked.autosave = saved === false;
+
+      const untouched = JSON.stringify(ed.scene.toJSON()) === before;
+      ed.revision.reject();
+      return { ok: true, blocked, untouched, afterReject: ed.scene.get(root.id).children.length };
+    });
+
+    assert.equal(out.ok, true, out.why);
+    for (const [what, held] of Object.entries(out.blocked)) {
+      assert.equal(held, true, `${what} was not held while a revision was waiting`);
+    }
+    assert.equal(out.untouched, true, 'something changed the document during a review');
+    assert.equal(out.afterReject, 8, 'reject did not put the staircase back');
+  });
+
+  test('a deleted part stays deleted through revisions, save and reload', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const bar = window.kline.app.buildBar;
+      bar.focus('a staircase with 20 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      const victim = ed.scene.get(root.children[5]);
+      const key = victim.partKey;
+      ed.scene.remove(victim.id);
+
+      const stepKeys = () => ed.scene.get(root.id).children
+        .map((id) => ed.scene.get(id).partKey)
+        .filter((k) => k && k.startsWith('step#'));
+
+      ed.selectObject(root.id);
+      bar.focus('make it red');
+      await bar.revise();
+      const conflicts = ed.revision.summary ? ed.revision.summary.report.conflicts.length : -1;
+      ed.revision.accept();
+      const afterFirst = stepKeys().includes(key);
+
+      bar.focus('make it 22 steps');
+      await bar.revise();
+      if (ed.revision.summary.report.conflicts.length) ed.revision.keepMineForAll();
+      ed.revision.accept();
+      const afterSecond = stepKeys().includes(key);
+
+      const doc = JSON.parse(JSON.stringify(ed.scene.toJSON()));
+      ed.loadSceneJSON(doc);
+      const reopened = [...ed.scene.objects.values()].find((o) => o.provenance);
+      return {
+        key,
+        conflicts,
+        afterFirst,
+        afterSecond,
+        recorded: reopened.provenance.deletedParts || [],
+      };
+    });
+
+    assert.equal(out.conflicts, 0, 'recolouring is no reason to argue about a deletion');
+    assert.equal(out.afterFirst, false, 'the deleted step came back on the first revision');
+    assert.equal(out.afterSecond, false, 'the deleted step came back on the second revision');
+    assert.ok(out.recorded.includes(out.key), 'the deletion did not survive save and reload');
+  });
+
+  test('an edited program revises the selected asset with no model connected', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const bar = window.kline.app.buildBar;
+      // Build from a program by hand — no model, which is the whole point.
+      bar.codeArea.value =
+        "part({shape:'cube', id:'top', name:'Top', at:[0,0,1], size:[2,1,0.1], color:'#8b5e34'});\n"
+        + "part({shape:'cube', id:'leg', name:'Leg', at:[0,0,0.5], size:[0.1,0.1,1], color:'#8b5e34'});";
+      await bar.runCode(bar.codeArea.value, 'your code');
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      if (!root) return { ok: false, why: 'the program built nothing with a record' };
+      const top = root.children.map((id) => ed.scene.get(id)).find((o) => o.name === 'Top');
+      const slot = ed.scene.addMaterial();
+      ed.scene.materials[slot].color = [0.1, 0.8, 0.3];
+      top.materialSlots = [slot];
+      const widthBefore = top.mesh.bounds().size().x;
+
+      // Edit the program and revise the same asset with it.
+      ed.selectObject(root.id);
+      bar.codeArea.value = bar.codeArea.value.replace('size:[2,1,0.1]', 'size:[5,1,0.1]');
+      const hasButton = [...document.querySelectorAll('.build-code .btn-row button')]
+        .some((b) => /Preview Revision/.test(b.textContent));
+      await bar.reviseFromCode();
+      const staged = !!ed.revision.summary;
+      const undoBefore = ed.history.depth;
+      if (staged && ed.revision.summary.report.conflicts.length) ed.revision.keepMineForAll();
+      ed.revision.accept();
+
+      const after = ed.scene.get(root.id);
+      const topAfter = after.children.map((id) => ed.scene.get(id)).find((o) => o.name === 'Top');
+      const result = {
+        ok: true,
+        hasButton,
+        staged,
+        sameObject: topAfter.id === top.id,
+        widthBefore,
+        widthAfter: topAfter.mesh.bounds().size().x,
+        materialKept: topAfter.materialSlots[0] === slot,
+        oneStep: ed.history.depth - undoBefore,
+        codeRecorded: (after.provenance.code || '').includes('5,1,0.1'),
+      };
+      ed.undo();
+      result.undoneWidth = ed.scene.get(root.id).children
+        .map((id) => ed.scene.get(id)).find((o) => o.name === 'Top').mesh.bounds().size().x;
+      ed.redo();
+      result.redoneWidth = ed.scene.get(root.id).children
+        .map((id) => ed.scene.get(id)).find((o) => o.name === 'Top').mesh.bounds().size().x;
+      return result;
+    });
+
+    assert.equal(out.ok, true, out.why);
+    assert.equal(out.hasButton, true, 'there is no button to revise from the code panel');
+    assert.equal(out.staged, true, 'the edited program did not stage a revision');
+    assert.equal(out.sameObject, true, 'it built a new object instead of revising this one');
+    assert.ok(out.widthAfter > out.widthBefore + 2, 'the edited program was not applied');
+    assert.equal(out.materialKept, true, 'your material was lost');
+    assert.equal(out.oneStep, 1, `accepting cost ${out.oneStep} undo steps`);
+    assert.equal(out.codeRecorded, true, 'the accepted program was not recorded');
+    assert.ok(Math.abs(out.undoneWidth - out.widthBefore) < 1e-6, 'undo did not restore the shape');
+    assert.ok(Math.abs(out.redoneWidth - out.widthAfter) < 1e-6, 'redo did not reapply it');
+  });
+
+  test('a transform disagreement offers both values and settles at that scope', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const ed = window.kline.editor;
+      const bar = window.kline.app.buildBar;
+      bar.focus('a staircase with 8 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      const moved = ed.scene.get(root.children[3]);
+      moved.position.x = 7;
+      moved.name = 'My step';
+
+      ed.selectObject(root.id);
+      bar.focus('make it much bigger');
+      await bar.revise();
+      const summary = ed.revision.summary;
+      const conflict = summary.report.conflicts.find(
+        (c) => c.objectId === moved.id && c.field === 'position',
+      );
+      // The panel must show what each choice costs, not just its name.
+      const labels = [...document.querySelectorAll('.revision-conflict .btn')]
+        .map((b) => b.textContent);
+      const acceptDisabled = !!document.querySelector('.revision-actions .btn.primary.disabled');
+      const hasKeepAll = [...document.querySelectorAll('.revision-actions button')]
+        .some((b) => /Keep my versions for all/.test(b.textContent));
+      return {
+        found: !!conflict,
+        yours: conflict && conflict.yours,
+        theirs: conflict && conflict.theirs,
+        labels: labels.filter((t) => /Keep mine|Use revised/.test(t)).slice(0, 4),
+        acceptDisabled,
+        hasKeepAll,
+        nameStillMine: ed.scene.get(moved.id).name === 'My step',
+        positionUntouched: ed.scene.get(moved.id).position.x === 7,
+      };
+    });
+
+    assert.equal(out.found, true, 'the placement disagreement was decided silently');
+    assert.ok(out.yours && /7/.test(out.yours), `"keep mine" does not show your value: ${out.yours}`);
+    assert.ok(out.theirs, '"use revised" does not show what it would set');
+    assert.ok(out.labels.some((t) => /Keep mine —/.test(t)),
+      `the buttons do not say what they will do: ${out.labels.join(' | ')}`);
+    assert.equal(out.acceptDisabled, true, 'accept was offered with conflicts open');
+    assert.equal(out.hasKeepAll, true, 'there is no way to settle the rest in one action');
+    assert.equal(out.positionUntouched, true, 'a disputed value was written before it was settled');
+    assert.equal(out.nameStillMine, true, 'an undisputed field was reset');
+  });
+
+  test('an image-derived asset is reopened and revised from the saved file alone', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const c = document.createElement('canvas');
+      c.width = 160; c.height = 160;
+      const g = c.getContext('2d');
+      g.fillStyle = '#000'; g.fillRect(0, 0, c.width, c.height);
+      g.fillStyle = '#fff';
+      g.beginPath(); g.arc(80, 80, 52, 0, Math.PI * 2); g.fill();
+      const blob = await new Promise((ok) => c.toBlob(ok, 'image/png'));
+      window.kline.app.properties.openCreate(new File([blob], 'badge.png', { type: 'image/png' }));
+
+      const ed = window.kline.editor;
+      for (let i = 0; i < 200 && ed.scene.objects.size === 0; i++) {
+        await new Promise((ok) => setTimeout(ok, 50));
+      }
+      const panel = window.kline.app.properties.create;
+      [...document.querySelectorAll('.mode-btn')].find((b) => b.textContent.trim() === 'Cut Out').click();
+      panel.mask.channel = 'luma';
+      panel.mask.threshold = 0.5;
+      // Two correction marks, which are what rescue a picture colour cannot
+      // separate — and which must therefore survive the file.
+      const bm = panel.bitmap;
+      const hints = new Uint8Array(bm.width * bm.height);
+      for (let y = 10; y < 20; y++) for (let x = 10; x < 20; x++) hints[y * bm.width + x] = 2;
+      panel.hints = hints;
+      panel.generate(true);
+      await new Promise((ok) => setTimeout(ok, 300));
+
+      const object = ed.scene.get(panel.targetId);
+      if (!object || !object.provenance) return { ok: false, why: 'no reference asset was recorded' };
+      object.position.x = 3.5;
+      const slot = ed.scene.addMaterial();
+      ed.scene.materials[slot].color = [0.2, 0.4, 0.9];
+      object.materialSlots = [slot];
+      const depthBefore = object.mesh.bounds().size().y;
+
+      // Save, and reopen as a completely fresh document — the panel keeps no
+      // bitmap, no target and no reference across this.
+      const doc = JSON.parse(JSON.stringify(ed.scene.toJSON()));
+      ed.loadSceneJSON(doc);
+      panel.reference = null;
+      panel.bitmap = null;
+      panel.targetId = null;
+      panel.hints = null;
+
+      const reopened = [...ed.scene.objects.values()].find(
+        (o) => o.provenance && o.provenance.source === 'reference',
+      );
+      if (!reopened) return { ok: false, why: 'the reference asset did not survive the reload' };
+      ed.selectObject(reopened.id);
+
+      const adopted = await panel.adoptAsset(reopened);
+      const marks = panel.hints ? panel.hints.reduce((n, v) => n + (v === 2 ? 1 : 0), 0) : 0;
+
+      // Revise its extrusion depth from the reopened settings.
+      panel.silhouette.depth = 1.4;
+      panel.reviseFromSettings();
+      const staged = !!ed.revision.summary;
+      if (staged && ed.revision.summary.report.conflicts.length) ed.revision.keepMineForAll();
+      ed.revision.accept();
+      const after = ed.scene.get(reopened.id);
+      return {
+        ok: true,
+        adopted,
+        mode: panel.mode,
+        threshold: panel.mask.threshold,
+        marks,
+        staged,
+        depthBefore,
+        depthAfter: after.mesh.bounds().size().y,
+        placementKept: Math.abs(after.position.x - 3.5) < 1e-6,
+        materialKept: after.materialSlots[0] === slot,
+      };
+    });
+
+    assert.equal(out.ok, true, out.why);
+    assert.equal(out.adopted, true, 'the saved asset could not be reopened from the file');
+    assert.equal(out.mode, 'silhouette', 'the conversion mode did not come back');
+    assert.equal(out.threshold, 0.5, 'the conversion settings did not come back');
+    assert.ok(out.marks > 50, `the correction marks did not survive the file (${out.marks} left)`);
+    assert.equal(out.staged, true, 'the rebuild was not staged for review');
+    assert.ok(Math.abs(out.depthAfter - 1.4) < 0.01, `the revision did not apply (${out.depthAfter})`);
+    assert.equal(out.placementKept, true, 'your placement was reset');
+    assert.equal(out.materialKept, true, 'your material was replaced');
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

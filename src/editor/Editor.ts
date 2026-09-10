@@ -551,9 +551,36 @@ export class Editor {
     };
   }
 
-  /** Record the pre-edit state so the next operation is undoable. */
-  beginUndo(label: string): void {
+  /**
+   * Record the pre-edit state so the next operation is undoable.
+   *
+   * Returns false when the edit must not happen at all, which today means one
+   * thing: a revision is being reviewed. While a proposal is on screen the
+   * document is held — the scene you are looking at is not one anybody has
+   * agreed to yet, so an edit made on top of it would either be destroyed by
+   * Reject or swept into Accept, and neither is something a person asked for.
+   *
+   * Returning a value rather than throwing because these are all UI event
+   * handlers, and the honest response to "you cannot do that yet" is to say so
+   * and do nothing.
+   */
+  beginUndo(label: string): boolean {
+    if (this.revision.active) {
+      this.setStatus(
+        `"${label}" is held while a revision is waiting — accept or reject it first.`,
+      );
+      return false;
+    }
     this.history.push(this.snapshot(label));
+    return true;
+  }
+
+  /**
+   * Whether the document can be edited right now, for callers that mutate
+   * without an undo step of their own.
+   */
+  get editable(): boolean {
+    return !this.revision.active;
   }
 
   restore(s: EditorSnapshot): void {
@@ -713,9 +740,9 @@ export class Editor {
     this.changed();
   }
 
-  addPrimitive(kind: PrimitiveKind): SceneObject {
+  addPrimitive(kind: PrimitiveKind): SceneObject | null {
     const label = PRIMITIVES.find((p) => p.kind === kind)?.label ?? kind;
-    this.beginUndo(`Add ${label}`);
+    if (!this.beginUndo(`Add ${label}`)) return null;
     const obj = this.scene.add('mesh', label, buildPrimitive(kind));
     obj.position = this.scene.cursor.clone();
     this.selectObject(obj.id);
@@ -723,8 +750,8 @@ export class Editor {
     return obj;
   }
 
-  addLight(type: LightType): SceneObject {
-    this.beginUndo('Add light');
+  addLight(type: LightType): SceneObject | null {
+    if (!this.beginUndo('Add light')) return null;
     const obj = this.scene.add('light', type[0].toUpperCase() + type.slice(1));
     if (obj.light) obj.light.type = type;
     obj.position = this.scene.cursor.add(new Vec3(0, 0, 3));
@@ -732,8 +759,8 @@ export class Editor {
     return obj;
   }
 
-  addCamera(): SceneObject {
-    this.beginUndo('Add camera');
+  addCamera(): SceneObject | null {
+    if (!this.beginUndo('Add camera')) return null;
     const obj = this.scene.add('camera', 'Camera');
     obj.position = this.camera.eye();
     const f = this.camera.forward();
@@ -742,16 +769,16 @@ export class Editor {
     return obj;
   }
 
-  addEmpty(): SceneObject {
-    this.beginUndo('Add empty');
+  addEmpty(): SceneObject | null {
+    if (!this.beginUndo('Add empty')) return null;
     const obj = this.scene.add('empty', 'Empty');
     obj.position = this.scene.cursor.clone();
     this.selectObject(obj.id);
     return obj;
   }
 
-  addArmature(): SceneObject {
-    this.beginUndo('Add armature');
+  addArmature(): SceneObject | null {
+    if (!this.beginUndo('Add armature')) return null;
     const obj = this.scene.add('armature', 'Armature');
     obj.position = this.scene.cursor.clone();
     this.selectObject(obj.id);
@@ -788,7 +815,7 @@ export class Editor {
     const bones = obj.armature.bones;
     const parent = Math.min(Math.max(0, this.activeBone), bones.length - 1);
     const from = bones[parent];
-    this.beginUndo('Add bone');
+    if (!this.beginUndo('Add bone')) return;
     const head = from.tail;
     const dir = [
       from.tail[0] - from.head[0],
@@ -829,7 +856,7 @@ export class Editor {
       this.setStatus('Select at least one mesh as well as the armature');
       return;
     }
-    this.beginUndo('Bind to armature');
+    if (!this.beginUndo('Bind to armature')) return;
     const rigWorld = rig.worldMatrix(this.scene);
     for (const obj of meshes) {
       const toArmature = rigWorld.inverse().multiply(obj.worldMatrix(this.scene));
@@ -856,7 +883,7 @@ export class Editor {
       this.setStatus('Select an armature first');
       return;
     }
-    this.beginUndo('Clear pose');
+    if (!this.beginUndo('Clear pose')) return;
     clearPose(rig.armature);
     for (const o of this.scene.objects.values()) {
       if (o.modifiers.some((m) => m.type === 'armature' && m.objectId === rig.id)) {
@@ -884,7 +911,7 @@ export class Editor {
     const snapshot = this.captureTransform();
     if (!snapshot) return;
     if (pushUndo) {
-      this.beginUndo(kind === 'translate' ? 'Move' : kind === 'rotate' ? 'Rotate' : 'Scale');
+      if (!this.beginUndo(kind === 'translate' ? 'Move' : kind === 'rotate' ? 'Rotate' : 'Scale')) return;
     }
     const session = new TransformSession(
       kind, pivot, this.camera, this.viewport(), this.pointer.x, this.pointer.y,
@@ -990,7 +1017,7 @@ export class Editor {
       this.setStatus('Inset needs a face selection');
       return;
     }
-    this.beginUndo('Inset');
+    if (!this.beginUndo('Inset')) return;
     this.modal = {
       type: 'inset',
       baseline: mesh.clone(),
@@ -1077,7 +1104,7 @@ export class Editor {
       this.emit('modal');
       return;
     }
-    this.beginUndo('Loop Cut');
+    if (!this.beginUndo('Loop Cut')) return;
     const r = loopCut(mesh, edge, cuts);
     this.selection.verts = new Set(r.newVerts);
     this.syncSelection('vertex');
@@ -1145,7 +1172,7 @@ export class Editor {
     const t = mesh.topology();
     const normalMat = model.normalMatrix();
 
-    this.beginUndo('Knife');
+    if (!this.beginUndo('Knife')) return;
     const result = knifeCut(mesh, {
       project: (p) => {
         const s = this.camera.worldToScreen(model.transformPoint(p), view.width, view.height);
@@ -1190,7 +1217,7 @@ export class Editor {
       this.setStatus('Select edges or faces to bevel');
       return;
     }
-    this.beginUndo('Bevel');
+    if (!this.beginUndo('Bevel')) return;
     this.modal = {
       type: 'bevel',
       state: {
@@ -1381,7 +1408,7 @@ export class Editor {
     if (!obj || !mesh) return false;
     const hit = this.sculptHit(x, y);
     if (!hit) return false;
-    this.beginUndo(`Sculpt ${this.sculpt.brush}`);
+    if (!this.beginUndo(`Sculpt ${this.sculpt.brush}`)) return false;
     this.sculpt.invert = invert;
     if (this.sculpt.brush === 'texture') {
       if (!this.paintTextureAt(hit.local, hit.radius)) {
@@ -1459,7 +1486,7 @@ export class Editor {
       this.setStatus('Select something to key');
       return 0;
     }
-    this.beginUndo('Insert keyframe');
+    if (!this.beginUndo('Insert keyframe')) return 0;
     const frame = this.scene.timeline.current;
     const paths: ChannelPath[] = which === 'all' ? ['position', 'rotation', 'scale'] : [which];
     for (const obj of objects) {
@@ -1478,7 +1505,7 @@ export class Editor {
   deleteKeyframe(): number {
     const objects = this.scene.selectedObjects();
     if (objects.length === 0) return 0;
-    this.beginUndo('Delete keyframe');
+    if (!this.beginUndo('Delete keyframe')) return 0;
     let n = 0;
     for (const obj of objects) n += removeKey(obj.animation, this.scene.timeline.current);
     this.setStatus(n ? `Removed ${n} key${n === 1 ? '' : 's'}` : 'No key on this frame');
@@ -1841,7 +1868,7 @@ export class Editor {
     if (e.button === 2 && e.shiftKey) {
       const hit = raycastGround(this.camera, p.x, p.y, this.viewport());
       if (hit) {
-        this.beginUndo('Move 3D cursor');
+        if (!this.beginUndo('Move 3D cursor')) return;
         this.scene.cursor = hit;
         this.changed();
       }

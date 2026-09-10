@@ -95,6 +95,18 @@ whole. Accept pushes that held snapshot as one undo entry; reject restores it an
 leaves the history untouched. Nothing else may write to an asset while a preview
 is pending.
 
+**Nothing edits the document while a revision is being reviewed.**
+`editor.beginUndo()` returns `false` then, and every caller must respect it —
+that is why it returns a value rather than nothing. `runCommand` refuses
+outright for anything that is not a view action. If you add a mutation path
+that does not go through either, guard it explicitly and add it to the
+transaction-boundary test in `tests/app.test.mjs`.
+
+**Missing evidence is not permission.** The merge may only call a part
+unedited when the baseline actually recorded enough to check. `BASELINE_VERSION`
+says how much was recorded; when it is short, the answer is a conflict, never a
+deletion.
+
 **A new build recipe is a function and a keyword.** Add it to `RECIPES` in
 `src/build/recipes.ts`; the tests then check automatically that it is reachable
 from a prompt, sits on the ground and has plausible dimensions.

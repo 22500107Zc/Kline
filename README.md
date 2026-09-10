@@ -239,6 +239,17 @@ tells you what it kept, what it changed, and anything it could not reconcile.
 **Accept** keeps it as a single undo step. **Reject** puts the scene back
 exactly as it was, with nothing left in the history.
 
+### The document is held while you review
+
+A staged revision is applied to the scene so you can see it, and the scene as
+it was is held whole. That only stays honest if nothing else edits the document
+in between — otherwise Reject destroys work nobody offered up, and Accept
+sweeps in changes nobody meant to include. So while a proposal is on screen the
+document is held: editing, adding, importing, saving, autosaving, exporting,
+opening a file, starting a new one and starting a second revision all decline
+and say why. Orbiting, framing, shading and the comparison view keep working,
+because reviewing needs them.
+
 ### What is kept automatically
 
 The trick is that there are three versions of every part in play, not two: what
@@ -261,6 +272,53 @@ matching on array position or display name. Twenty steps becoming thirty keeps
 `step#1`–`step#20` and adds ten; thirty becoming twenty removes the top ten
 instead of renumbering everything.
 
+A generated program can do better than that, and should: give a part an `id`
+and it keeps that identity through renaming and reordering, which recipes get
+for free and programs do not.
+
+```js
+part({ shape: 'cube', id: 'top', name: 'Tabletop', at: [0, 0, 0.75], size: [1.6, 0.9, 0.06] });
+```
+
+Parts with no id are matched by the order they are created in, which is a guess
+the moment a program reorders itself — so that is said out loud rather than
+presented as a match. Two parts sharing an id are not silently picked between:
+both are flagged and treated as uncertain, because either choice would attach
+somebody's material to the wrong thing.
+
+### Deleting a generated part is a decision
+
+Delete a step and it stays deleted. Not just this revision — the next one, the
+one after that, and after a save and a reload. The deletion is recorded in the
+file, so it is something you did once rather than a chore you repeat.
+
+Five cases, spelled out:
+
+| | |
+|---|---|
+| Never existed, the revision adds it | genuinely new |
+| You deleted it, the revision leaves it alone | stays deleted |
+| You deleted it, the revision *changes* it | conflict — stays deleted until you ask for it back |
+| You both dropped it | stays deleted, no argument |
+| You changed it, the revision removes it | conflict — kept until you say otherwise |
+
+Bringing one back is a choice you make, in the panel, per part.
+
+### Fields disagree one at a time
+
+Shape, name, position, rotation and scale are five separate decisions, and each
+one gets the same three-way treatment: only the generator moved it, take
+theirs; only you moved it, keep yours; you both moved it to the *same* place,
+no argument; you both moved it differently, that is a conflict and it says so.
+
+Conflicts resolve at the scope they are about. Choosing the revised geometry
+does not also reset a name you chose or a placement you set — those are
+different arguments, and you may not be having them.
+
+Each choice shows what it will actually do: *Keep mine — 6, 0.56, 0.27* next to
+*Use revised — 0, 1.008, 0.486*, rather than two buttons whose consequences you
+have to guess at.
+
 ### What causes an explicit conflict
 
 Not everything can survive a regeneration, and Kline does not pretend otherwise.
@@ -281,6 +339,17 @@ So those are conflicts, and they are reported as conflicts:
 - **No baseline was recorded**, so your edits cannot be told apart from the
   generator's. Everything is offered as the generator made it, and the panel
   says so.
+- **The record predates Kline storing materials, modifiers and animation**, so
+  a part cannot be *shown* to be unedited. Missing evidence is not permission:
+  it is kept and flagged rather than deleted on an assumption.
+- **A removal would take work of yours with it** — anything you modelled and
+  parented under the part being removed. Agreeing to the removal lifts your
+  work clear and keeps it where it was in the world.
+
+Nothing is written to a disputed field until it is answered, and a revision
+with anything unanswered cannot be accepted. There is one action to settle the
+rest — *Keep my versions for all remaining* — and taking it is recorded as an
+override rather than as agreement.
 
 Nothing is applied to a conflicted part. Your version is what stays in the
 scene, and you choose per object: **Keep mine**, **Use the revised one**, **Keep
@@ -313,10 +382,13 @@ this was built from (logo.png) is not in this file"*.
   Nothing is asked to reinvent a staircase, so nothing else silently changes.
   A request that names no setting the object actually has says so rather than
   quietly doing nothing.
-- **Generated programs** revise by editing the program, which needs a model or
-  you. The existing program goes to the model with the request and an
-  instruction to change as little as possible. Without a model, press **Code**,
-  change it and run it.
+- **Generated programs** revise by editing the program — with a model, or by
+  hand. Press **Code** and the selected asset's own program is loaded. Edit it
+  and press **Preview Revision of Selected**: it goes through the same merge,
+  preview and accept as everything else, keeping the asset's identity and your
+  edits to it. **Run as New** is the other button, for when you want a second
+  object rather than a revision. No model, account or network is needed for
+  either.
 - **Reference images** revise from the Create panel, where the picture and its
   settings are. Sliders rebuild in place while the model is still exactly what
   those settings made — there is nothing at risk. Once you have edited it, or

@@ -30,7 +30,22 @@ import { SerializedObject } from '../scene/Scene';
  */
 
 /** Bumped when the shape of what is stored changes. */
-export const PROVENANCE_SCHEMA = 1;
+export const PROVENANCE_SCHEMA = 2;
+
+/**
+ * How complete a recorded baseline is.
+ *
+ * Version 1 wrote down a part's geometry, transform and name and nothing else,
+ * which is enough to know that a shape moved and not enough to know that
+ * somebody recoloured it, hung a modifier on it or keyed an animation onto it.
+ * A regeneration that removes such a part would have called it untouched and
+ * deleted it.
+ *
+ * So the completeness is recorded rather than assumed. A baseline that predates
+ * the fuller record cannot prove a part is unedited, and the merge treats
+ * "cannot prove" as a conflict rather than as permission.
+ */
+export const BASELINE_VERSION = 2;
 
 /** Bumped when a generator's output changes for the same input. */
 export const GENERATOR_VERSION = 1;
@@ -53,6 +68,31 @@ export interface BaselinePart {
   mesh: SerializedMesh | null;
   /** The colour the generator asked for, so a recoloured part is detectable. */
   color?: string;
+
+  // Everything below arrived with BASELINE_VERSION 2. Recorded because the
+  // question "has the creator touched this?" cannot be answered from geometry
+  // alone, and answering it wrongly is how a regeneration deletes somebody's
+  // afternoon.
+
+  /** Which material slots the part pointed at. */
+  materialSlots?: number[];
+  /**
+   * The material definitions those slots held, resolved.
+   *
+   * Slots are indices into a shared list: editing a material changes what
+   * every object using it looks like without changing any object. Comparing
+   * indices alone would miss that entirely, so the values travel too.
+   */
+  materials?: unknown[];
+  modifiers?: unknown[];
+  animation?: unknown[];
+  visible?: boolean;
+  locked?: boolean;
+  protectedFromRegen?: boolean;
+  /** The part's own key its parent had, or null when the parent is the root. */
+  parentKey?: string | null;
+  /** Keys of the generated parts that hung under it. */
+  childKeys?: string[];
 }
 
 /**
@@ -67,6 +107,13 @@ export interface BaselinePart {
 export interface Baseline {
   parts?: BaselinePart[];
   mesh?: SerializedMesh | null;
+  /**
+   * How much of each part was recorded — see `BASELINE_VERSION`.
+   *
+   * Absent or 1 means geometry, transform and name only. The merge reads this
+   * and refuses to call anything unedited that it cannot actually check.
+   */
+  version?: number;
 }
 
 /** The source image a reference-derived asset was built from. */
@@ -110,6 +157,18 @@ export interface Provenance {
   seed?: number;
   reference?: ReferenceOrigin;
   baseline: Baseline;
+  /**
+   * Parts the creator deleted on purpose.
+   *
+   * Deleting a generated part is a decision, and without somewhere to write it
+   * down the next regeneration cannot tell it from a part that has not been
+   * made yet — so it makes it again, and again, every revision, for ever. This
+   * is that record: it is written when a revision is accepted, it is saved in
+   * the file, and the generator is not allowed to quietly undo it.
+   *
+   * Restoring a deleted part stays available, as a choice somebody makes.
+   */
+  deletedParts?: string[];
   createdAt: number;
   /** Bumped on every accepted revision, for the history line. */
   revision: number;
@@ -175,6 +234,71 @@ export function assignPartKeys(names: (string | undefined)[]): string[] {
   });
 }
 
+/** How a part got the identity it has, which decides how much to trust it. */
+export type KeySource = 'declared' | 'derived';
+
+export interface AssignedKeys {
+  keys: string[];
+  source: KeySource[];
+  /**
+   * Anything about the identities that a person should be told.
+   *
+   * A duplicated id is the important one: two parts claiming to be the same
+   * part is not something to resolve by picking, because either choice
+   * silently attaches somebody's work to the wrong thing.
+   */
+  problems: string[];
+}
+
+/**
+ * Identities for a list of parts, preferring what the program declared.
+ *
+ * A declared id is kept exactly, because that is the whole point of it: the
+ * same id in an edited program means the same part, however the list was
+ * reordered or renamed in between. Anything without one falls back to role and
+ * ordinal, which is right for a recipe and a guess for a program.
+ *
+ * A duplicate is not silently disambiguated. Two parts under one id have no
+ * defined correspondence, and pretending otherwise is exactly how a material
+ * ends up on the wrong leg — so both are pushed out of the declared namespace
+ * and reported, and the merge treats them as uncertain.
+ */
+export function assignIdentities(
+  parts: { id?: string; name?: string }[],
+): AssignedKeys {
+  const problems: string[] = [];
+  const counts = new Map<string, number>();
+  for (const p of parts) {
+    if (!p.id) continue;
+    counts.set(p.id, (counts.get(p.id) ?? 0) + 1);
+  }
+  const duplicated = [...counts.entries()].filter(([, n]) => n > 1).map(([id]) => id);
+  if (duplicated.length) {
+    problems.push(
+      `${duplicated.length} identifier(s) are used more than once (${duplicated.slice(0, 4).join(', ')}). `
+      + 'Parts sharing an identifier cannot be matched up reliably, so those are matched by '
+      + 'position instead and flagged.',
+    );
+  }
+
+  const usable = (id: string | undefined): boolean => !!id && !duplicated.includes(id);
+  const derivedNames = parts.map((p) => (usable(p.id) ? undefined : p.name));
+  const fallback = assignPartKeys(derivedNames);
+
+  const keys: string[] = [];
+  const source: KeySource[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    if (usable(parts[i].id)) {
+      keys.push(`id:${parts[i].id}`);
+      source.push('declared');
+    } else {
+      keys.push(fallback[i]);
+      source.push('derived');
+    }
+  }
+  return { keys, source, problems };
+}
+
 const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 function triple(v: unknown, fallback: number): [number, number, number] {
@@ -234,7 +358,7 @@ export function normaliseProvenance(raw: unknown): Provenance | null {
     if (!entry || typeof entry !== 'object') continue;
     const bp = entry as Partial<BaselinePart>;
     if (typeof bp.key !== 'string' || !bp.key) continue;
-    parts.push({
+    const part: BaselinePart = {
       key: bp.key,
       name: typeof bp.name === 'string' ? bp.name : bp.key,
       position: triple(bp.position, 0),
@@ -242,7 +366,23 @@ export function normaliseProvenance(raw: unknown): Provenance | null {
       scale: triple(bp.scale, 1),
       mesh: serializedMesh(bp.mesh),
       color: typeof bp.color === 'string' ? bp.color : undefined,
-    });
+    };
+    // Kept only when present, so a record written by an older version stays
+    // byte-identical through a reload and does not look like a change.
+    if (Array.isArray(bp.materialSlots)) {
+      part.materialSlots = bp.materialSlots.filter((i) => Number.isInteger(i));
+    }
+    if (Array.isArray(bp.materials)) part.materials = bp.materials;
+    if (Array.isArray(bp.modifiers)) part.modifiers = bp.modifiers;
+    if (Array.isArray(bp.animation)) part.animation = bp.animation;
+    if (typeof bp.visible === 'boolean') part.visible = bp.visible;
+    if (typeof bp.locked === 'boolean') part.locked = bp.locked;
+    if (typeof bp.protectedFromRegen === 'boolean') part.protectedFromRegen = bp.protectedFromRegen;
+    if (typeof bp.parentKey === 'string' || bp.parentKey === null) part.parentKey = bp.parentKey;
+    if (Array.isArray(bp.childKeys)) {
+      part.childKeys = bp.childKeys.filter((k): k is string => typeof k === 'string');
+    }
+    parts.push(part);
   }
 
   let reference: ReferenceOrigin | undefined;
@@ -266,6 +406,7 @@ export function normaliseProvenance(raw: unknown): Provenance | null {
   if (parts.length) baseline.parts = parts;
   const baseMesh = serializedMesh(rawBase.mesh);
   if (baseMesh) baseline.mesh = baseMesh;
+  if (isFiniteNumber(rawBase.version)) baseline.version = rawBase.version;
 
   return {
     schema: isFiniteNumber(p.schema) ? p.schema : 0,
@@ -279,6 +420,9 @@ export function normaliseProvenance(raw: unknown): Provenance | null {
     seed: isFiniteNumber(p.seed) ? p.seed : undefined,
     reference,
     baseline,
+    deletedParts: Array.isArray(p.deletedParts)
+      ? [...new Set(p.deletedParts.filter((k): k is string => typeof k === 'string' && !!k))]
+      : undefined,
     createdAt: isFiniteNumber(p.createdAt) ? p.createdAt : 0,
     revision: isFiniteNumber(p.revision) ? Math.max(0, Math.floor(p.revision)) : 0,
   };
@@ -328,4 +472,22 @@ export function regenerability(p: Provenance | null): { can: boolean; why: strin
 export function hasBaseline(p: Provenance | null): boolean {
   if (!p) return false;
   return !!(p.baseline.parts?.length || p.baseline.mesh);
+}
+
+/**
+ * Whether a baseline records enough to prove a part is untouched.
+ *
+ * The honest answer for anything written before the fuller record existed is
+ * no — it can show that the geometry and the transform still match and say
+ * nothing at all about the material, the modifiers or the animation. Callers
+ * use this to choose a conflict over a deletion, which is the only safe way
+ * round missing evidence.
+ */
+export function baselineProves(baseline: Baseline | null | undefined): boolean {
+  return (baseline?.version ?? 1) >= BASELINE_VERSION;
+}
+
+/** Whether a part key is recorded as deliberately deleted. */
+export function isDeleted(prov: Provenance | null | undefined, key: string): boolean {
+  return !!prov?.deletedParts?.includes(key);
 }

@@ -238,7 +238,7 @@ export class UVEditor {
           startV: v,
           origin: this.points.map((p) => [p.u, p.v] as [number, number]),
         };
-        this.editor.beginUndo('Move UV');
+        if (!this.editor.beginUndo('Move UV')) return;
       } else {
         if (!e.shiftKey) this.selected.clear();
         this.drag = { kind: 'box', x0: x, y0: y, x1: x, y1: y };

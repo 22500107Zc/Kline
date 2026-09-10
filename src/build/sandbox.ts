@@ -46,13 +46,14 @@ function buildParts(code, maxParts) {
     return isFinite(v) ? v : fallback;
   }
 
-  function push(shape, x, y, z, w, d, h, color, rot, name) {
+  function push(shape, x, y, z, w, d, h, color, rot, name, id) {
     if (parts.length >= maxParts) {
       throw new Error('This program tried to make more than ' + maxParts + ' parts.');
     }
     parts.push({
       shape: shape,
       name: name || undefined,
+      id: typeof id === 'string' && id ? id : undefined,
       position: [num(x, 0), num(y, 0), num(z, 0)],
       size: [Math.abs(num(w, 1)) || 0.001, Math.abs(num(d, 1)) || 0.001, Math.abs(num(h, 1)) || 0.001],
       rotation: rot ? [num(rot[0], 0), num(rot[1], 0), num(rot[2], 0)] : undefined,
@@ -75,7 +76,7 @@ function buildParts(code, maxParts) {
       var at = spec.at || spec.position || [0, 0, 0];
       var size = spec.size || [1, 1, 1];
       push(spec.shape || 'cube', at[0], at[1], at[2], size[0], size[1], size[2],
-        spec.color, spec.rot || spec.rotation, spec.name);
+        spec.color, spec.rot || spec.rotation, spec.name, spec.id);
     },
     log: function () {
       if (log.length < 40) log.push(Array.prototype.join.call(arguments, ' '));
@@ -131,13 +132,19 @@ and x/y/z is always the CENTRE of the part):
   cone(x, y, z, width, depth, height, color)     // point upward
   torus(x, y, z, width, depth, height, color)
   plane(x, y, z, width, depth, color)
-  part({shape, at:[x,y,z], size:[w,d,h], rot:[rx,ry,rz], color, name})   // rot in degrees
+  part({shape, at:[x,y,z], size:[w,d,h], rot:[rx,ry,rz], color, name, id})   // rot in degrees
   log(...)                                        // shows in the panel
 
 Also in scope: PI, TAU, sin, cos, tan, atan2, abs, min, max, round, floor,
 ceil, sqrt, pow, hypot, sign, Math, random() (seeded, so results repeat).
 
-Colors are hex strings like '#8b5e34'.`;
+Colors are hex strings like '#8b5e34'.
+
+Give every part a stable "id" when you can — a short name like 'top' or
+'leg-3'. It is how an edited version of this program is matched up with the
+model already in the scene, so somebody's material and placement survive a
+revision. Ids must be unique within one program. If you are editing an
+existing program, keep the ids exactly as they are.`;
 
 interface HarnessResult {
   parts: unknown[];

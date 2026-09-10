@@ -121,7 +121,7 @@ function editOp(ed: Editor, label: string, fn: (mesh: Mesh) => void): void {
   const obj = ed.editObject;
   const mesh = ed.editMesh;
   if (!obj || !mesh) return;
-  ed.beginUndo(label);
+  if (!ed.beginUndo(label)) return;
   // Anything the operator cannot carry exactly is resampled off the pre-edit
   // surface, so an unwrapped model survives being modelled on.
   preserveUV(mesh, () => fn(mesh));
@@ -133,7 +133,7 @@ function editOp(ed: Editor, label: string, fn: (mesh: Mesh) => void): void {
 }
 
 function objectOp(ed: Editor, label: string, fn: (scene: Scene) => void): void {
-  ed.beginUndo(label);
+  if (!ed.beginUndo(label)) return;
   fn(ed.scene);
   for (const id of ed.scene.objects.keys()) ed.renderer.invalidate(id);
   ed.emit('change');
@@ -146,7 +146,7 @@ export const COMMANDS: Command[] = [
   {
     id: 'file.new', label: 'New Scene', category: 'File',
     run: (ed) => {
-      ed.beginUndo('New scene');
+      if (!ed.beginUndo('New scene')) return;
       ed.newScene();
       ed.setStatus('New scene');
     },
@@ -343,7 +343,7 @@ export const COMMANDS: Command[] = [
     id: 'object.duplicate', label: 'Duplicate', category: 'Object', mode: 'object', shortcut: 'Shift+D',
     enabled: hasObjectSelection,
     run: (ed) => {
-      ed.beginUndo('Duplicate objects');
+      if (!ed.beginUndo('Duplicate objects')) return;
       const scene = ed.scene;
       const copies: number[] = [];
       // Selecting a child as well as its parent would otherwise copy it twice:
@@ -466,7 +466,7 @@ export const COMMANDS: Command[] = [
       const obj = ed.editObject;
       const mesh = ed.editMesh;
       if (!obj || !mesh) return;
-      ed.beginUndo('Extrude');
+      if (!ed.beginUndo('Extrude')) return;
       if (ed.selection.faces.size > 0) {
         const r = extrudeFaces(mesh, ed.selection.faces);
         ed.selection.verts = new Set(r.movedVerts);
@@ -521,7 +521,7 @@ export const COMMANDS: Command[] = [
       const obj = ed.editObject;
       const mesh = ed.editMesh;
       if (!obj || !mesh) return;
-      ed.beginUndo('Duplicate');
+      if (!ed.beginUndo('Duplicate')) return;
       const r = duplicateFaces(mesh, ed.selection.faces);
       ed.selection.verts = new Set(r.verts);
       ed.syncSelection('vertex');
@@ -716,7 +716,7 @@ export const COMMANDS: Command[] = [
     run: (ed) => {
       const obj = ed.scene.activeObject;
       if (!obj) return;
-      ed.beginUndo('Protect part');
+      if (!ed.beginUndo('Protect part')) return;
       obj.protectedFromRegen = !obj.protectedFromRegen;
       ed.setStatus(obj.protectedFromRegen
         ? `"${obj.name}" will not be changed by a revision; one that tries will say so`
@@ -781,7 +781,7 @@ export const COMMANDS: Command[] = [
   {
     id: 'view.cursorToOrigin', label: '3D Cursor to World Origin', category: 'View', shortcut: 'Shift+C',
     run: (ed) => {
-      ed.beginUndo('Cursor to origin');
+      if (!ed.beginUndo('Cursor to origin')) return;
       ed.scene.cursor = new Vec3();
       ed.frameAll();
       ed.emit('change');
@@ -996,7 +996,7 @@ export const COMMANDS: Command[] = [
         ed.setStatus('Select a mesh first');
         return;
       }
-      ed.beginUndo('New paint map');
+      if (!ed.beginUndo('New paint map')) return;
       // A blank white map, and a material to hang it on if there is not one.
       let slot = obj.materialSlots[0];
       if (slot === undefined || !ed.scene.materials[slot]) {
@@ -1028,7 +1028,7 @@ export const COMMANDS: Command[] = [
         ed.setStatus('Nothing painted');
         return;
       }
-      ed.beginUndo('Clear vertex colours');
+      if (!ed.beginUndo('Clear vertex colours')) return;
       mesh.colors = null;
       mesh.markDirty();
       ed.setStatus('Vertex colours cleared');
@@ -1068,7 +1068,7 @@ export const COMMANDS: Command[] = [
         ed.setStatus('Select a mesh first');
         return;
       }
-      ed.beginUndo('Make rigid body');
+      if (!ed.beginUndo('Make rigid body')) return;
       for (const o of objs) o!.physics = createPhysicsBody('active');
       ed.setStatus(`${objs.length} object${objs.length === 1 ? '' : 's'} will fall`);
       ed.emit('change');
@@ -1080,7 +1080,7 @@ export const COMMANDS: Command[] = [
     run: (ed) => {
       const objs = [...ed.scene.selection].map((id) => ed.scene.get(id)).filter((o) => o?.type === 'mesh');
       if (objs.length === 0) return;
-      ed.beginUndo('Make passive body');
+      if (!ed.beginUndo('Make passive body')) return;
       for (const o of objs) o!.physics = createPhysicsBody('passive');
       ed.setStatus(`${objs.length} object${objs.length === 1 ? '' : 's'} will hold still and be landed on`);
       ed.emit('change');
@@ -1090,7 +1090,7 @@ export const COMMANDS: Command[] = [
   {
     id: 'physics.remove', label: 'Remove Rigid Body', category: 'Object', mode: 'object',
     run: (ed) => {
-      ed.beginUndo('Remove rigid body');
+      if (!ed.beginUndo('Remove rigid body')) return;
       let n = 0;
       for (const id of ed.scene.selection) {
         const o = ed.scene.get(id);
@@ -1107,7 +1107,7 @@ export const COMMANDS: Command[] = [
   {
     id: 'physics.bake', label: 'Bake Physics to Keyframes', category: 'Object', mode: 'object',
     run: (ed) => {
-      ed.beginUndo('Bake physics');
+      if (!ed.beginUndo('Bake physics')) return;
       const t0 = Date.now();
       const r = bakeToKeyframes(ed.scene);
       if (r.bodies === 0) {
@@ -1125,7 +1125,7 @@ export const COMMANDS: Command[] = [
   {
     id: 'physics.clearBake', label: 'Clear Baked Physics', category: 'Object', mode: 'object',
     run: (ed) => {
-      ed.beginUndo('Clear baked physics');
+      if (!ed.beginUndo('Clear baked physics')) return;
       const n = clearBake(ed.scene);
       ed.setStatus(n ? `Cleared the bake on ${n} object${n === 1 ? '' : 's'}` : 'Nothing was baked');
       ed.emit('change');
@@ -1306,7 +1306,7 @@ export const COMMANDS: Command[] = [
       }
       const before = mesh.faceCount;
       const t0 = Date.now();
-      ed.beginUndo('Voxel remesh');
+      if (!ed.beginUndo('Voxel remesh')) return;
       // Aim for a similar triangle count to what is already there, with a
       // floor: remeshing a cube is pointless at six faces' worth of detail.
       const target = Math.max(20000, Math.min(400000, mesh.triCount));
@@ -1331,7 +1331,7 @@ export const COMMANDS: Command[] = [
         ed.setStatus('Nothing is masked');
         return;
       }
-      ed.beginUndo('Clear mask');
+      if (!ed.beginUndo('Clear mask')) return;
       mesh.mask = null;
       mesh.markDirty();
       ed.setStatus('Mask cleared');
@@ -1344,7 +1344,7 @@ export const COMMANDS: Command[] = [
     run: (ed) => {
       const mesh = (ed.editObject ?? ed.scene.get(ed.scene.active ?? -1))?.mesh;
       if (!mesh) return;
-      ed.beginUndo('Invert mask');
+      if (!ed.beginUndo('Invert mask')) return;
       const mask = mesh.ensureMask();
       for (let i = 0; i < mask.length; i++) mask[i] = 1 - mask[i];
       mesh.markDirty();
@@ -1441,9 +1441,32 @@ function runBoolean(ed: Editor, op: BooleanOp): void {
 
 export const COMMANDS_BY_ID = new Map(COMMANDS.map((c) => [c.id, c]));
 
+/**
+ * Commands that are allowed while a revision is being reviewed.
+ *
+ * Reviewing needs the viewport: you have to be able to orbit, frame, change
+ * shading and open the comparison to judge what you are being offered. What
+ * you may not do is edit the document, take it somewhere else, or write it to
+ * disk, because the thing on screen is a proposal and none of those would know
+ * that.
+ */
+function allowedDuringRevision(id: string): boolean {
+  if (id.startsWith('view.') || id.startsWith('select.') || id.startsWith('help.')) return true;
+  return id === 'object.acceptRevision' || id === 'object.rejectRevision';
+}
+
 export function runCommand(editor: Editor, id: string): void {
   const cmd = COMMANDS_BY_ID.get(id);
   if (!cmd) return;
+  // Every mutating operator calls beginUndo, which refuses on its own while a
+  // revision is pending — but File actions do not, and "save the document"
+  // during a review would write a proposal into the file as though it were the
+  // model. So the boundary is drawn here as well, in one place, rather than
+  // relying on each command to remember.
+  if (editor.revision.active && !allowedDuringRevision(id)) {
+    editor.setStatus(`${cmd.label} is held while a revision is waiting — accept or reject it first`);
+    return;
+  }
   if (cmd.enabled && !cmd.enabled(editor)) {
     editor.setStatus(`${cmd.label} is not available right now`);
     return;

@@ -18,9 +18,10 @@ import { createTexture } from '../scene/Texture';
 import { createMaterial } from '../scene/Material';
 import {
   Reference, bitmapFromReference, blobFromReference, drawReferenceInto, isSupportedFile,
-  loadReference, releaseReference, seekVideo, textureFromReference,
+  loadReference, referenceFromDataUrl, releaseReference, seekVideo, textureFromReference,
 } from '../imaging/load';
 import { BackendInfo, generateMesh, probeBackend, storeEndpoint, storedEndpoint } from '../ai/client';
+import { assetRootFor } from '../editor/revision';
 import {
   GENERATOR_VERSION, PROVENANCE_SCHEMA, ParamValue, ReferenceOrigin, newAssetId,
 } from '../build/provenance';
@@ -191,6 +192,13 @@ export class CreatePanel {
   /** The texture id already made for this reference, so retries do not pile up copies. */
   private photoTexture: { key: string; id: number } | null = null;
   /**
+   * The source image kept purely so the asset can be rebuilt later.
+   *
+   * Separate from `photoTexture`, which exists to shade the model: turning the
+   * texture off is a look, not a decision to throw the original away.
+   */
+  private sourceTexture: { key: string; id: number } | null = null;
+  /**
    * The material slot this panel made, and which object it made it for.
    *
    * Kept because the object is rebuilt on every settings change, and a fresh
@@ -289,6 +297,12 @@ export class CreatePanel {
   private build(): void {
     clear(this.body);
     if (!this.reference) {
+      // A saved reference model is selected and the panel is empty: offer to
+      // pick it up rather than making somebody find the original photograph
+      // again. Offered rather than done, because adopting replaces whatever is
+      // loaded and that should be a decision.
+      const saved = this.savedAssetInSelection();
+      if (saved) this.body.appendChild(this.adoptZone(saved));
       this.body.appendChild(this.dropZone());
       return;
     }
@@ -298,6 +312,35 @@ export class CreatePanel {
     this.body.appendChild(this.actionsSection());
     this.body.appendChild(this.aiSection());
     this.drawPreview();
+  }
+
+  /** The selected object, when it is a reference model this panel could reopen. */
+  private savedAssetInSelection(): SceneObject | null {
+    const scene = this.editor.scene;
+    const obj = scene.activeObject ?? scene.selectedObjects()[0] ?? null;
+    const root = assetRootFor(scene, obj);
+    if (!root || root.provenance?.source !== 'reference') return null;
+    return root.id === this.targetId && this.reference ? null : root;
+  }
+
+  private adoptZone(asset: SceneObject): HTMLElement {
+    const prov = asset.provenance!;
+    const stored = prov.reference?.textureId !== null && !prov.reference?.missing;
+    return h('section', { class: 'prop-section' }, [
+      h('h3', { class: 'prop-heading', text: `"${asset.name}" was built from a picture` }),
+      h('p', { class: 'dim small', text: stored
+        ? `Its picture (${prov.reference?.name ?? 'unknown'}) and settings are stored in this `
+          + 'project, so it can be reopened and revised without the original file.'
+        : `Its picture (${prov.reference?.name ?? 'unknown'}) is not stored in this project, so `
+          + 'it cannot be rebuilt. Drop the original in to work from it again.' }),
+      stored
+        ? h('div', { class: 'btn-row' }, [
+          button('Reopen its settings', () => { void this.adoptAsset(asset); }, {
+            class: 'primary', title: 'Load the picture and settings this object was built with',
+          }),
+        ])
+        : null,
+    ].filter((e) => e !== null) as HTMLElement[]);
   }
 
   private dropZone(): HTMLElement {
@@ -674,7 +717,7 @@ export class CreatePanel {
         prompt: this.aiPrompt || undefined,
         signal: controller.signal,
       });
-      this.editor.beginUndo('Generate with local model');
+      if (!this.editor.beginUndo('Generate with local model')) return;
       const object = this.editor.scene.add('mesh', result.name || 'AI Mesh', result.mesh);
       object.position = this.placementFor(result.mesh);
       this.editor.selectObject(object.id);
@@ -825,16 +868,169 @@ export class CreatePanel {
    * is not, that is recorded as a missing dependency by name rather than
    * discovered as a failure at the moment somebody asks for a change.
    */
+  /**
+   * Make sure the picture itself is in the file.
+   *
+   * Without it, "revise this" months later has nothing to revise from — the
+   * settings survive and the thing they were settings *for* does not. It is
+   * stored whether or not the photograph is being used as a texture, because
+   * being able to rebuild the model is a different question from how the model
+   * is shaded.
+   */
+  private ensureSourceStored(): number | null {
+    const ref = this.reference;
+    if (!ref) return null;
+    if (this.photoTexture) return this.photoTexture.id;
+    const key = `${ref.name}:${this.frameTime}`;
+    if (this.sourceTexture?.key === key) return this.sourceTexture.id;
+    try {
+      const { url, width, height } = textureFromReference(ref);
+      const texture = createTexture(`${ref.name.replace(/\.[^.]+$/, '')} (source)`, url, width, height);
+      this.editor.scene.textures.push(texture);
+      this.sourceTexture = { key, id: texture.id };
+      return texture.id;
+    } catch {
+      return null;
+    }
+  }
+
   private referenceOrigin(): ReferenceOrigin {
     const ref = this.reference;
     return {
-      textureId: this.photoTexture?.id ?? null,
+      textureId: this.ensureSourceStored(),
       name: ref?.name ?? 'reference',
       frameTime: this.frameTime,
       width: ref?.width ?? 0,
       height: ref?.height ?? 0,
-      missing: !this.photoTexture,
+      missing: !this.photoTexture && !this.sourceTexture,
     };
+  }
+
+  /**
+   * Pick a saved reference asset back up, from the file alone.
+   *
+   * Everything this needs is in the document: the picture as an embedded
+   * texture, the mode, the settings and the correction marks. Nothing here
+   * depends on the panel having been open when the object was made, which is
+   * the whole point — reopening a project a month later and changing the
+   * extrusion depth is the ordinary case, not a special one.
+   *
+   * Nothing is regenerated by adopting. It loads the settings and stops.
+   */
+  async adoptAsset(object: SceneObject): Promise<boolean> {
+    const prov = object.provenance;
+    if (!prov || prov.source !== 'reference') return false;
+    const textureId = prov.reference?.textureId ?? null;
+    const texture = textureId !== null
+      ? this.editor.scene.textures.find((t) => t.id === textureId)
+      : undefined;
+    if (!texture || !texture.url) {
+      this.statsLine.textContent = `The picture "${prov.reference?.name ?? 'unknown'}" is not stored `
+        + 'in this file, so this object cannot be rebuilt from it.';
+      return false;
+    }
+    let reference: Reference;
+    try {
+      reference = await referenceFromDataUrl(prov.reference?.name ?? texture.name, texture.url);
+    } catch (err) {
+      this.statsLine.textContent = `The stored picture could not be read: ${(err as Error).message}`;
+      return false;
+    }
+
+    releaseReference(this.reference);
+    this.reference = reference;
+    this.bitmap = bitmapFromReference(reference);
+    this.frameTime = prov.reference?.frameTime ?? 0;
+    this.targetId = object.id;
+    this.assignedName = object.name;
+    this.matte = null;
+    this.depthField = null;
+    this.photoTexture = null;
+    this.sourceTexture = { key: `${reference.name}:${this.frameTime}`, id: texture.id };
+    this.applySavedSettings(prov.params);
+    this.hints = this.decodeHints(prov.params.hints, this.bitmap.width, this.bitmap.height);
+    this.build();
+    this.drawPreview();
+    this.statsLine.textContent = `Loaded the settings "${object.name}" was built with. `
+      + 'Change them and press "Preview as Revision".';
+    return true;
+  }
+
+  /** Put saved settings back into the panel's controls, mode by mode. */
+  private applySavedSettings(params: Record<string, ParamValue>): void {
+    const mode = params.mode;
+    if (mode === 'photo' || mode === 'scene' || mode === 'silhouette'
+      || mode === 'lathe' || mode === 'relief') {
+      this.mode = mode;
+    }
+    const num = (key: string, apply: (v: number) => void): void => {
+      const v = params[key];
+      if (typeof v === 'number' && Number.isFinite(v)) apply(v);
+    };
+    const bool = (key: string, apply: (v: boolean) => void): void => {
+      const v = params[key];
+      if (typeof v === 'boolean') apply(v);
+    };
+    if (typeof params.channel === 'string') this.mask.channel = params.channel as MaskChannel;
+    num('threshold', (v) => { this.mask.threshold = v; });
+    bool('invert', (v) => { this.mask.invert = v; });
+
+    const target: Record<string, unknown> = this.mode === 'photo' ? this.photo
+      : this.mode === 'scene' ? this.scene
+        : this.mode === 'silhouette' ? this.silhouette
+          : this.mode === 'lathe' ? this.lathe : this.relief;
+    for (const [key, value] of Object.entries(params)) {
+      if (!(key in target)) continue;
+      const existing = target[key];
+      if (typeof existing === typeof value && value !== null) target[key] = value;
+    }
+  }
+
+  /**
+   * The correction marks, small enough to keep in the file.
+   *
+   * Two strokes are what rescue a photograph whose colours will not separate,
+   * so losing them on save means the revision after a reload quietly produces
+   * a worse model than the one you accepted. They are almost all zeroes, so a
+   * run-length encoding turns a hundred kilobytes into a few hundred bytes.
+   */
+  private encodedHints(): string | null {
+    const hints = this.hints;
+    if (!hints || !this.bitmap) return null;
+    let any = false;
+    const runs: number[] = [];
+    let value = hints[0];
+    let run = 0;
+    for (let i = 0; i < hints.length; i++) {
+      if (hints[i] !== HINT_NONE) any = true;
+      if (hints[i] === value) { run++; continue; }
+      runs.push(value, run);
+      value = hints[i];
+      run = 1;
+    }
+    runs.push(value, run);
+    if (!any) return null;
+    return `${this.bitmap.width}x${this.bitmap.height}:${runs.join(',')}`;
+  }
+
+  /** Read marks back out of a saved record, ignoring anything that does not fit. */
+  private decodeHints(encoded: unknown, width: number, height: number): Uint8Array | null {
+    if (typeof encoded !== 'string') return null;
+    const [size, body] = encoded.split(':');
+    const [w, h] = (size ?? '').split('x').map(Number);
+    if (w !== width || h !== height || !body) return null;
+    const runs = body.split(',').map(Number);
+    const out = new Uint8Array(width * height);
+    let at = 0;
+    for (let i = 0; i + 1 < runs.length; i += 2) {
+      const value = runs[i];
+      const run = runs[i + 1];
+      if (!Number.isFinite(value) || !Number.isFinite(run) || run < 0) return null;
+      if (at + run > out.length) return null;
+      out.fill(value, at, at + run);
+      at += run;
+    }
+    return at === out.length ? out : null;
   }
 
   /**
@@ -856,7 +1052,7 @@ export class CreatePanel {
       generator: `reference:${this.mode}`,
       generatorVersion: GENERATOR_VERSION,
       prompt: existing?.prompt,
-      params: this.settingsForMode(),
+      params: { ...this.settingsForMode(), hints: this.encodedHints() },
       reference: this.referenceOrigin(),
       baseline: {
         parts: [{
@@ -1038,7 +1234,7 @@ export class CreatePanel {
       // and the first result was gone for good. Only the branch that creates
       // an object was recording one, which is the branch where there is
       // nothing to lose.
-      this.editor.beginUndo('Build scene from photo');
+      if (!this.editor.beginUndo('Build scene from photo')) return;
       let object = this.editor.scene.get(this.targetId);
       if (!object) {
         object = this.editor.scene.add('mesh', this.editor.scene.uniqueName('Scene'), result.mesh);

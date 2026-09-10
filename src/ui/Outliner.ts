@@ -59,7 +59,7 @@ export class Outliner {
       on: {
         click: (e) => {
           e.stopPropagation();
-          this.editor.beginUndo(obj.visible ? 'Hide object' : 'Show object');
+          if (!this.editor.beginUndo(obj.visible ? 'Hide object' : 'Show object')) return;
           obj.visible = !obj.visible;
           this.editor.requestRender();
           this.editor.emit('change');
@@ -97,7 +97,7 @@ export class Outliner {
     input.select();
     const finish = (commit: boolean): void => {
       if (commit && input.value.trim()) {
-        this.editor.beginUndo('Rename object');
+        if (!this.editor.beginUndo('Rename object')) return;
         obj.name = input.value.trim();
       }
       this.editor.emit('change');

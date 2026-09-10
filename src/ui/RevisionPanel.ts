@@ -18,6 +18,7 @@ export class RevisionPanel {
   readonly root = h('div', { class: 'revision-panel hidden' });
   private body = h('div', { class: 'revision-body' });
   private headline = h('div', { class: 'revision-headline' });
+  private actions = h('div', { class: 'btn-row revision-actions' });
 
   constructor(private editor: Editor) {
     this.root.append(
@@ -26,15 +27,7 @@ export class RevisionPanel {
       ]),
       this.headline,
       this.body,
-      h('div', { class: 'btn-row revision-actions' }, [
-        button('Accept revision', () => this.editor.revision.accept(), {
-          class: 'primary',
-          title: 'Keep this version. One step in the undo history.',
-        }),
-        button('Reject revision', () => this.editor.revision.reject(), {
-          title: 'Put everything back exactly as it was. Nothing is kept.',
-        }),
-      ]),
+      this.actions,
     );
     editor.on('revision', () => this.refresh());
   }
@@ -54,6 +47,31 @@ export class RevisionPanel {
       h('strong', { text: summary.label }),
       h('span', { class: 'dim', text: ` — ${summary.headline}` }),
     );
+
+    // Accept is disabled while anything is unresolved, with the way out next
+    // to it. An action that silently does nothing teaches people to distrust
+    // every other button on the panel.
+    const open = summary.report.conflicts.length;
+    const controls: (HTMLElement | null)[] = [
+      button(open ? `Accept (${open} to resolve)` : 'Accept revision',
+        () => this.editor.revision.accept(),
+        {
+          class: `primary${open ? ' disabled' : ''}`,
+          title: open
+            ? 'Every disagreement has to be answered first'
+            : 'Keep this version. One step in the undo history.',
+        }),
+      open
+        ? button('Keep my versions for all remaining', () => {
+          const n = this.editor.revision.keepMineForAll();
+          this.editor.setStatus(`${n} conflict(s) settled in your favour.`);
+        }, { title: 'Answer every remaining disagreement by keeping what you had' })
+        : null,
+      button('Reject revision', () => this.editor.revision.reject(), {
+        title: 'Put everything back exactly as it was. Nothing is kept.',
+      }),
+    ];
+    this.actions.replaceChildren(...controls.filter((c): c is HTMLElement => c !== null));
 
     const rows: (HTMLElement | null)[] = [];
     for (const note of summary.notes) {
@@ -83,30 +101,60 @@ export class RevisionPanel {
       }),
     ];
     for (const conflict of conflicts) {
+      // What each button will actually do, in the words of this conflict. A
+      // choice between "mine" and "theirs" means nothing without them.
+      const scope = conflict.field && conflict.field !== 'geometry'
+        ? conflict.field === 'existence' ? 'whether it exists' : `its ${conflict.field}`
+        : 'its shape';
+      // A protected part is a decision already made, so the only honest
+      // options are to leave it standing or to withdraw the protection
+      // deliberately. Offering "use the revised one" next to a switch that
+      // refuses it is a button that lies.
+      const choices: (HTMLElement | null)[] = conflict.kind === 'protected'
+        ? [
+          button('Keep it protected', () => this.resolve(conflict, 'mine'), {
+            title: 'Leave it exactly as it is; this revision does not touch it',
+          }),
+          button('Unprotect and use the revised one', () => this.unprotect(conflict), {
+            title: 'Turn off protection for this part and apply the generated version',
+          }),
+        ]
+        : [
+          button(conflict.yours ? `Keep mine — ${conflict.yours}` : 'Keep mine',
+            () => this.resolve(conflict, 'mine'),
+            { title: `Leave ${scope} as you have it` }),
+          button(conflict.theirs ? `Use revised — ${conflict.theirs}` : 'Use the revised one',
+            () => this.resolve(conflict, 'theirs'),
+            { title: `Change ${scope} to what this revision proposes` }),
+          // Keeping both only means something when there are two objects to
+          // have. There is no second copy of a name or a position.
+          conflict.field === undefined || conflict.field === 'geometry'
+            ? button('Keep both', () => this.resolve(conflict, 'both'), {
+              title: 'Keep yours and add the generated version beside it',
+            })
+            : null,
+        ];
       out.push(h('div', { class: 'revision-conflict' }, [
         h('div', { class: 'revision-conflict-head' }, [
           h('strong', { text: conflict.name }),
-          h('span', { class: 'revision-kind', text: conflict.kind }),
+          h('span', { class: 'revision-kind', text: conflict.field ?? conflict.kind }),
         ]),
         h('p', { class: 'small', text: conflict.detail }),
-        h('div', { class: 'btn-row' }, [
-          button('Keep mine', () => this.resolve(conflict, 'mine'), {
-            title: 'Leave this object exactly as you had it. It is already what is in the scene.',
-          }),
-          button('Use the revised one', () => this.resolve(conflict, 'theirs'), {
-            title: 'Replace this object with the generated version, losing your changes to it',
-          }),
-          button('Keep both', () => this.resolve(conflict, 'both'), {
-            title: 'Keep yours and add the generated version beside it',
-          }),
-        ]),
+        h('div', { class: 'btn-row' }, choices.filter((c): c is HTMLElement => c !== null)),
       ]));
     }
     return out;
   }
 
+  /** Withdraw a part's protection, then apply the revision to it. */
+  private unprotect(conflict: MergeConflict): void {
+    const obj = conflict.objectId !== null ? this.editor.scene.get(conflict.objectId) : null;
+    if (obj) obj.protectedFromRegen = false;
+    this.editor.revision.resolveConflict(conflict.key, 'theirs', conflict.field);
+  }
+
   private resolve(conflict: MergeConflict, choice: 'mine' | 'theirs' | 'both'): void {
-    const done = this.editor.revision.resolveConflict(conflict.key, choice);
+    const done = this.editor.revision.resolveConflict(conflict.key, choice, conflict.field);
     if (!done) this.editor.setStatus('That conflict could not be resolved — reject the revision and try again.');
   }
 

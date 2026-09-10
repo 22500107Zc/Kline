@@ -166,7 +166,7 @@ export class GraphEditor {
       case 'material.emissionStrength': if (material) values = [material.emissionStrength]; break;
       default: break;
     }
-    this.editor.beginUndo(`Animate ${CHANNEL_LABELS[path]}`);
+    if (!this.editor.beginUndo(`Animate ${CHANNEL_LABELS[path]}`)) return;
     for (let i = 0; i < pathComponents(path); i++) {
       setKey(obj.animation, path, i, frame, values[i] ?? 0, 'bezier');
     }
@@ -262,7 +262,7 @@ export class GraphEditor {
       this.editor.setStatus('Select a key first');
       return;
     }
-    this.editor.beginUndo('Key interpolation');
+    if (!this.editor.beginUndo('Key interpolation')) return;
     this.selected.channel.keys[this.selected.keyIndex].interp = interp;
     this.editor.emit('change');
     this.editor.requestRender();
@@ -272,7 +272,7 @@ export class GraphEditor {
     if (!this.selected) return;
     const obj = this.editor.scene.get(this.editor.scene.active ?? -1);
     if (!obj) return;
-    this.editor.beginUndo('Delete key');
+    if (!this.editor.beginUndo('Delete key')) return;
     this.selected.channel.keys.splice(this.selected.keyIndex, 1);
     // A channel with nothing in it is not a channel.
     obj.animation = obj.animation.filter((c) => c.keys.length > 0);
@@ -293,7 +293,7 @@ export class GraphEditor {
       this.selected = hit;
       if (hit) {
         this.dragging = true;
-        this.editor.beginUndo('Move key');
+        if (!this.editor.beginUndo('Move key')) return;
       } else {
         // Empty space scrubs, which is what a click in a timeline should do.
         this.editor.setFrame(Math.round(this.fromX(x)));

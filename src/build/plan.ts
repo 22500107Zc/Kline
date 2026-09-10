@@ -4,8 +4,8 @@ import { PrimitiveKind, buildPrimitive } from '../mesh/primitives';
 import { Scene, SceneObject } from '../scene/Scene';
 import { createMaterial, hexToLinear } from '../scene/Material';
 import {
-  Baseline, BaselinePart, GENERATOR_VERSION, PROVENANCE_SCHEMA, Provenance, ProvenanceSource,
-  ReferenceOrigin, assignPartKeys, newAssetId,
+  BASELINE_VERSION, Baseline, BaselinePart, GENERATOR_VERSION, PROVENANCE_SCHEMA, Provenance,
+  ProvenanceSource, ReferenceOrigin, assignIdentities, newAssetId,
 } from './provenance';
 
 /**
@@ -29,6 +29,19 @@ export type BuildShape = (typeof BUILD_SHAPES)[number];
 export interface BuildPart {
   shape: BuildShape;
   name?: string;
+  /**
+   * A stable identity the program chose for this part.
+   *
+   * Role-and-ordinal matching works for a recipe, whose parts come out in the
+   * same order with the same names every time. A generated program has no such
+   * discipline: a model asked to make the tabletop wider may rename it, or emit
+   * the legs before the top, and matching by position in the list would then
+   * hand your material to a different part. An explicit id survives both.
+   *
+   * Pure data. It travels in the plan the sandbox already returns, so nothing
+   * about the sandbox's reach changes.
+   */
+  id?: string;
   /** Centre of the part, in metres. */
   position: [number, number, number];
   /** Bounding-box size in metres; the primitive is scaled to match. */
@@ -150,8 +163,10 @@ export function validatePlan(input: unknown, fallbackName = 'Build'): Validation
     const color = resolveColor(colorRaw);
     if (colorRaw && !color) warnings.push(`Unknown colour "${colorRaw}".`);
 
+    const rawId = typeof p.id === 'string' ? p.id : undefined;
     parts.push({
       shape,
+      id: rawId && /^[A-Za-z0-9_.:-]{1,48}$/.test(rawId.trim()) ? rawId.trim() : undefined,
       name: typeof p.name === 'string' && p.name.trim() ? p.name.trim().slice(0, 40) : undefined,
       position,
       size,
@@ -238,7 +253,9 @@ export function executePlan(scene: Scene, plan: BuildPlan, origin = new Vec3()):
   };
 
   const objects: SceneObject[] = [];
-  const keys = assignPartKeys(plan.parts.map((p) => p.name ?? p.shape));
+  const keys = assignIdentities(
+    plan.parts.map((p) => ({ id: p.id, name: p.name ?? p.shape })),
+  ).keys;
   for (const [index, part] of plan.parts.entries()) {
     const obj = scene.add('mesh', part.name ?? part.shape, meshForPart(part));
     obj.partKey = keys[index];
@@ -264,7 +281,11 @@ export function executePlan(scene: Scene, plan: BuildPlan, origin = new Vec3()):
  * to one without discarding the other. Without it there are only two, and no
  * way to tell which of them moved.
  */
-export function captureBaseline(objects: SceneObject[], keys: string[]): Baseline {
+export function captureBaseline(
+  objects: SceneObject[], keys: string[], materials?: unknown[],
+): Baseline {
+  const byId = new Map<number, string>();
+  objects.forEach((obj, i) => byId.set(obj.id, keys[i] ?? obj.partKey ?? `part#${i + 1}`));
   const parts: BaselinePart[] = objects.map((obj, i) => ({
     key: keys[i] ?? obj.partKey ?? `part#${i + 1}`,
     name: obj.name,
@@ -272,8 +293,22 @@ export function captureBaseline(objects: SceneObject[], keys: string[]): Baselin
     rotation: obj.rotation.toArray(),
     scale: obj.scale.toArray(),
     mesh: obj.mesh ? obj.mesh.toJSON() : null,
+    // Everything the merge has to consult before it is allowed to call a part
+    // untouched. Geometry alone was not enough: a recoloured, rigged or
+    // animated part looked identical to one nobody had opened.
+    materialSlots: [...obj.materialSlots],
+    materials: materials
+      ? obj.materialSlots.map((slot) => materials[slot] ?? null)
+      : undefined,
+    modifiers: JSON.parse(JSON.stringify(obj.modifiers)),
+    animation: JSON.parse(JSON.stringify(obj.animation ?? [])),
+    visible: obj.visible,
+    locked: obj.locked,
+    protectedFromRegen: obj.protectedFromRegen,
+    parentKey: obj.parent !== null ? byId.get(obj.parent) ?? null : null,
+    childKeys: obj.children.map((id) => byId.get(id)).filter((k): k is string => !!k),
   }));
-  return { parts };
+  return { parts, version: BASELINE_VERSION };
 }
 
 /** Attach the record of how an asset was made to its root. */

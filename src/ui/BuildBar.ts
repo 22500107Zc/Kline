@@ -8,7 +8,8 @@ import {
 import { DEFAULT_LIMITS, RunResult, runProgramSandboxed } from '../build/sandbox';
 import { generateProgram as writeProgram } from '../build/llm';
 import {
-  parseRevision, programRevisionPrompt, proposedFromParts, rebuildRecipe, revisableSettings,
+  identifiedParts, parseRevision, programRevisionPrompt, proposedFromParts, rebuildRecipe,
+  revisableSettings,
 } from '../build/revise';
 import { assetFingerprint, assetRootFor, revisability } from '../editor/revision';
 import { SceneObject } from '../scene/Scene';
@@ -34,8 +35,14 @@ export class BuildBar {
     title: 'Change the selected generated object, keeping your edits to it',
   });
   private target = h('div', { class: 'build-target dim small' });
+  private reviseCodeButton = h('button', {
+    class: 'btn',
+    text: 'Preview Revision of Selected',
+    title: 'Run this program as a revision of the selected asset, keeping your edits to it',
+  });
   private codePanel = h('div', { class: 'build-code hidden' });
-  private codeArea = h('textarea', { class: 'code-area' });
+  /** Public so the code panel can be driven the way a person drives it. */
+  codeArea = h('textarea', { class: 'code-area' });
   private codeLog = h('pre', { class: 'code-log' });
   private note = h('div', { class: 'build-note' });
   private settings = h('div', { class: 'build-settings hidden' });
@@ -59,6 +66,7 @@ export class BuildBar {
     });
 
     this.reviseButton.addEventListener('click', () => void this.revise());
+    this.reviseCodeButton.addEventListener('click', () => void this.reviseFromCode());
     this.root.append(
       h('div', { class: 'build-row' }, [
         h('span', { class: 'build-mark', text: 'Build' }),
@@ -103,6 +111,9 @@ export class BuildBar {
     const asset = this.selectedAsset();
     const state = revisability(asset);
     this.reviseButton.toggleAttribute('disabled', !state.can || this.editor.revision.active);
+    this.reviseCodeButton.toggleAttribute(
+      'disabled', !asset || this.editor.revision.active,
+    );
     if (this.editor.revision.active) {
       this.target.textContent = 'A revision is waiting for Accept or Reject.';
       return;
@@ -135,6 +146,11 @@ export class BuildBar {
    */
   /** Change the selected generated asset. The Revise Selected button. */
   async revise(): Promise<void> {
+    if (this.editor.revision.active) {
+      this.editor.setStatus('A revision is already waiting — accept or reject it first');
+      this.showTarget();
+      return;
+    }
     const request = this.input.value.trim();
     const asset = this.selectedAsset();
     if (!asset) {
@@ -171,10 +187,12 @@ export class BuildBar {
 
     if (prov.source === 'program') {
       if (!this.modelReady) {
-        this.note.textContent = 'This object was built by a program, so revising it means editing '
-          + 'that program. Connect a model, or press Code, change it and press Run.';
+        this.note.textContent = 'This object was built by a program, so revising it means '
+          + 'editing that program. Its program is below — change it and press '
+          + '"Preview Revision of Selected". No model needed.';
         this.codePanel.classList.remove('hidden');
         this.codeArea.value = prov.code ?? this.codeArea.value;
+        this.showTarget();
         return;
       }
       await this.reviseProgram(asset, prov.code ?? '', request, stamp);
@@ -211,12 +229,22 @@ export class BuildBar {
       this.codeLog.textContent = run.log.join('\n');
       this.setChip(this.config.model, 'ok');
       const live = this.editor.scene.get(asset.id);
-      if (!live) {
-        this.note.textContent = 'The object was deleted while the model was working; nothing was applied.';
+      // A reply that outlived its question. The asset it was written against
+      // is gone, so there is nothing it can safely be applied to — and
+      // applying it to whatever now holds that id would be worse than useless.
+      if (!live || live.provenance?.assetId !== prov.assetId) {
+        this.note.textContent = 'That object was replaced while the model was working, so its '
+          + 'answer was discarded. Nothing was changed.';
+        this.setChip(this.config.model, 'idle');
         return;
       }
-      const notes = this.staleNote(live, stamp);
-      this.stage(live, proposedFromParts(run.parts), request, notes, stamp, program.code);
+      const identified = identifiedParts(run.parts);
+      const notes = [
+        ...identified.problems,
+        ...this.identityNote(identified.uncertain, identified.parts.length),
+      ];
+      this.stage(live, identified.parts, request, notes, stamp, program.code, undefined,
+        prov.assetId);
     } catch (err) {
       const aborted = (err as Error).name === 'AbortError';
       this.setChip(this.config.model, aborted ? 'idle' : 'bad');
@@ -245,12 +273,13 @@ export class BuildBar {
     asset: SceneObject, parts: ReturnType<typeof proposedFromParts>, label: string,
     notes: string[], stamp: string, code?: string,
     params?: Record<string, number | string | boolean | null>,
+    expectAssetId?: string,
   ): void {
     const withStale = [...notes, ...this.staleNote(asset, stamp)];
     const summary = this.editor.revision.preview(asset, parts, label, withStale, {
       ...(code === undefined ? {} : { code }),
       ...(params === undefined ? {} : { params }),
-    });
+    }, expectAssetId);
     if (!summary) return;
     this.note.textContent = `${summary.headline}. Accept or reject it in the panel.`;
     this.showTarget();
@@ -290,11 +319,19 @@ export class BuildBar {
     this.codePanel.append(
       this.codeArea,
       h('div', { class: 'btn-row' }, [
-        button('Run', () => void this.runCode(this.codeArea.value, 'your code'), { class: 'primary' }),
+        // Two actions, because they are two intentions. "Run" used to be one
+        // button that always built a second object — so the advice given to
+        // anybody without a model ("edit the program and press Run") produced
+        // a duplicate rather than a revision, which is the opposite of what it
+        // promised.
+        button('Run as New', () => void this.runCode(this.codeArea.value, 'your code'), {
+          class: 'primary', title: 'Build a new object from this program',
+        }),
+        this.reviseCodeButton,
         button('Copy', () => void navigator.clipboard?.writeText(this.codeArea.value)),
         button('Hide', () => this.toggleCode()),
       ]),
-      h('p', { class: 'dim small', text: 'Cmd/Ctrl+Enter runs it. Runs in a sandbox with no network and a 3 second limit.' }),
+      h('p', { class: 'dim small', text: 'Cmd/Ctrl+Enter runs it as a new object. Runs in a sandbox with no network and a 3 second limit.' }),
       this.codeLog,
     );
     return this.codePanel;
@@ -302,7 +339,74 @@ export class BuildBar {
 
   private toggleCode(): void {
     this.codePanel.classList.toggle('hidden');
-    if (!this.codePanel.classList.contains('hidden')) this.codeArea.focus();
+    if (this.codePanel.classList.contains('hidden')) return;
+    // Open it on the selected asset's own program rather than on whatever was
+    // last in the box: "edit the program that made this" is the reason to open
+    // it, and hunting for the program is not part of that.
+    const asset = this.selectedAsset();
+    const code = asset?.provenance?.code;
+    if (code && !this.codeArea.value.trim()) this.codeArea.value = code;
+    this.codeArea.focus();
+    this.showTarget();
+  }
+
+  /**
+   * Run the edited program as a revision of the selected asset.
+   *
+   * The same pipeline a model-written revision goes through — merge, preview,
+   * accept or reject — with the program coming from the box instead of from a
+   * model. It needs no model, no account and no network, which matters because
+   * this is the path somebody lands on precisely when they have none of those.
+   */
+  /** Revise the selected asset with the program in the box. */
+  async reviseFromCode(): Promise<void> {
+    if (this.editor.revision.active) {
+      this.editor.setStatus('A revision is already waiting — accept or reject it first');
+      this.showTarget();
+      return;
+    }
+    const asset = this.selectedAsset();
+    if (!asset) {
+      this.showTarget();
+      this.editor.setStatus('Select a generated object to revise it with this program');
+      return;
+    }
+    const code = this.codeArea.value.trim();
+    if (!code) {
+      this.codeArea.focus();
+      return;
+    }
+    const stamp = assetFingerprint(this.editor.scene, asset);
+    this.codeLog.textContent = '';
+    try {
+      const run = await runProgramSandboxed(code, DEFAULT_LIMITS);
+      const identified = identifiedParts(run.parts);
+      this.codeLog.textContent = run.log.join('\n');
+      const live = this.editor.scene.get(asset.id);
+      if (!live) {
+        this.note.textContent = 'That object is gone; nothing was applied.';
+        return;
+      }
+      this.stage(
+        live, identified.parts, 'Your edited program',
+        [...identified.problems, ...this.identityNote(identified.uncertain, identified.parts.length)],
+        stamp, code,
+      );
+    } catch (err) {
+      this.codeLog.textContent = (err as Error).message;
+      this.editor.setStatus(`The program did not run: ${(err as Error).message}`);
+    }
+  }
+
+  /** Say plainly when parts are being matched by position rather than identity. */
+  private identityNote(uncertain: string[], total: number): string[] {
+    if (!uncertain.length) return [];
+    if (uncertain.length === total) {
+      return ['This program does not give its parts identifiers, so they are matched by the '
+        + 'order they are created in. Reordering or renaming them would attach your edits to '
+        + 'the wrong part — add an id to each part({...}) to make that reliable.'];
+    }
+    return [`${uncertain.length} of ${total} parts have no identifier and are matched by position.`];
   }
 
   private setChip(text: string, state: 'ok' | 'bad' | 'idle' | 'busy'): void {
@@ -384,7 +488,8 @@ export class BuildBar {
   }
 
   /** Run whatever is in the code box, whether a model or a person wrote it. */
-  private async runCode(code: string, source: string): Promise<void> {
+  /** Build a new object from a program. The Run as New button. */
+  async runCode(code: string, source: string): Promise<void> {
     if (!code.trim()) return;
     this.codeLog.textContent = '';
     try {
@@ -410,7 +515,7 @@ export class BuildBar {
     timing?: string,
   ): void {
     if (!plan) return;
-    this.editor.beginUndo(`Build ${plan.name}`);
+    if (!this.editor.beginUndo(`Build ${plan.name}`)) return;
     const at = this.editor.scene.cursor.clone();
     const existing = this.editor.scene.bounds(false);
     // Drop new builds beside what is already there rather than inside it.
@@ -420,7 +525,7 @@ export class BuildBar {
     // Recorded now, while the geometry is exactly what the generator made and
     // before anyone has touched it. Captured any later and the "baseline"
     // would already contain somebody's edits.
-    recordProvenance(root, made, captureBaseline(objects, keys));
+    recordProvenance(root, made, captureBaseline(objects, keys, this.editor.scene.materials));
 
     this.editor.selectObject(root.id);
     for (const id of this.editor.scene.objects.keys()) this.editor.renderer.invalidate(id);

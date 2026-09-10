@@ -2460,3 +2460,22 @@ button:disabled {
   flex: 0 0 auto;
   color: var(--ink-faint);
 }
+
+/* A button that is present but cannot act yet, so the reason is visible
+   rather than the button being missing. */
+.revision-actions .btn.disabled,
+.revision-actions .btn.primary.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.revision-conflict .btn-row {
+  flex-wrap: wrap;
+}
+
+.revision-conflict .btn {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -102,7 +102,7 @@ export class Properties {
 
     const nameInput = h('input', { class: 'text-input', value: obj.name, type: 'text' });
     nameInput.addEventListener('change', () => {
-      ed.beginUndo('Rename object');
+      if (!ed.beginUndo('Rename object')) return;
       obj.name = nameInput.value.trim() || obj.name;
       ed.emit('change');
     });
@@ -111,7 +111,7 @@ export class Properties {
     const identity: (HTMLElement | null)[] = [
       row('Name', nameInput),
       checkbox('Visible in viewport', obj.visible, (v) => {
-        ed.beginUndo('Toggle visibility');
+        if (!ed.beginUndo('Toggle visibility')) return;
         obj.visible = v;
         ed.requestRender();
         ed.emit('change');
@@ -125,7 +125,7 @@ export class Properties {
     const asset = assetRootFor(ed.scene, obj);
     if (asset) {
       identity.push(checkbox('Protect from regeneration', obj.protectedFromRegen, (v) => {
-        ed.beginUndo(v ? 'Protect part' : 'Unprotect part');
+        if (!ed.beginUndo(v ? 'Protect part' : 'Unprotect part')) return;
         obj.protectedFromRegen = v;
         ed.emit('change');
       }));
@@ -161,7 +161,7 @@ export class Properties {
           ed.requestRender();
         },
         onChange: (value) => {
-          ed.beginUndo(`Set ${label.toLowerCase()}`);
+          if (!ed.beginUndo(`Set ${label.toLowerCase()}`)) return;
           const v = get().clone();
           v[axis] = value / scale;
           set(v);
@@ -192,12 +192,12 @@ export class Properties {
         ]),
         h('div', { class: 'btn-row' }, [
           button('Shade Smooth', () => {
-            ed.beginUndo('Shade smooth');
+            if (!ed.beginUndo('Shade smooth')) return;
             obj.mesh?.setAllSmooth(true);
             ed.markGeometryDirty(obj);
           }),
           button('Shade Flat', () => {
-            ed.beginUndo('Shade flat');
+            if (!ed.beginUndo('Shade flat')) return;
             obj.mesh?.setAllSmooth(false);
             ed.markGeometryDirty(obj);
           }),
@@ -212,7 +212,7 @@ export class Properties {
           (['point', 'sun', 'spot', 'area'] as LightType[]).map((t) => ({ value: t, label: t })),
           light.type,
           (v) => {
-            ed.beginUndo('Change light type');
+            if (!ed.beginUndo('Change light type')) return;
             light.type = v as LightType;
             ed.requestRender();
             ed.emit('change');
@@ -243,7 +243,7 @@ export class Properties {
           [{ value: 'active', label: 'Active — falls' }, { value: 'passive', label: 'Passive — held still' }],
           body.kind,
           (v) => {
-            ed.beginUndo('Rigid body kind');
+            if (!ed.beginUndo('Rigid body kind')) return;
             body.kind = v === 'passive' ? 'passive' : 'active';
             body.mass = body.kind === 'passive' ? 0 : Math.max(0.001, body.mass || 1);
             ed.emit('change');
@@ -253,7 +253,7 @@ export class Properties {
           [{ value: 'box', label: 'Box' }, { value: 'sphere', label: 'Sphere' }],
           body.shape,
           (v) => {
-            ed.beginUndo('Rigid body shape');
+            if (!ed.beginUndo('Rigid body shape')) return;
             body.shape = v === 'sphere' ? 'sphere' : 'box';
             ed.emit('change');
           },
@@ -323,7 +323,7 @@ export class Properties {
           numberField({
             label: axis, value: get()[a], step, precision: 3,
             onChange: (v) => {
-              ed.beginUndo(`Bone ${label.toLowerCase()}`);
+              if (!ed.beginUndo(`Bone ${label.toLowerCase()}`)) return;
               const next = [...get()] as [number, number, number];
               next[a] = v;
               set(next);
@@ -339,7 +339,7 @@ export class Properties {
           row('Envelope', numberField({
             label: '', value: bone.envelope, step: 0.05, min: 0, precision: 3,
             onChange: (v) => {
-              ed.beginUndo('Bone envelope');
+              if (!ed.beginUndo('Bone envelope')) return;
               bone.envelope = v;
               this.repose(ed, obj.id);
             },
@@ -419,7 +419,7 @@ export class Properties {
       '',
       (v) => {
         if (!v) return;
-        ed.beginUndo(`Add ${v} modifier`);
+        if (!ed.beginUndo(`Add ${v} modifier`)) return;
         obj.modifiers.push(createModifier(v as ModifierType));
         ed.markGeometryDirty(obj);
         addSelect.value = '';
@@ -443,7 +443,7 @@ export class Properties {
   private modifierCard(obj: SceneObject, mod: Modifier, index: number): HTMLElement {
     const ed = this.editor;
     const update = (label: string): void => {
-      ed.beginUndo(label);
+      if (!ed.beginUndo(label)) return;
       ed.markGeometryDirty(obj);
     };
     const live = (): void => {
@@ -668,7 +668,7 @@ export class Properties {
       slots,
       h('div', { class: 'btn-row' }, [
         button('New Material', () => {
-          ed.beginUndo('New material');
+          if (!ed.beginUndo('New material')) return;
           const idx = scene.addMaterial(createMaterial());
           obj.materialSlots = [idx];
           ed.requestRender();
@@ -683,7 +683,7 @@ export class Properties {
 
     const nameInput = h('input', { class: 'text-input', value: mat.name, type: 'text' });
     nameInput.addEventListener('change', () => {
-      ed.beginUndo('Rename material');
+      if (!ed.beginUndo('Rename material')) return;
       mat.name = nameInput.value || mat.name;
       ed.emit('change');
     });
@@ -737,7 +737,7 @@ export class Properties {
     const preview = scene.textures.find((t) => t.id === mat.baseColorTexture);
     this.body.appendChild(this.section('Texture', [
       row('Base colour map', select(textureOptions, mat.baseColorTexture === null ? '' : String(mat.baseColorTexture), (v) => {
-        ed.beginUndo('Set texture');
+        if (!ed.beginUndo('Set texture')) return;
         mat.baseColorTexture = v === '' ? null : Number(v);
         ed.requestRender();
         ed.emit('change');

@@ -1,6 +1,6 @@
 import { BuildPart, BuildPlan, COLOR_NAMES, resolveColor } from './plan';
 import { RECIPE_KEYS, RecipeOptions, runRecipe } from './recipes';
-import { ParamValue, Provenance, assignPartKeys } from './provenance';
+import { ParamValue, Provenance, assignIdentities } from './provenance';
 import { ProposedPart } from './merge';
 import { meshForPart } from './plan';
 import { DEG2RAD } from '../core/math';
@@ -219,8 +219,16 @@ function numberOr(v: ParamValue | undefined, fallback: number): number {
  * two unrelated lists.
  */
 export function proposedFromParts(parts: BuildPart[]): ProposedPart[] {
-  const keys = assignPartKeys(parts.map((p) => p.name ?? p.shape));
-  return parts.map((part, i) => {
+  return identifiedParts(parts).parts;
+}
+
+/** The same, with the identity problems the caller should show. */
+export function identifiedParts(
+  parts: BuildPart[],
+): { parts: ProposedPart[]; problems: string[]; uncertain: string[] } {
+  const assigned = assignIdentities(parts.map((p) => ({ id: p.id, name: p.name ?? p.shape })));
+  const keys = assigned.keys;
+  const out: ProposedPart[] = parts.map((part, i) => {
     const mesh = meshForPart(part);
     const rotation: [number, number, number] = part.rotation
       ? [part.rotation[0] * DEG2RAD, part.rotation[1] * DEG2RAD, part.rotation[2] * DEG2RAD]
@@ -235,6 +243,13 @@ export function proposedFromParts(parts: BuildPart[]): ProposedPart[] {
       color: part.color,
     };
   });
+  return {
+    parts: out,
+    problems: assigned.problems,
+    // Anything not carrying an identity of its own is matched by where it sits
+    // in the list, which is a guess the moment a program reorders itself.
+    uncertain: keys.filter((_, i) => assigned.source[i] === 'derived'),
+  };
 }
 
 /** The settings an asset exposes, for the panel that shows what can be changed. */

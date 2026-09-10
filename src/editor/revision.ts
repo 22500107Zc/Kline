@@ -1,12 +1,13 @@
 import { Mesh } from '../mesh/Mesh';
-import { Vec3 } from '../core/math';
+import { Vec3, decomposeMatrix } from '../core/math';
 import { Scene, SceneObject, SerializedObject, SerializedScene } from '../scene/Scene';
 import { createMaterial, hexToLinear } from '../scene/Material';
 import {
-  CurrentPart, MergePlan, MergeReport, ProposedPart, mergeAsset, summariseMerge,
+  CurrentPart, MergeConflict, MergePlan, MergeReport, ProposedPart, mergeAsset, summariseMerge,
 } from '../build/merge';
 import {
-  Baseline, BaselinePart, Provenance, cloneProvenance, hasBaseline, regenerability,
+  BASELINE_VERSION, Baseline, BaselinePart, Provenance, cloneProvenance, hasBaseline,
+  regenerability,
 } from '../build/provenance';
 import { EditorSnapshot } from './history';
 
@@ -44,6 +45,10 @@ interface PendingRevision {
   provenance: Provenance;
   /** What the generator produced, kept so a conflict can still be resolved its way. */
   proposed: ProposedPart[];
+  /** Part keys that stay deleted, updated as existence conflicts are settled. */
+  stillDeleted: Set<string>;
+  /** Every choice made during review, recorded so the outcome is explainable. */
+  resolved: { key: string; field: string; choice: 'mine' | 'theirs' | 'both' }[];
   summary: RevisionSummary;
 }
 
@@ -75,6 +80,23 @@ export function collectAsset(scene: Scene, root: SceneObject): {
   const byId = new Map<number, SerializedObject>();
   for (const o of doc.objects) byId.set(o.id, o);
 
+  /** Everything of the creator's own hanging under an object, at any depth. */
+  const userUnder = (id: number): { id: number; name: string }[] => {
+    const out: { id: number; name: string }[] = [];
+    const walk = (at: number): void => {
+      const node = scene.get(at);
+      if (!node) return;
+      for (const child of node.children) {
+        const obj = scene.get(child);
+        if (!obj) continue;
+        if (!obj.partKey) out.push({ id: obj.id, name: obj.name });
+        walk(child);
+      }
+    };
+    walk(id);
+    return out;
+  };
+
   const visit = (id: number): void => {
     const obj = scene.get(id);
     if (!obj) return;
@@ -85,6 +107,7 @@ export function collectAsset(scene: Scene, root: SceneObject): {
           key: obj.partKey,
           object: serialized,
           protectedFromRegen: obj.protectedFromRegen,
+          userDescendants: userUnder(id),
         });
       } else if (id !== root.id) {
         userAdded.push({ id, name: obj.name });
@@ -99,41 +122,42 @@ export function collectAsset(scene: Scene, root: SceneObject): {
   return { current, userAdded };
 }
 
-/** A fingerprint of the asset, for noticing that it moved while we were thinking. */
+/**
+ * A stamp identifying exactly which version of an asset a request was made
+ * against.
+ *
+ * The first attempt at this sampled a few hundred vertex positions and hashed
+ * them, which is fast and wrong: a mesh edit that happens to miss every
+ * sampled index is invisible, and so is any change to a material, a modifier
+ * or an animation. A stamp that can miss a change is worse than none, because
+ * it is trusted.
+ *
+ * So it is exact. `Mesh.revision` is bumped by every mutation the kernel makes
+ * — it is what the renderer and the modifier cache already rely on — and
+ * everything else that could have changed is small enough to compare whole.
+ * There is nothing here that is sampled, approximated, or hoped about.
+ */
 export function assetFingerprint(scene: Scene, root: SceneObject | null): string {
   if (!root) return '';
-  const doc = scene.toJSON();
-  const wanted = new Set<number>([root.id]);
-  const collect = (id: number): void => {
-    const obj = scene.get(id);
-    if (!obj) return;
-    for (const c of obj.children) {
-      wanted.add(c);
-      collect(c);
-    }
+  const parts: string[] = [];
+  const visit = (id: number): void => {
+    const o = scene.get(id);
+    if (!o) return;
+    parts.push(JSON.stringify([
+      o.id, o.partKey, o.name,
+      o.position.toArray(), o.rotation.toArray(), o.scale.toArray(),
+      o.materialSlots, o.materialSlots.map((slot) => scene.materials[slot] ?? null),
+      o.visible, o.locked, o.protectedFromRegen, o.parent, [...o.children].sort(),
+      o.modifiers, o.animation ?? [],
+      // The kernel's own change counter, plus identity: a modifier stack hands
+      // back a fresh mesh at revision 1 every time it runs, so the counter
+      // alone would collide.
+      o.mesh ? [o.mesh.id, o.mesh.revision] : null,
+    ]));
+    for (const child of o.children) visit(child);
   };
-  collect(root.id);
-  const parts = doc.objects
-    .filter((o) => wanted.has(o.id))
-    .map((o) => JSON.stringify([o.id, o.name, o.position, o.rotation, o.scale, o.materialSlots,
-      o.visible, o.locked, o.mesh?.positions.length ?? 0, o.mesh?.faces.length ?? 0,
-      o.mesh ? hashMesh(o.mesh) : 0]));
-  return parts.sort().join('|');
-}
-
-/** A cheap content hash — enough to notice a change, not a security digest. */
-function hashMesh(mesh: NonNullable<SerializedObject['mesh']>): number {
-  let h = 2166136261;
-  const step = Math.max(1, Math.floor(mesh.positions.length / 512));
-  for (let i = 0; i < mesh.positions.length; i += step) {
-    h ^= Math.round(mesh.positions[i] * 1e5) | 0;
-    h = Math.imul(h, 16777619);
-  }
-  for (let f = 0; f < mesh.faces.length; f += Math.max(1, Math.floor(mesh.faces.length / 256))) {
-    h ^= mesh.faces[f].length + mesh.faces[f][0] * 31;
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
+  visit(root.id);
+  return parts.join('|');
 }
 
 export class RevisionSession {
@@ -174,16 +198,45 @@ export class RevisionSession {
      * program onto it now would leave the program behind after a rejection.
      */
     patch: Partial<Pick<Provenance, 'code' | 'params' | 'prompt' | 'reference' | 'seed'>> = {},
+    /**
+     * The asset this proposal was generated against.
+     *
+     * A model takes seconds and a person does not wait. If the object was
+     * deleted and something else now holds its id — a new build, an import, a
+     * reopened file — then this answer belongs to a question about something
+     * that no longer exists, and applying it would corrupt whatever is there
+     * now. Identity is checked rather than inferred from the id.
+     */
+    expectAssetId?: string,
   ): RevisionSummary | null {
-    if (this.pending) this.reject();
+    // A second request while one is open used to silently reject the first.
+    // That is a proposal thrown away without anybody being asked — the same
+    // class of quiet loss this whole thing exists to stop, just aimed at the
+    // review instead of the model.
+    if (this.pending) {
+      this.host.setStatus(
+        `"${this.pending.label}" is still waiting. Accept or reject it before starting another.`,
+      );
+      return null;
+    }
     const prov = root.provenance;
     if (!prov) {
       this.host.setStatus('That object has no record of how it was made, so there is nothing to revise.');
       return null;
     }
+    if (expectAssetId !== undefined && prov.assetId !== expectAssetId) {
+      this.host.setStatus(
+        'That object was replaced while this revision was being generated, so the result was '
+        + 'discarded. Nothing was changed.',
+      );
+      return null;
+    }
     const scene = this.host.scene;
     const { current, userAdded } = collectAsset(scene, root);
-    const plan = mergeAsset(prov.baseline, current, proposed, userAdded);
+    const plan = mergeAsset(prov.baseline, current, proposed, userAdded, {
+      deleted: prov.deletedParts,
+      materials: scene.materials,
+    });
 
     const before = this.host.snapshot(label);
     this.applyPlan(root, plan, proposed);
@@ -195,7 +248,10 @@ export class RevisionSession {
     // settled on: the baseline's job is to record the generator's opinion, so
     // that next time round a part you kept can still be told from one it
     // changed.
-    next.baseline = baselineFrom(proposed, prov.baseline);
+    // The baseline is not written here. Half of it has to be read from the
+    // live objects *after* every conflict has been settled, so it is built at
+    // acceptance instead — see `accept`.
+    next.deletedParts = undefined;   // filled in at acceptance, once conflicts are settled
     if (patch.code !== undefined) next.code = patch.code;
     if (patch.prompt !== undefined) next.prompt = patch.prompt;
     if (patch.seed !== undefined) next.seed = patch.seed;
@@ -216,6 +272,8 @@ export class RevisionSession {
     this.pending = {
       assetId: prov.assetId, rootId: root.id, label, before, provenance: next,
       proposed, summary,
+      stillDeleted: new Set(plan.stillDeleted),
+      resolved: [],
     };
     this.host.refresh();
     this.host.setStatus(`Preview: ${label} — ${summary.headline}. Accept or Reject.`);
@@ -258,9 +316,37 @@ export class RevisionSession {
   accept(): boolean {
     const pending = this.pending;
     if (!pending) return false;
+    // An unresolved conflict must not vanish into an acceptance. Either settle
+    // them one at a time, or say once that your versions win — which is
+    // recorded, so the next revision knows the argument was had.
+    if (pending.summary.report.conflicts.length) {
+      this.host.setStatus(
+        `${pending.summary.report.conflicts.length} conflict(s) still open. Resolve them, or `
+        + 'choose "Keep my versions for all remaining" to settle them together.',
+      );
+      return false;
+    }
     this.pending = null;
-    const root = this.host.scene.get(pending.rootId);
-    if (root) root.provenance = pending.provenance;
+    const scene = this.host.scene;
+    const root = scene.get(pending.rootId);
+    if (root) {
+      const live = new Map<string, SceneObject>();
+      const walk = (id: number): void => {
+        const obj = scene.get(id);
+        if (!obj) return;
+        if (obj.partKey && !live.has(obj.partKey)) live.set(obj.partKey, obj);
+        for (const child of obj.children) walk(child);
+      };
+      walk(root.id);
+      pending.provenance.baseline = baselineFrom(
+        pending.proposed, pending.provenance.baseline, live, scene.materials,
+      );
+      // A part with no object behind it after every choice was made is one you
+      // deleted. Recorded here, so it does not come back next time.
+      const gone = [...pending.stillDeleted].filter((key) => !live.has(key));
+      pending.provenance.deletedParts = gone.length ? gone : undefined;
+      root.provenance = pending.provenance;
+    }
     // The held snapshot becomes the undo entry, so undoing puts back the whole
     // revision — geometry, provenance, materials and hierarchy together —
     // rather than an object at a time.
@@ -268,6 +354,23 @@ export class RevisionSession {
     this.host.setStatus(`Accepted: ${pending.label} — ${pending.summary.headline}`);
     this.host.refresh();
     return true;
+  }
+
+  /**
+   * Settle every remaining conflict in your favour, in one act.
+   *
+   * Offered because refusing to accept until each is answered individually is
+   * right in principle and tiring in practice on a forty-part asset. What it
+   * is not is a way for them to disappear: choosing this is a decision, it is
+   * recorded on the parts it covers, and it reads as an override rather than
+   * as agreement.
+   */
+  keepMineForAll(): number {
+    const pending = this.pending;
+    if (!pending) return 0;
+    const open = [...pending.summary.report.conflicts];
+    for (const conflict of open) this.resolveConflict(conflict.key, 'mine', conflict.field);
+    return open.length;
   }
 
   /**
@@ -282,14 +385,80 @@ export class RevisionSession {
    *     status of something you made — which it now is, since nothing will
    *     regenerate it again.
    */
-  resolveConflict(key: string, choice: 'mine' | 'theirs' | 'both'): boolean {
+  resolveConflict(
+    key: string,
+    choice: 'mine' | 'theirs' | 'both',
+    field?: MergeConflict['field'],
+  ): boolean {
     const pending = this.pending;
     if (!pending) return false;
-    const conflict = pending.summary.report.conflicts.find((c) => c.key === key);
+    const conflict = pending.summary.report.conflicts.find(
+      (c) => c.key === key && (field === undefined || c.field === field),
+    );
     if (!conflict) return false;
     const scene = this.host.scene;
     const source = pending.proposed.find((p) => p.key === key) ?? null;
     const mine = conflict.objectId !== null ? scene.get(conflict.objectId) : null;
+
+    // Protection is not advice. A part held back from regeneration stays held
+    // back through this panel too — otherwise the switch means "unless you
+    // press a different button", which is not what anybody reads it as. The
+    // conflict is closed either way, because it has been answered: the answer
+    // is that the protection stands.
+    if (mine?.protectedFromRegen && choice !== 'mine') {
+      this.host.setStatus(
+        `"${mine.name}" is protected from regeneration. Turn that off in its properties first `
+        + 'if you want this revision to change it.',
+      );
+      this.settle(pending, conflict, 'kept-yours');
+      return true;
+    }
+
+    // A disagreement about a name is settled by changing a name. Applying the
+    // whole generated part would also reset a placement and a shape nobody was
+    // arguing about, which is the quiet loss this is all here to prevent.
+    if (conflict.field && conflict.field !== 'geometry' && conflict.field !== 'existence') {
+      if (choice === 'theirs' && mine && source) {
+        if (conflict.field === 'name') mine.name = source.name;
+        if (conflict.field === 'position') mine.position = new Vec3(...source.position);
+        if (conflict.field === 'rotation') mine.rotation = new Vec3(...source.rotation);
+        if (conflict.field === 'scale') mine.scale = new Vec3(...source.scale);
+      }
+      // "Keep both" has no meaning for a single scalar field; it is not
+      // offered for one, and if it arrives anyway it means keep mine.
+      this.settle(pending, conflict, choice === 'theirs' ? 'updated' : 'kept-yours');
+      return true;
+    }
+
+    // Existence: you deleted it, the revision wants it back (or the reverse).
+    if (conflict.field === 'existence') {
+      const root = scene.get(pending.rootId);
+      if (choice === 'theirs') {
+        if (source && root) {
+          // Restore it, explicitly, because you asked.
+          const obj = scene.add('mesh', source.name, source.mesh ? Mesh.fromJSON(source.mesh) : new Mesh());
+          obj.partKey = key;
+          obj.position = new Vec3(...source.position);
+          obj.rotation = new Vec3(...source.rotation);
+          obj.scale = new Vec3(...source.scale);
+          obj.materialSlots = [source.color
+            ? materialFor(scene, source.color)
+            : scene.ensureDefaultMaterial()];
+          scene.setParent(obj.id, root.id);
+          pending.stillDeleted.delete(key);
+        } else if (mine) {
+          // The other direction: the generator removes it and you agree.
+          this.detachUserWork(mine, pending.rootId);
+          scene.remove(mine.id);
+          pending.stillDeleted.add(key);
+        }
+      } else {
+        // Keep mine: whatever you had is what stays, deletion included.
+        if (!mine) pending.stillDeleted.add(key);
+      }
+      this.settle(pending, conflict, choice === 'theirs' ? 'updated' : 'kept-yours');
+      return true;
+    }
 
     if (choice === 'theirs' || choice === 'both') {
       if (!source) {
@@ -325,16 +494,64 @@ export class RevisionSession {
       }
     }
 
-    pending.summary.report.conflicts = pending.summary.report.conflicts.filter((c) => c.key !== key);
-    for (const part of pending.summary.report.parts) {
-      if (part.key !== key) continue;
-      part.action = choice === 'mine' ? 'kept-yours' : choice === 'both' ? 'added' : 'updated';
-      if (choice === 'mine') part.keptYours = ['everything'];
-      else part.tookGenerator = ['geometry'];
-    }
-    pending.summary.headline = summariseMerge(pending.summary.report);
-    this.host.refresh();
+    this.settle(pending, conflict, choice === 'mine' ? 'kept-yours' : choice === 'both' ? 'added' : 'updated');
     return true;
+  }
+
+  /**
+   * Record that one disagreement has been answered, and refresh the counts.
+   *
+   * The summary is what somebody reads to decide whether they are finished, so
+   * it has to move as each choice is made rather than at the end.
+   */
+  private settle(
+    pending: PendingRevision, conflict: MergeConflict, action: 'kept-yours' | 'updated' | 'added',
+  ): void {
+    const report = pending.summary.report;
+    report.conflicts = report.conflicts.filter((c) => c !== conflict);
+    pending.resolved.push({
+      key: conflict.key,
+      field: conflict.field ?? 'geometry',
+      choice: action === 'kept-yours' ? 'mine' : action === 'added' ? 'both' : 'theirs',
+    });
+    const stillOpen = report.conflicts.some((c) => c.key === conflict.key);
+    for (const part of report.parts) {
+      if (part.key !== conflict.key || stillOpen) continue;
+      part.action = action;
+      if (action === 'kept-yours') part.keptYours = [...new Set([...part.keptYours, conflict.field ?? 'geometry'])];
+      else part.tookGenerator = [...new Set([...part.tookGenerator, conflict.field ?? 'geometry'])];
+    }
+    pending.summary.headline = summariseMerge(report);
+    this.host.refresh();
+  }
+
+  /**
+   * Move anything the creator made out from under a part about to be removed.
+   *
+   * `Scene.remove` takes the whole subtree, so a detail modelled onto a step
+   * would go with the step. Lifting it to the asset root keeps it, and keeping
+   * its world matrix keeps it where it was — a survivor that teleports because
+   * its parent's transform vanished has been damaged, not preserved.
+   */
+  private detachUserWork(doomed: SceneObject, rootId: number): void {
+    const scene = this.host.scene;
+    const root = scene.get(rootId);
+    if (!root) return;
+    for (const child of [...doomed.children]) {
+      const obj = scene.get(child);
+      if (!obj) continue;
+      if (obj.partKey) {
+        this.detachUserWork(obj, rootId);
+        continue;
+      }
+      const world = obj.worldMatrix(scene);
+      scene.setParent(child, rootId);
+      const local = root.worldMatrix(scene).inverse().multiply(world);
+      const placed = decomposeMatrix(local);
+      obj.position = placed.position;
+      obj.rotation = placed.rotation;
+      obj.scale = placed.scale;
+    }
   }
 
   /**
@@ -351,17 +568,12 @@ export class RevisionSession {
 
     for (const id of plan.remove) {
       // Anything of yours hanging off a part the generator dropped is lifted
-      // to the asset root first. `Scene.remove` takes the whole subtree, so
-      // without this a detail modelled onto a step would disappear with the
-      // step — losing work to a removal nobody asked about, which is exactly
-      // what this is all for.
+      // clear first, at any depth and keeping its place in the world. Without
+      // it a detail modelled onto a step disappears with the step; with a
+      // naive reparent it survives but jumps, which is damage wearing the
+      // clothes of preservation.
       const doomed = scene.get(id);
-      if (doomed) {
-        for (const child of [...doomed.children]) {
-          const obj = scene.get(child);
-          if (obj && !obj.partKey) scene.setParent(child, root.id);
-        }
-      }
+      if (doomed) this.detachUserWork(doomed, root.id);
       scene.remove(id);
     }
 
@@ -405,18 +617,50 @@ function materialFor(scene: Scene, hex: string): number {
   return scene.addMaterial(createMaterial({ name: hex, color: wanted, roughness: 0.55 }));
 }
 
-/** The generator's new output, recorded as the baseline for next time. */
-export function baselineFrom(proposed: ProposedPart[], previous: Baseline): Baseline {
-  const parts: BaselinePart[] = proposed.map((p) => ({
-    key: p.key,
-    name: p.name,
-    position: p.position,
-    rotation: p.rotation,
-    scale: p.scale,
-    mesh: p.mesh,
-    color: p.color,
-  }));
-  return parts.length ? { parts } : previous;
+/**
+ * The baseline to compare against next time.
+ *
+ * Two different questions live in one record, and they take their answers from
+ * two different places.
+ *
+ * For the fields the generator owns — shape, placement, name — it is what the
+ * generator just produced, *even where you kept yours instead*. That is what
+ * makes a preserved edit stay preserved: next time round the generator offers
+ * the same thing again, which now matches the baseline, so it reads as "the
+ * generator did not change this" and your version is kept without asking you
+ * a second time. Recording your version here instead would make the next
+ * revision believe the generator had produced it, and quietly overwrite it.
+ *
+ * For the fields the generator has no opinion about — materials, modifiers,
+ * animation, visibility — it is the state at the moment you agreed, so that an
+ * edit made afterwards is detectable as an edit.
+ */
+export function baselineFrom(
+  proposed: ProposedPart[],
+  previous: Baseline,
+  live: Map<string, SceneObject>,
+  materials: unknown[],
+): Baseline {
+  const parts: BaselinePart[] = proposed.map((p) => {
+    const obj = live.get(p.key) ?? null;
+    return {
+      key: p.key,
+      name: p.name,
+      position: p.position,
+      rotation: p.rotation,
+      scale: p.scale,
+      mesh: p.mesh,
+      color: p.color,
+      materialSlots: obj ? [...obj.materialSlots] : [],
+      materials: obj ? obj.materialSlots.map((slot) => materials[slot] ?? null) : [],
+      modifiers: obj ? JSON.parse(JSON.stringify(obj.modifiers)) : [],
+      animation: obj ? JSON.parse(JSON.stringify(obj.animation ?? [])) : [],
+      visible: obj ? obj.visible : true,
+      locked: obj ? obj.locked : false,
+      protectedFromRegen: obj ? obj.protectedFromRegen : false,
+    };
+  });
+  return parts.length ? { parts, version: BASELINE_VERSION } : previous;
 }
 
 /**

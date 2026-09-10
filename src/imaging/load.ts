@@ -85,7 +85,9 @@ export function releaseReference(reference: Reference | null): void {
     reference.element.removeAttribute('src');
     reference.element.load();
   }
-  URL.revokeObjectURL(reference.url);
+  // A reference rebuilt from a picture stored in the document has no object
+  // URL behind it; revoking an empty string is harmless but saying so is not.
+  if (reference.url) URL.revokeObjectURL(reference.url);
 }
 
 /** Move a video's playhead and wait for the frame to actually be ready. */
@@ -178,4 +180,31 @@ export function drawReferenceInto(
   const y = (canvas.height - h) / 2;
   ctx.drawImage(reference.element, x, y, w, h);
   return { x, y, width: w, height: h };
+}
+
+/**
+ * Rebuild a reference from a picture stored in the document.
+ *
+ * The counterpart to `textureFromReference`: that puts the image into the file
+ * so a generated model can be rebuilt later, and this is later. It reads a
+ * data URL, so it works with the network unplugged and depends on nothing
+ * outside the file.
+ */
+export function referenceFromDataUrl(name: string, url: string): Promise<Reference> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({
+      name,
+      kind: 'image',
+      width: image.naturalWidth,
+      height: image.naturalHeight,
+      element: image,
+      duration: 0,
+      // Not an object URL, so there is nothing to revoke; releaseReference
+      // checks for the blob: prefix before it revokes anything.
+      url: '',
+    });
+    image.onerror = () => reject(new Error(`The stored picture "${name}" could not be decoded`));
+    image.src = url;
+  });
 }
