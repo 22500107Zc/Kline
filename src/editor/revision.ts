@@ -27,6 +27,22 @@ import { carryAttributes, describeCarry } from '../mesh/carry';
  * revision that touched forty parts is one Ctrl+Z and not forty.
  */
 
+/**
+ * What a revision did, kept after the panel that described it has gone.
+ *
+ * The panel is bound to the *pending* review and Accept and Reject both end
+ * that, so anything written onto the summary at the last moment was displayed
+ * to nobody: the note went up and the panel came down in the same breath. A
+ * placement that could not be reproduced exactly is exactly such a note, and
+ * it was the one thing in there that a person needed to act on.
+ */
+export interface RevisionOutcome {
+  label: string;
+  action: 'accepted' | 'rejected';
+  /** Anything that could not be done exactly. Empty on the ordinary path. */
+  warnings: string[];
+}
+
 export interface RevisionSummary {
   label: string;
   report: MergeReport;
@@ -50,6 +66,8 @@ interface PendingRevision {
   stillDeleted: Set<string>;
   /** Every choice made during review, recorded so the outcome is explainable. */
   resolved: { key: string; field: string; choice: 'mine' | 'theirs' | 'both' }[];
+  /** Anything that could not be done exactly, kept for the record afterwards. */
+  warnings: string[];
   summary: RevisionSummary;
 }
 
@@ -69,6 +87,13 @@ export interface RevisionHost {
   restore(snapshot: EditorSnapshot): void;
   pushHistory(snapshot: EditorSnapshot): void;
   setStatus(message: string): void;
+  /**
+   * Put something in front of the person that stays there until they dismiss
+   * it. For what the status bar cannot carry: a status line is overwritten by
+   * the next thing that happens, and a placement that had to be approximated
+   * is not a thing to mention in passing.
+   */
+  notify?(title: string, warnings: string[]): void;
   refresh(): void;
 }
 
@@ -173,7 +198,22 @@ export function assetFingerprint(scene: Scene, root: SceneObject | null): string
 export class RevisionSession {
   private pending: PendingRevision | null = null;
 
+  /**
+   * The last finished revision, and anything about it worth saying.
+   *
+   * Survives the review it describes. Read by the panel, which shows it in
+   * place of the review once there is no review, and cleared when the person
+   * dismisses it.
+   */
+  outcome: RevisionOutcome | null = null;
+
   constructor(private host: RevisionHost) {}
+
+  /** The person has read the last outcome. */
+  dismissOutcome(): void {
+    this.outcome = null;
+    this.host.refresh();
+  }
 
   get active(): boolean {
     return this.pending !== null;
@@ -305,6 +345,7 @@ export class RevisionSession {
       proposed, summary,
       stillDeleted: new Set(plan.stillDeleted),
       resolved: [],
+      warnings: [],
     };
     this.host.refresh();
     this.host.setStatus(`Preview: ${label} — ${summary.headline}. Accept or Reject.`);
@@ -351,7 +392,7 @@ export class RevisionSession {
    * genuinely traceless, and accepting adds exactly one step.
    */
   committedScene(): SerializedScene | null {
-    return this.pending ? this.sceneWithAssetReverted(this.pending, false) : null;
+    return this.pending ? this.sceneWithAssetReverted(this.pending) : null;
   }
 
   /**
@@ -378,9 +419,11 @@ export class RevisionSession {
     // discarded — the proposal is the authority on those, and holding both
     // would mean two objects with one id.
     const docAsset = assetIdsIn(doc, pending.rootId);
-    const base = doc.objects.filter((o) => !live.has(o.id)
-      && !(docAsset.has(o.id) && (o.partKey || o.id === pending.rootId)));
-    const proposal = now.objects.filter((o) => live.has(o.id));
+    const base = doc.objects
+      .filter((o) => !live.has(o.id)
+        && !(docAsset.has(o.id) && (o.partKey || o.id === pending.rootId)))
+      .map(cloneRecord);
+    const proposal = now.objects.filter((o) => live.has(o.id)).map(cloneRecord);
 
     // Lifting is measured against wherever the object actually is: a restored
     // object against the document being restored, a proposed one against the
@@ -400,10 +443,7 @@ export class RevisionSession {
 
     return {
       ...doc,
-      // The proposal's parts may have been given materials that the restored
-      // document has never heard of, and their slots are indices into the
-      // list. Materials only ever grow, so the longer list is the safe one.
-      materials: now.materials.length >= doc.materials.length ? now.materials : doc.materials,
+      materials: materialsFor(doc, now),
       objects,
       order,
       selection: doc.selection.filter((id) => present.has(id)),
@@ -427,8 +467,17 @@ export class RevisionSession {
     // anything you did elsewhere while you were deciding — work you never
     // offered up and were never asked about, destroyed by a button labelled
     // "reject this revision".
-    this.host.restore({ ...pending.before, scene: this.sceneWithAssetReverted(pending) });
+    const warnings = [...pending.warnings];
+    this.host.restore({
+      ...pending.before,
+      scene: this.sceneWithAssetReverted(pending, warnings),
+    });
+    // The reconstruction has just been applied to the scene in front of the
+    // person, so whatever it could not do exactly is true *now* and is said
+    // now — on a notice that outlives the panel it replaces.
+    this.outcome = { label: pending.label, action: 'rejected', warnings: unique(warnings) };
     this.host.setStatus(`Rejected: ${pending.label}. The rest of your work is untouched.`);
+    if (warnings.length) this.host.notify?.(`Rejected: ${pending.label}`, unique(warnings));
     this.host.refresh();
     return true;
   }
@@ -444,13 +493,15 @@ export class RevisionSession {
   private sceneWithAssetReverted(
     pending: PendingRevision,
     /**
-     * Whether anything that could not be done exactly is worth telling the
-     * person about. False when the result is only being *measured* — the
-     * history takes a committed document on every unrelated edit during a
-     * review, and a warning about a detachment that has not happened and may
-     * never happen does not belong on the panel each time.
+     * Where to put anything that could not be done exactly, when the caller is
+     * going to apply this result and is therefore in a position to report it.
+     *
+     * Omitted when the result is only being *measured*: the history takes a
+     * committed document on every unrelated edit during a review, and a
+     * warning about a detachment that has not happened and may never happen
+     * does not belong in front of anybody each time.
      */
-    record = true,
+    collect?: string[],
   ): SerializedScene {
     const now = this.host.scene.toJSON(this.host.snapshotStore?.());
     const was = pending.before.scene;
@@ -476,15 +527,13 @@ export class RevisionSession {
 
     // The restored copies are the authority on the asset's own shape; anything
     // of yours keeps the state it is in. An id in both belongs to the asset.
-    const restored = was.objects.filter((o) => oldIds.has(o.id));
-    const kept = now.objects.filter((o) => !liveIds.has(o.id) && !oldIds.has(o.id));
+    const restored = was.objects.filter((o) => oldIds.has(o.id)).map(cloneRecord);
+    const kept = now.objects
+      .filter((o) => !liveIds.has(o.id) && !oldIds.has(o.id))
+      .map(cloneRecord);
 
     const { objects, warnings } = stitch([...kept, ...restored], wasAt);
-    if (record) {
-      for (const warning of warnings) {
-        if (!pending.summary.notes.includes(warning)) pending.summary.notes.push(warning);
-      }
-    }
+    if (collect) for (const warning of warnings) collect.push(warning);
 
     const present = new Set(objects.map((o) => o.id));
     const topLevel = objects.filter((o) => o.parent === null).map((o) => o.id);
@@ -539,9 +588,16 @@ export class RevisionSession {
     const scene = this.host.scene;
     // Computed before the provenance is installed, so the undo entry holds the
     // record as it was as well as the geometry as it was.
+    const undone: string[] = [];
     const undoEntry: EditorSnapshot = {
       ...pending.before,
-      scene: this.sceneWithAssetReverted(pending),
+      scene: this.sceneWithAssetReverted(pending, undone),
+      // Nothing is approximated by accepting — the asset is kept exactly as it
+      // was previewed. The approximation is in the *undo*, which lifts work
+      // off parts the revision introduced, and it has not happened yet. So the
+      // warnings travel with the snapshot and are said when it is restored,
+      // which is when they become true.
+      warnings: unique(undone),
     };
     this.pending = null;
     const root = scene.get(pending.rootId);
@@ -567,6 +623,12 @@ export class RevisionSession {
     // revision — geometry, provenance, materials and hierarchy together —
     // rather than an object at a time.
     this.host.pushHistory(undoEntry);
+    this.outcome = {
+      label: pending.label, action: 'accepted', warnings: unique(pending.warnings),
+    };
+    if (pending.warnings.length) {
+      this.host.notify?.(`Accepted: ${pending.label}`, unique(pending.warnings));
+    }
     this.host.setStatus(`Accepted: ${pending.label} — ${pending.summary.headline}`);
     this.host.refresh();
     return true;
@@ -812,10 +874,20 @@ export class RevisionSession {
       const world = obj.worldMatrix(scene);
       scene.setParent(child, rootId);
       const local = root.worldMatrix(scene).inverse().multiply(world);
-      const placed = decomposeMatrix(local);
-      obj.position = placed.position;
-      obj.rotation = placed.rotation;
-      obj.scale = placed.scale;
+      const trouble = placeExactly(local, obj.name, (position, rotation, scale) => {
+        obj.position = position;
+        obj.rotation = rotation;
+        obj.scale = scale;
+      });
+      // This one happens while you are looking at the preview, so it goes on
+      // the panel in front of you — and into the record of what the operation
+      // did, which outlives the panel.
+      if (trouble && this.pending) {
+        if (!this.pending.summary.notes.includes(trouble)) {
+          this.pending.summary.notes.push(trouble);
+        }
+        if (!this.pending.warnings.includes(trouble)) this.pending.warnings.push(trouble);
+      }
     }
   }
 
@@ -872,6 +944,78 @@ export class RevisionSession {
   }
 }
 
+/**
+ * The material list a restored document should carry while a proposal is up.
+ *
+ * Two things are true at once and the old rule could only express one of them.
+ * The materials are *document state*: editing one during a review is ordinary
+ * work, it goes in the history like any other edit, and undoing it has to put
+ * the old values back. But a proposal may have been given a material that was
+ * created after the document being restored — `materialFor` adds one when the
+ * generator names a colour nothing in the scene already has — and its parts
+ * address materials by index, so dropping that entry would leave them pointing
+ * past the end of the list and rendering as the default.
+ *
+ * What was there before was `now.materials.length >= doc.materials.length ?
+ * now.materials : doc.materials`: pick one whole list by comparing lengths.
+ * A length cannot tell you which *values* belong to an undo state. Editing an
+ * existing material during a review leaves both lists the same length, so the
+ * live list won, and undoing the edit put the geometry back while silently
+ * keeping the new colour — an undo that undid some of what it said it would.
+ *
+ * The list is append-only and indices are stable, so the two questions
+ * separate cleanly per slot rather than per list:
+ *
+ *   - A slot the restored document knows about keeps *its* value. That is the
+ *     state being restored, for every object that refers to it.
+ *   - A slot created since is carried across unchanged, because something on
+ *     screen may be the only thing that refers to it.
+ *
+ * A material shared between your work and a proposed part is one material, and
+ * it follows the document: undoing an edit to it changes the proposal's
+ * appearance too. That is not a compromise, it is what sharing means — and the
+ * alternative, quietly forking it, would leave you with two materials where
+ * you made one and no way to tell which is which.
+ */
+function materialsFor(doc: SerializedScene, now: SerializedScene): SerializedScene['materials'] {
+  if (now.materials.length <= doc.materials.length) return doc.materials;
+  return [...doc.materials, ...now.materials.slice(doc.materials.length)];
+}
+
+/**
+ * A copy of a serialized object that reconstruction may safely rewrite.
+ *
+ * The scoped rebuilds below take objects out of two documents and stitch them
+ * into a third, and stitching *edits*: it re-parents, rewrites children lists
+ * and recomputes placements. `Array.prototype.filter` hands back a new array
+ * of the same objects, so every one of those edits used to land on the
+ * original — and one of those originals is `pending.before.scene`, the held
+ * snapshot that Reject exists to restore, and the entries in the undo history.
+ * Rebuilding twice therefore worked from an input the first rebuild had
+ * already altered, and an undo could restore a state that no longer matched
+ * what had been recorded.
+ *
+ * Only what is written to is copied. A serialized mesh is a frozen blob shared
+ * deliberately between every snapshot that references it — copying those is
+ * exactly the cost the history's blob store exists to avoid — and nothing here
+ * writes to one.
+ */
+function cloneRecord(o: SerializedObject): SerializedObject {
+  return {
+    ...o,
+    position: [...o.position] as [number, number, number],
+    rotation: [...o.rotation] as [number, number, number],
+    scale: [...o.scale] as [number, number, number],
+    children: [...o.children],
+    materialSlots: [...o.materialSlots],
+  };
+}
+
+/** The same thing said twice is one thing. */
+function unique(list: string[]): string[] {
+  return [...new Set(list)];
+}
+
 /** Every id under a root in a serialized document, the root included. */
 function assetIdsIn(doc: SerializedScene, rootId: number): Set<number> {
   const byId = new Map<number, SerializedObject>();
@@ -923,6 +1067,37 @@ function worldMatrices(doc: SerializedScene): Map<number, Mat4> {
 const PLACEMENT_TOLERANCE = 1e-4;
 
 /**
+ * Write a world-space placement into position/rotation/scale, and say so when
+ * it does not fit.
+ *
+ * Those three cannot express every affine transform. A rotated child of a
+ * non-uniformly scaled parent is sheared, and no combination of a position, an
+ * euler rotation and three axis scales reproduces shear. When such an object is
+ * lifted out from under its parent there is no exact answer available, so the
+ * closest one is written and the shortfall is reported — rather than a wrong
+ * placement applied in silence, which is the only other option and the worse
+ * one.
+ *
+ * Returns null when the placement went in exactly, which is the ordinary case.
+ */
+function placeExactly(
+  world: Mat4,
+  name: string,
+  write: (p: Vec3, r: Vec3, sc: Vec3) => void,
+): string | null {
+  const { position, rotation, scale } = decomposeMatrix(world);
+  write(position, rotation, scale);
+  const rebuilt = Mat4.compose(position, rotation, scale);
+  const size = Math.max(Math.abs(scale.x), Math.abs(scale.y), Math.abs(scale.z), 1);
+  let worst = 0;
+  for (let i = 0; i < 16; i++) worst = Math.max(worst, Math.abs(rebuilt.m[i] - world.m[i]));
+  if (worst <= PLACEMENT_TOLERANCE * size) return null;
+  return `"${name}" was lifted off a part that is no longer there. Its parent's scale and `
+    + 'rotation combined into a shear, which position, rotation and scale cannot hold between '
+    + 'them, so it has been placed as closely as they can — worth checking.';
+}
+
+/**
  * Make a document that was assembled out of pieces into a coherent one.
  *
  * Three things can be wrong with such a document, and all three used to be:
@@ -967,25 +1142,12 @@ function stitch(
     o.parent = null;
     const world = wasAt.get(o.id);
     if (!world) continue;
-    const { position, rotation, scale } = decomposeMatrix(world);
-    // Position, rotation and scale cannot express every affine transform: a
-    // rotated child of a non-uniformly scaled parent is sheared, and no
-    // combination of the three reproduces shear. Rather than write a
-    // silently-wrong placement, the difference is measured and reported.
-    const rebuilt = Mat4.compose(position, rotation, scale);
-    const size = Math.max(Math.abs(scale.x), Math.abs(scale.y), Math.abs(scale.z), 1);
-    let worst = 0;
-    for (let i = 0; i < 16; i++) worst = Math.max(worst, Math.abs(rebuilt.m[i] - world.m[i]));
-    o.position = [position.x, position.y, position.z];
-    o.rotation = [rotation.x, rotation.y, rotation.z];
-    o.scale = [scale.x, scale.y, scale.z];
-    if (worst > PLACEMENT_TOLERANCE * size) {
-      warnings.push(
-        `"${o.name}" was detached from a part that is no longer there. Its parent's scale and `
-        + 'rotation combined into a shear, which position/rotation/scale cannot hold, so it has '
-        + 'been placed as closely as they can — check it.',
-      );
-    }
+    const trouble = placeExactly(world, o.name, (position, rotation, scale) => {
+      o.position = [position.x, position.y, position.z];
+      o.rotation = [rotation.x, rotation.y, rotation.z];
+      o.scale = [scale.x, scale.y, scale.z];
+    });
+    if (trouble) warnings.push(trouble);
   }
 
   // Both directions of every link agree, or the link is not there.

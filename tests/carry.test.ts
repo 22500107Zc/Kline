@@ -33,10 +33,21 @@ test('a UV-only carry reports what it measured, not what it assumed', () => {
   // whenever there was nothing per-vertex to carry.
   assert.ok(report.total > 0, 'correspondence was never measured');
   assert.equal(report.total, to.vertCount, 'not every vertex was accounted for');
-  assert.equal(report.quality, 'exact', 'the same cube twice should correspond exactly');
+  // The two cubes occupy the same space — that is a fact about geometry, and
+  // it is recorded as one.
+  assert.equal(report.coincident, true, 'the same cube twice should coincide');
   assert.equal(report.worst, 0);
-  assert.match(describeCarry(report), /landed on the old surface/);
+  // It is *not* on its own a reason to claim the coordinates came across
+  // untouched: an unwrapped cube has seams, and a face whose corners straddle
+  // one is re-sampled rather than copied.
+  assert.equal(report.quality, 'approximate',
+    'coincident geometry was taken as proof that nothing was approximated');
+  const uv = report.attributes.find((a) => a.name === 'UV coordinates');
+  assert.equal(uv.outcome, 'resampled');
+  assert.ok(uv.lossy.length > 0, 'a re-sampled transfer reported no reason');
+  assert.match(describeCarry(report), /Not a straight copy/);
   assert.doesNotMatch(describeCarry(report), /moved or resized as a whole/);
+  assert.doesNotMatch(describeCarry(report), /nothing was approximated/);
 });
 
 test('a UV carry between separated shapes says how far it had to reach', () => {
@@ -149,4 +160,141 @@ test('no report claims a close correspondence it did not measure', () => {
       assert.match(said, /not measured/, 'an unmeasured transfer did not say so');
     }
   }
+});
+
+// ----------------------------------- geometry is not attribute preservation
+
+/**
+ * A source with nothing about it that forces an approximation: one flat quad,
+ * with a coordinate footprint small enough that the transfer takes each
+ * corner's own value rather than re-deriving the face against a single source
+ * triangle. A wide footprint trips the transfer's straddle test and genuinely
+ * does change the corners — which is a real loss, and one this file checks for
+ * separately.
+ */
+function seamless(): Mesh {
+  const mesh = new Mesh();
+  mesh.positions = [
+    new Vec3(-1, -1, 0), new Vec3(1, -1, 0), new Vec3(1, 1, 0), new Vec3(-1, 1, 0),
+  ];
+  mesh.faces = [[0, 1, 2, 3]];
+  mesh.faceMaterial = [0];
+  mesh.setUV(0, [0.1, 0.1, 0.3, 0.1, 0.3, 0.3, 0.1, 0.3]);
+  mesh.markDirty();
+  return mesh;
+}
+
+test('a lossless path is the only thing allowed to claim exact preservation', () => {
+  const from = seamless();
+  const to = seamless();
+  to.setUV(0, null);
+  const report = carryAttributes(from, to);
+
+  // Same surface, same vertices, one face, no seam to straddle, nothing to
+  // blend and no influence to drop. This is what lossless looks like.
+  assert.equal(report.coincident, true);
+  assert.equal(report.quality, 'exact', 'a demonstrably lossless transfer was not called exact');
+  const uv = report.attributes.find((a) => a.name === 'UV coordinates');
+  assert.equal(uv.outcome, 'preserved');
+  assert.deepEqual(uv.lossy, []);
+  assert.match(describeCarry(report), /copied from the vertex it belonged to/);
+  // And it really is what was there, corner for corner.
+  const back = to.uvFor(0);
+  assert.deepEqual([...back].map((n) => +n.toFixed(6)), [0.1, 0.1, 0.3, 0.1, 0.3, 0.3, 0.1, 0.3]);
+});
+
+test('a coincident surface with seams is not exact, and says which faces were re-sampled', () => {
+  const from = mapped();
+  const to = buildPrimitive('cube');
+  const report = carryAttributes(from, to);
+
+  assert.equal(report.coincident, true, 'the surfaces do coincide');
+  assert.notEqual(report.quality, 'exact',
+    'seam handling changed the coordinates and the report called it exact');
+  const uv = report.attributes.find((a) => a.name === 'UV coordinates');
+  assert.equal(uv.outcome, 'resampled');
+  assert.match(uv.lossy.join(' '), /straddled a seam/);
+});
+
+test('coordinates that reach no faces are reported even when the weights arrive', () => {
+  const from = mapped();
+  from.skin = {
+    bones: new Int32Array(from.vertCount * 4),
+    weights: new Float32Array(from.vertCount * 4),
+  };
+  for (let v = 0; v < from.vertCount; v++) {
+    from.skin.bones[v * 4] = 3;
+    from.skin.weights[v * 4] = 1;
+  }
+  // A target made only of degenerate faces: nothing that can take coordinates.
+  const to = buildPrimitive('cube');
+  to.faces = to.faces.map(() => [0, 1]);
+  to.faceMaterial = to.faces.map(() => 0);
+  to.markDirty();
+
+  const report = carryAttributes(from, to);
+
+  assert.ok(report.carried.includes('skin weights'), 'the weights did not come across');
+  assert.equal(report.uvFilled, 0, 'the fixture did transfer coordinates after all');
+  const uv = report.attributes.find((a) => a.name === 'UV coordinates');
+  assert.ok(uv, 'coordinates were asked for and no verdict was recorded');
+  assert.equal(uv.outcome, 'failed',
+    'a UV transfer that filled no faces was not reported as a failure');
+  assert.equal(report.quality, 'partial',
+    'a failed attribute was hidden by the ones that succeeded');
+  assert.match(describeCarry(report), /no UV coordinates could be transferred at all/);
+});
+
+test('dropping a fifth influence is reported, not folded into a clean result', () => {
+  // Every source vertex carries four influences; a target vertex sampled
+  // between three of them pools up to twelve and can keep four.
+  const from = seamless();
+  from.skin = {
+    bones: new Int32Array(from.vertCount * 4),
+    weights: new Float32Array(from.vertCount * 4),
+  };
+  for (let v = 0; v < from.vertCount; v++) {
+    for (let i = 0; i < 4; i++) {
+      from.skin.bones[v * 4 + i] = v * 4 + i;      // every corner, different bones
+      from.skin.weights[v * 4 + i] = 0.25;
+    }
+  }
+  // A target whose vertices sit inside the source face rather than on its
+  // corners, so each sample pools influences from three different corners.
+  const to = new Mesh();
+  to.positions = [
+    new Vec3(-0.5, -0.5, 0), new Vec3(0.5, -0.5, 0), new Vec3(0.5, 0.5, 0), new Vec3(-0.5, 0.5, 0),
+  ];
+  to.faces = [[0, 1, 2, 3]];
+  to.faceMaterial = [0];
+  to.markDirty();
+
+  const report = carryAttributes(from, to);
+  const skin = report.attributes.find((a) => a.name === 'skin weights');
+  assert.ok(skin, 'weights were asked for and no verdict was recorded');
+  assert.equal(skin.delivered, to.vertCount, 'every vertex should have got weights');
+  assert.notEqual(skin.outcome, 'preserved',
+    'influences were discarded and the result was still called preserved');
+  assert.equal(report.coincident, true, 'the target does lie on the source surface');
+  assert.notEqual(report.quality, 'exact',
+    'a transfer that discarded influences was called exact');
+  assert.match(skin.lossy.join(' '), /influences|blended/);
+
+  // Every kept vertex still sums to one, whatever was dropped.
+  for (let v = 0; v < to.vertCount; v++) {
+    let sum = 0;
+    for (let i = 0; i < 4; i++) sum += to.skin.weights[v * 4 + i];
+    assert.ok(Math.abs(sum - 1) < 1e-5, `vertex ${v} weights sum to ${sum}`);
+  }
+});
+
+test('every attribute asked for gets a verdict, including on a total failure', () => {
+  const from = mapped();
+  from.colors = new Float32Array(from.vertCount * 3).fill(0.5);
+  const report = carryAttributes(from, new Mesh());
+  const names = report.attributes.map((a) => a.name).sort();
+  assert.deepEqual(names, ['UV coordinates', 'vertex colours'],
+    'an attribute was asked for and never accounted for');
+  assert.ok(report.attributes.every((a) => a.outcome === 'failed'));
+  assert.equal(report.quality, 'failed');
 });

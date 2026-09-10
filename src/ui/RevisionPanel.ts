@@ -35,13 +35,10 @@ export class RevisionPanel {
   private refresh(): void {
     const summary = this.editor.revision.summary;
     if (!summary) {
-      this.root.classList.add('hidden');
-      this.body.replaceChildren();
-      // The headline as well: it names a revision that is over, and leaving it
-      // behind would greet the next one with the last one's summary.
-      this.headline.replaceChildren();
+      this.showNotice();
       return;
     }
+    this.root.querySelector('h2')!.textContent = 'Review revision';
     this.root.classList.remove('hidden');
     this.headline.replaceChildren(
       h('strong', { text: summary.label }),
@@ -81,6 +78,49 @@ export class RevisionPanel {
     rows.push(this.kept(summary.report));
     rows.push(this.changes(summary.report));
     this.body.replaceChildren(...rows.filter((r): r is HTMLElement => r !== null));
+  }
+
+
+  /**
+   * What is left to say once there is no review.
+   *
+   * The panel used to simply vanish when a revision was accepted or rejected,
+   * taking with it anything written on it at the last moment — which is
+   * precisely when a reconstruction reports what it could not do exactly. The
+   * note went up and the panel came down together, so nobody ever read one.
+   *
+   * Now the panel stays for that one purpose, saying what happened and what
+   * about it needs looking at, until it is dismissed. When there is nothing to
+   * say it hides, as before.
+   */
+  private showNotice(): void {
+    const notice = this.editor.notice;
+    const outcome = this.editor.revision.outcome;
+    const title = notice?.title ?? (outcome?.warnings.length
+      ? `${outcome.action === 'accepted' ? 'Accepted' : 'Rejected'}: ${outcome.label}`
+      : null);
+    const warnings = notice?.warnings ?? outcome?.warnings ?? [];
+    if (!title || !warnings.length) {
+      this.root.classList.add('hidden');
+      this.body.replaceChildren();
+      // The headline as well: it names a revision that is over, and leaving it
+      // behind would greet the next one with the last one's summary.
+      this.headline.replaceChildren();
+      this.actions.replaceChildren();
+      return;
+    }
+    this.root.classList.remove('hidden');
+    this.root.querySelector('h2')!.textContent = 'Check this';
+    this.headline.replaceChildren(h('strong', { text: title }));
+    this.body.replaceChildren(
+      ...warnings.map((w) => h('p', { class: 'revision-note', text: w })),
+    );
+    this.actions.replaceChildren(
+      button('Got it', () => {
+        this.editor.dismissNotice();
+        this.editor.revision.dismissOutcome();
+      }, { title: 'Dismiss this note.' }),
+    );
   }
 
   /**

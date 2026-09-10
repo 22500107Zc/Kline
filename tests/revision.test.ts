@@ -36,10 +36,12 @@ function build(prompt: string): { scene: Scene; root: SceneObject } {
 /** A revision host backed by a plain scene, which is all the session needs. */
 function hostFor(scene: Scene): {
   session: RevisionSession; history: History; refreshes: number[]; status: string[];
+  notices: { title: string; warnings: string[] }[];
 } {
   const history = new History();
   const refreshes: number[] = [];
   const status: string[] = [];
+  const notices: { title: string; warnings: string[] }[] = [];
   const snapshot = (label: string) => ({
     label,
     scene: scene.toJSON(history.store),
@@ -55,9 +57,10 @@ function hostFor(scene: Scene): {
     restore: (snap) => { scene.adopt(Scene.fromJSON(snap.scene)); },
     pushHistory: (snap) => history.push(snap),
     setStatus: (m) => { status.push(m); },
+    notify: (title, warnings) => { notices.push({ title, warnings }); },
     refresh: () => { refreshes.push(1); },
   });
-  return { session, history, refreshes, status };
+  return { session, history, refreshes, status, notices };
 }
 
 /**
@@ -1889,4 +1892,292 @@ test('stepping through your own history during a review leaves the proposal up',
   app.session.reject();
   assert.equal(scene.get(part.id)!.mesh!.faceCount, cubeFaces, 'Reject stopped working');
   assert.equal(scene.get(mine.id)!.position.x, 9, 'Reject undid your work');
+});
+
+// ------------------------------------------------- placement that cannot fit
+
+/**
+ * A rotated child under a non-uniformly scaled proposed parent.
+ *
+ * The one arrangement position/rotation/scale genuinely cannot reproduce once
+ * the parent goes: the combination is a shear, and there is no euler rotation
+ * and axis scale that makes one.
+ */
+function shearScene(): { scene: Scene; root: SceneObject; proposed: never } {
+  const scene = new Scene();
+  const root = scene.add('empty', 'Rig');
+  const anchor = scene.add('mesh', 'Anchor', buildPrimitive('cube'));
+  anchor.partKey = 'anchor#1';
+  scene.setParent(anchor.id, root.id);
+  root.provenance = normaliseProvenance({
+    schema: 2, source: 'program', assetId: 'a1', generator: 'program', params: {},
+    baseline: {
+      version: 2,
+      parts: [{
+        key: 'anchor#1', name: 'Anchor', position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1],
+        mesh: anchor.mesh!.toJSON(), materialSlots: [], materials: [], modifiers: [],
+        animation: [], visible: true, locked: false,
+      }],
+    },
+  });
+  const proposed = [
+    {
+      key: 'anchor#1', name: 'Anchor',
+      position: [0, 0, 0] as [number, number, number],
+      rotation: [0, 0, 0] as [number, number, number],
+      scale: [1, 1, 1] as [number, number, number],
+      mesh: anchor.mesh!.toJSON(),
+    },
+    {
+      key: 'skew#1', name: 'Skew',
+      position: [3, 1, 2] as [number, number, number],
+      rotation: [0, 0, 0] as [number, number, number],
+      // Wildly non-uniform: this is what turns a rotated child into a shear.
+      scale: [5, 1, 0.25] as [number, number, number],
+      mesh: buildPrimitive('cube').toJSON(),
+    },
+  ];
+  return { scene, root, proposed: proposed as never };
+}
+
+/** Hang a rotated object of your own under the proposed skewed part. */
+function rotatedChildUnderSkew(scene: Scene): { yours: SceneObject; skew: SceneObject } {
+  const skew = [...scene.objects.values()].find((o) => o.partKey === 'skew#1')!;
+  const yours = scene.add('mesh', 'Tag', buildPrimitive('cube'));
+  yours.position = new Vec3(0.4, 0.2, 0.1);
+  yours.rotation = new Vec3(0, 0, Math.PI / 4);
+  scene.setParent(yours.id, skew.id);
+  return { yours, skew };
+}
+
+test('a placement that cannot be reproduced exactly is applied as closely as possible and said out loud', () => {
+  const { scene, root, proposed } = shearScene();
+  const { session, notices } = hostFor(scene);
+  session.preview(scene.get(root.id)!, proposed, 'add a skewed mount');
+  const { yours, skew } = rotatedChildUnderSkew(scene);
+  const wanted = worldOf(scene, yours.id);
+
+  assert.equal(session.reject(), true);
+
+  // The part it was hanging on is gone; your object is not.
+  assert.ok(!scene.get(skew.id), 'the proposed part survived a rejection');
+  const survivor = scene.get(yours.id)!;
+  assert.ok(survivor, 'your work went with the part it was attached to');
+
+  const got = worldOf(scene, yours.id);
+  const worst = Math.max(...got.map((n, i) => Math.abs(n - wanted[i])));
+
+  // Either it fits exactly, or it does not and that is reported. What must not
+  // happen is the second one silently.
+  const outcome = session.outcome!;
+  assert.ok(outcome, 'a finished revision left no record of itself');
+  assert.equal(outcome.action, 'rejected');
+  if (worst > 1e-6) {
+    assert.ok(outcome.warnings.length > 0,
+      `placement was off by ${worst} and nothing was said about it`);
+    assert.match(outcome.warnings.join(' '), /shear|as closely as/);
+    assert.equal(notices.length, 1, 'the warning never reached a visible notice');
+    assert.match(notices[0].title, /Rejected/);
+  } else {
+    assert.deepEqual(outcome.warnings, [],
+      'an exact placement was reported as an approximation');
+  }
+});
+
+test('the same placement warning arrives at the undo, not at the accept', () => {
+  const { scene, root, proposed } = shearScene();
+  const { session, history, notices } = hostFor(scene);
+  session.preview(scene.get(root.id)!, proposed, 'add a skewed mount');
+  const { yours } = rotatedChildUnderSkew(scene);
+  const wanted = worldOf(scene, yours.id);
+
+  assert.equal(session.accept(), true);
+  // Accepting keeps the asset exactly as previewed. Nothing was approximated,
+  // so nothing is claimed to have been.
+  assert.deepEqual(notices, [], 'accepting warned about an approximation it had not made');
+  assert.equal(session.outcome!.action, 'accepted');
+
+  const entry = history.steps()[0];
+  assert.ok(entry, 'accepting recorded no undo step');
+
+  const back = history.undo({
+    label: 'redo', scene: scene.toJSON(), mode: 'object', editObject: null,
+    selectMode: 'vertex' as SelectMode, verts: [], edges: [], faces: [],
+  })!;
+  scene.adopt(Scene.fromJSON(back.scene));
+
+  const got = worldOf(scene, yours.id);
+  const worst = Math.max(...got.map((n, i) => Math.abs(n - wanted[i])));
+  if (worst > 1e-6) {
+    // The approximation happens *here*, so the warning has to be attached to
+    // the state that causes it rather than announced when it was computed.
+    assert.ok((back.warnings ?? []).length > 0,
+      `the undo moved your work by ${worst} and carried no warning`);
+    assert.match((back.warnings ?? []).join(' '), /shear|as closely as/);
+  } else {
+    assert.deepEqual(back.warnings ?? [], [],
+      'an exact undo carried a warning about an approximation');
+  }
+});
+
+test('an ordinary revision finishes with a record and nothing to warn about', () => {
+  const { scene, root, part } = assetAndBystander();
+  const { session, notices } = hostFor(scene);
+  session.preview(scene.get(root.id)!, sphereProposal as never, 'make it round');
+  assert.equal(session.accept(), true);
+  assert.deepEqual(notices, [], 'a clean revision produced a warning');
+  assert.deepEqual(session.outcome, { label: 'make it round', action: 'accepted', warnings: [] });
+  assert.ok(scene.get(part.id));
+
+  session.dismissOutcome();
+  assert.equal(session.outcome, null, 'the record could not be dismissed');
+});
+
+// -------------------------------------------- reconstruction touches nothing
+
+/** A deep, stable description of a serialized document. */
+const frozen = (doc: object): string => JSON.stringify(doc);
+
+test('reconstruction never writes back into the snapshots it reads', () => {
+  const { scene, root, proposed } = shearScene();
+  const app = editorLike(scene);
+  app.session.preview(scene.get(root.id)!, proposed, 'add a skewed mount');
+  rotatedChildUnderSkew(scene);
+
+  // Everything the reconstruction is about to read from.
+  const heldBefore = frozen(app.history.steps().map((st) => st.scene));
+
+  // Measuring a committed document is the thing that happens most often — once
+  // per unrelated edit during a review — so it is the one most able to corrupt
+  // what it reads.
+  const first = frozen(app.session.committedScene()!);
+  const second = frozen(app.session.committedScene()!);
+  assert.equal(second, first, 'building the committed document twice gave two answers');
+
+  // And putting the proposal back over a stored step.
+  const step = app.history.steps()[0];
+  if (step) {
+    const stepBefore = frozen(step.scene);
+    app.session.withProposal(step.scene);
+    app.session.withProposal(step.scene);
+    assert.equal(frozen(step.scene), stepBefore,
+      'restoring a history entry rewrote the entry it was restoring');
+  }
+  assert.equal(frozen(app.history.steps().map((st) => st.scene)), heldBefore,
+    'the history was altered by being read');
+});
+
+test('repeated undo and redo during a review stay on the same states', () => {
+  const { scene, root, part, mine } = assetAndBystander();
+  const app = editorLike(scene);
+  app.edit('Move Mine', () => { scene.get(mine.id)!.position = new Vec3(9, 0, 0); });
+  app.session.preview(scene.get(root.id)!, sphereProposal as never, 'make it round');
+
+  const at = (): string => JSON.stringify({
+    mine: scene.get(mine.id)?.position.toArray(),
+    faces: scene.get(part.id)?.mesh?.faceCount,
+    reviewing: app.session.active,
+  });
+
+  app.undo();
+  const undone = at();
+  app.redo();
+  const redone = at();
+  // The stacks re-capture as they turn over — an undo pushes the state it left
+  // onto the redo side — so the *entries* legitimately change hands. What must
+  // not change is where they lead.
+  const settled = frozen(app.history.steps().map((st) => st.scene));
+
+  // Round and round: every lap has to land on the same two states.
+  for (let i = 0; i < 4; i++) {
+    app.undo();
+    assert.equal(at(), undone, `undo drifted on lap ${i + 1}`);
+    app.redo();
+    assert.equal(at(), redone, `redo drifted on lap ${i + 1}`);
+    assert.equal(frozen(app.history.steps().map((st) => st.scene)), settled,
+      `the recorded states drifted on lap ${i + 1}`);
+  }
+});
+
+test('rejecting after a rebuild still restores exactly what was held', () => {
+  const { scene, root, part, mine } = assetAndBystander();
+  const app = editorLike(scene);
+  const before = scene.get(part.id)!.mesh!.faceCount;
+  app.session.preview(scene.get(root.id)!, sphereProposal as never, 'make it round');
+
+  // Build the committed document several times over — every unrelated edit
+  // does — then reject. A rebuild that had damaged the held snapshot would
+  // show up here as a rejection that restores the wrong thing.
+  app.session.committedScene();
+  app.edit('Move Mine', () => { scene.get(mine.id)!.position = new Vec3(9, 0, 0); });
+  app.session.committedScene();
+  app.edit('Move Mine again', () => { scene.get(mine.id)!.position = new Vec3(11, 0, 0); });
+
+  assert.equal(app.session.reject(), true);
+  assert.equal(scene.get(part.id)!.mesh!.faceCount, before,
+    'the asset was not restored to what was held');
+  assert.equal(scene.get(mine.id)!.position.x, 11, 'rejecting undid your unrelated work');
+});
+
+test('putting the proposal back over a stored step does not rewrite the step', () => {
+  // Your own work, hanging on a part the revision drops. Restoring a step from
+  // before the preview means rebuilding a document in which that part is gone
+  // but your work is not — which is the case that has to *move* something, and
+  // so the case that can damage what it is reading.
+  const scene = new Scene();
+  const root = scene.add('empty', 'Rig');
+  const keep = scene.add('mesh', 'Keep', buildPrimitive('cube'));
+  keep.partKey = 'keep#1';
+  scene.setParent(keep.id, root.id);
+  const drop = scene.add('mesh', 'Drop', buildPrimitive('cube'));
+  drop.partKey = 'drop#1';
+  drop.position = new Vec3(4, 5, 6);
+  drop.rotation = new Vec3(0, 0, Math.PI / 3);
+  scene.setParent(drop.id, root.id);
+  const tag = scene.add('mesh', 'Tag', buildPrimitive('cube'));
+  tag.position = new Vec3(0.5, 0, 0);
+  scene.setParent(tag.id, drop.id);
+
+  const partOf = (o: SceneObject) => ({
+    key: o.partKey!, name: o.name,
+    position: o.position.toArray() as [number, number, number],
+    rotation: o.rotation.toArray() as [number, number, number],
+    scale: o.scale.toArray() as [number, number, number],
+    mesh: o.mesh!.toJSON(),
+  });
+  root.provenance = normaliseProvenance({
+    schema: 2, source: 'program', assetId: 'a1', generator: 'program', params: {},
+    baseline: {
+      version: 2,
+      parts: [keep, drop].map((o) => ({
+        ...partOf(o), materialSlots: [], materials: [], modifiers: [], animation: [],
+        visible: true, locked: false,
+      })),
+    },
+  });
+
+  const app = editorLike(scene);
+  app.edit('Nudge', () => { scene.get(tag.id)!.position = new Vec3(0.75, 0, 0); });
+  const step = app.history.steps()[0];
+  assert.ok(step, 'nothing was recorded to rebuild against');
+  const stored = JSON.stringify(step.scene);
+
+  // A revision that keeps one part and drops the other.
+  const summary = app.session.preview(scene.get(root.id)!, [partOf(scene.get(keep.id)!)] as never,
+    'drop the arm')!;
+  const removal = summary.report.conflicts.find((c) => c.key === 'drop#1');
+  assert.ok(removal, 'dropping a part carrying your work went through unasked');
+  app.session.resolveConflict('drop#1', 'theirs', removal!.field);
+  assert.ok(!scene.get(drop.id), 'the part was not dropped');
+
+  const rebuilt = app.session.withProposal(step.scene);
+  assert.equal(JSON.stringify(step.scene), stored,
+    'rebuilding against a recorded step rewrote the step itself');
+
+  // Twice, because a rebuild that damages its input gives a different answer
+  // the second time round.
+  const again = app.session.withProposal(step.scene);
+  assert.equal(JSON.stringify(again), JSON.stringify(rebuilt),
+    'rebuilding the same step twice gave two different documents');
+  assert.equal(JSON.stringify(step.scene), stored, 'the second rebuild rewrote the step');
 });

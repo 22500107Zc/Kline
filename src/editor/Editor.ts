@@ -95,6 +95,7 @@ export class Editor {
     restore: (snap) => this.restore(snap),
     pushHistory: (snap) => this.history.push(snap),
     setStatus: (msg) => this.setStatus(msg),
+    notify: (title, warnings) => this.notify(title, warnings),
     refresh: () => {
       for (const id of this.scene.objects.keys()) this.renderer.invalidate(id);
       this.emit('revision');
@@ -629,6 +630,30 @@ export class Editor {
    * restored document so that stepping through your own history during a
    * review does what it says and nothing more.
    */
+  /**
+   * Something the person needs to see and dismiss, rather than read in passing.
+   *
+   * The status bar is a running commentary: the next thing that happens
+   * overwrites it. That is right for "Selected edge ring" and wrong for "this
+   * placement could not be reproduced exactly", which is a thing to act on and
+   * may be minutes of work away from being noticed.
+   */
+  notice: { title: string; warnings: string[] } | null = null;
+
+  notify(title: string, warnings: string[]): void {
+    if (!warnings.length) return;
+    this.notice = { title, warnings };
+    this.emit('revision');
+    this.changed();
+  }
+
+  /** The person has read it. */
+  dismissNotice(): void {
+    this.notice = null;
+    this.emit('revision');
+    this.changed();
+  }
+
   restore(s: EditorSnapshot): void {
     this.scene.adopt(Scene.fromJSON(this.revision.withProposal(s.scene)));
     this.mode = s.mode;
@@ -638,6 +663,11 @@ export class Editor {
     for (const id of this.scene.objects.keys()) this.renderer.invalidate(id);
     this.bumpSelection();
     this.changed();
+    // A stored reconstruction that could not be exact only becomes inexact
+    // when it is put on screen, which has just happened. Said after the
+    // restore rather than during it, so the notice describes a state that is
+    // already there to be looked at.
+    if (s.warnings?.length) this.notify(`Undo: ${s.label}`, s.warnings);
   }
 
   /**

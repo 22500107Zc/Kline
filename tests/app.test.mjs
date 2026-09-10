@@ -3146,6 +3146,270 @@ void main(){ float d = texture(uD, vT).r; o = vec4(d, d, d, 1.0); }`));
     assert.equal(out.rejectKeptYourCube, true, 'Reject destroyed work you did during the review');
   });
 
+  test('a material edited during a review is undone and redone like any other work', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const k = window.kline, ed = k.editor;
+      const bar = k.app.buildBar;
+
+      // Something of your own, with a material of its own, parked where the
+      // camera can see it and well clear of the asset.
+      k.run('add.cube');
+      const mine = ed.scene.get(ed.scene.active);
+      mine.position.x = 0;
+      if (!ed.beginUndo('New material')) return { ok: false, why: 'could not add a material' };
+      const slot = ed.scene.addMaterial({
+        ...ed.scene.materials[0], name: 'Mine', color: [0.9, 0.1, 0.1],
+      });
+      mine.materialSlots = [slot];
+      const mineId = mine.id;
+
+      bar.focus('a staircase with 8 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      // Out of the way, so the sampled pixel is the cube and only the cube.
+      root.position.x = 40;
+      ed.selectObject(root.id);
+
+      const colourOf = () => [...ed.scene.materials[slot].color];
+      const red = colourOf();
+
+      bar.focus('make it 14 steps');
+      await bar.revise();
+      if (!ed.revision.active) return { ok: false, why: 'no revision was staged' };
+
+      // An ordinary edit to an existing material, while the review is up. The
+      // object that carries it is selected, the way it would be to reach the
+      // material panel at all — the asset under review is not.
+      ed.selectObject(mineId);
+      if (!ed.beginUndo('Edit material')) return { ok: false, why: 'the edit was blocked' };
+      ed.scene.materials[slot].color = [0.1, 0.2, 0.9];
+      ed.requestRender();
+      const blue = colourOf();
+
+      ed.undo();
+      const afterUndo = colourOf();
+      ed.redo();
+      const afterRedo = colourOf();
+
+      // Still reviewing, and the proposal is still on screen.
+      const stillReviewing = ed.revision.active;
+      const stepsDuring = ed.scene.get(root.id).children.length;
+
+      ed.revision.reject();
+      const afterReject = colourOf();
+      ed.undo();
+      const afterRejectUndo = colourOf();
+      ed.redo();
+      const afterRejectRedo = colourOf();
+
+      return {
+        ok: true, mineId, slot, red, blue, afterUndo, afterRedo,
+        stillReviewing, stepsDuring, afterReject, afterRejectUndo, afterRejectRedo,
+      };
+    });
+
+    assert.equal(out.ok, true, out.why);
+    assert.deepEqual(out.blue.map((n) => +n.toFixed(3)), [0.1, 0.2, 0.9]);
+    // The whole finding: undoing an edit made during a review has to undo it.
+    assert.deepEqual(out.afterUndo, out.red,
+      `undoing a material edit made during a review kept the new colour: ${out.afterUndo}`);
+    assert.deepEqual(out.afterRedo.map((n) => +n.toFixed(3)), [0.1, 0.2, 0.9],
+      'redo did not put the material edit back');
+    assert.equal(out.stillReviewing, true, 'stepping through history cancelled the review');
+    assert.equal(out.stepsDuring, 14, 'stepping through history took the proposal off the screen');
+    // Rejecting the revision is not a reason to lose your material edit.
+    assert.deepEqual(out.afterReject.map((n) => +n.toFixed(3)), [0.1, 0.2, 0.9],
+      'rejecting the revision undid your material edit');
+    assert.deepEqual(out.afterRejectUndo, out.red,
+      'the material edit was not undoable after the revision was rejected');
+    assert.deepEqual(out.afterRejectRedo.map((n) => +n.toFixed(3)), [0.1, 0.2, 0.9],
+      'the material edit was not redoable after the revision was rejected');
+  });
+
+  test('the viewport shows the undone material, not just the record of it', async () => {
+    await resetScene(page);
+    const setup = await page.evaluate(async () => {
+      const k = window.kline, ed = k.editor;
+      const bar = k.app.buildBar;
+      k.run('add.cube');
+      const mine = ed.scene.get(ed.scene.active);
+      ed.beginUndo('New material');
+      const slot = ed.scene.addMaterial({
+        ...ed.scene.materials[0], name: 'Mine', color: [0.9, 0.05, 0.05], roughness: 0.9,
+      });
+      mine.materialSlots = [slot];
+      bar.focus('a staircase with 8 steps');
+      await bar.run();
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      root.position.x = 40;
+      // Look at the cube, not at the staircase the build bar just framed, so
+      // the sampled pixel is the surface whose material is under test.
+      ed.selectObject(mine.id);
+      k.run('view.frameSelected');
+      // Deselect so the selection outline does not colour the sample.
+      ed.scene.selection.clear();
+      ed.scene.active = null;
+      ed.requestRender();
+      return { slot, root: root.id, mine: mine.id };
+    });
+
+    const patch = [];
+    for (let i = 0; i < 5; i++) {
+      for (let j = 0; j < 5; j++) patch.push([0.42 + i * 0.04, 0.42 + j * 0.04]);
+    }
+    /** Mean blue-minus-red across the patch: which way the surface leans. */
+    const lean = (pixels) =>
+      pixels.reduce((sum, px) => sum + (px[2] - px[0]), 0) / pixels.length;
+
+    const before = lean(await samplePixels(page, patch));
+
+    await page.evaluate(async ({ slot, mine }) => {
+      const k = window.kline, ed = k.editor;
+      const bar = k.app.buildBar;
+      const root = [...ed.scene.objects.values()].find((o) => o.provenance);
+      ed.selectObject(root.id);
+      bar.focus('make it 14 steps');
+      await bar.revise();
+      // Select your own cube, as you would to reach its material — and look
+      // back at it, because staging a revision frames the asset.
+      ed.selectObject(mine);
+      k.run('view.frameSelected');
+      ed.beginUndo('Edit material');
+      ed.scene.materials[slot].color = [0.05, 0.05, 0.9];
+      ed.scene.selection.clear();
+      ed.scene.active = null;
+      ed.requestRender();
+    }, setup);
+
+    const edited = lean(await samplePixels(page, patch));
+
+    await page.evaluate(() => {
+      const ed = window.kline.editor;
+      ed.undo();
+      ed.scene.selection.clear();
+      ed.scene.active = null;
+      ed.requestRender();
+    });
+
+    const undone = lean(await samplePixels(page, patch));
+    const reviewing = await page.evaluate(() => window.kline.editor.revision.active);
+
+    // Warm key light, so the surface is never a flat swatch of its base colour
+    // and "is this pixel blue" is the wrong question. What the screen can
+    // answer is which way it moved: turning a red material blue has to lift the
+    // blue channel and drop the red, and undoing that has to put both back.
+    assert.ok(edited > before + 30,
+      `the edit did not reach the screen: lean went ${before.toFixed(1)} -> ${edited.toFixed(1)}`);
+    assert.ok(Math.abs(undone - before) < 8,
+      'undoing the material edit during a review left it on screen: lean went '
+      + `${before.toFixed(1)} -> ${edited.toFixed(1)} -> ${undone.toFixed(1)}`);
+    assert.equal(reviewing, true, 'the undo cancelled the review');
+  });
+
+  test('a placement that had to be approximated is still on screen afterwards', async () => {
+    await resetScene(page);
+    const out = await page.evaluate(async () => {
+      const k = window.kline, ed = k.editor;
+      const V = ed.scene.cursor.constructor;
+
+      // An asset of one part, and a proposal that adds a badly skewed one.
+      const root = ed.scene.add('empty', 'Rig');
+      const anchor = ed.scene.add('mesh', 'Anchor', ed.scene.get(ed.scene.active)?.mesh?.clone()
+        ?? null);
+      return { needsFixture: true, root: root.id, anchor: anchor.id, hasV: !!V };
+    });
+    assert.equal(out.needsFixture, true);
+
+    const result = await page.evaluate(async () => {
+      const k = window.kline, ed = k.editor;
+      // Build the fixture through the real application: a cube asset, then a
+      // hand-written proposal that introduces a non-uniformly scaled part.
+      ed.newScene();
+      k.run('add.cube');
+      const part = ed.scene.get(ed.scene.active);
+      const V = part.position.constructor;
+      const root = ed.scene.add('empty', 'Rig');
+      ed.scene.setParent(part.id, root.id);
+      part.partKey = 'anchor#1';
+      part.name = 'Anchor';
+      root.provenance = {
+        schema: 2, source: 'program', assetId: 'shear-1', generator: 'program',
+        generatorVersion: 1, params: {}, createdAt: Date.now(), revision: 0,
+        baseline: {
+          version: 2,
+          parts: [{
+            key: 'anchor#1', name: 'Anchor', position: [0, 0, 0], rotation: [0, 0, 0],
+            scale: [1, 1, 1], mesh: part.mesh.toJSON(), materialSlots: [], materials: [],
+            modifiers: [], animation: [], visible: true, locked: false,
+          }],
+        },
+      };
+
+      const proposed = [
+        {
+          key: 'anchor#1', name: 'Anchor', position: [0, 0, 0], rotation: [0, 0, 0],
+          scale: [1, 1, 1], mesh: part.mesh.toJSON(),
+        },
+        {
+          key: 'skew#1', name: 'Skew', position: [3, 1, 2], rotation: [0, 0, 0],
+          scale: [5, 1, 0.25], mesh: part.mesh.toJSON(),
+        },
+      ];
+      ed.selectObject(root.id);
+      const summary = ed.revision.preview(root, proposed, 'add a skewed mount');
+      if (!summary) return { ok: false, why: 'the preview was refused' };
+
+      // Your own rotated object, hung on the skewed part.
+      const skew = [...ed.scene.objects.values()].find((o) => o.partKey === 'skew#1');
+      k.run('add.cube');
+      const tag = ed.scene.get(ed.scene.active);
+      tag.position = new V(0.4, 0.2, 0.1);
+      tag.rotation = new V(0, 0, Math.PI / 4);
+      ed.scene.setParent(tag.id, skew.id);
+      const wanted = [...tag.worldMatrix(ed.scene).m];
+
+      ed.revision.reject();
+
+      const survivor = ed.scene.get(tag.id);
+      const got = survivor ? [...survivor.worldMatrix(ed.scene).m] : null;
+      const worst = got ? Math.max(...got.map((n, i) => Math.abs(n - wanted[i]))) : Infinity;
+
+      const panel = document.querySelector('.revision-panel');
+      const visible = !!panel && !panel.classList.contains('hidden');
+      return {
+        ok: true,
+        survived: !!survivor,
+        skewGone: !ed.scene.get(skew.id),
+        worst,
+        outcome: ed.revision.outcome,
+        notice: ed.notice,
+        visible,
+        panelText: panel ? panel.innerText : '',
+      };
+    });
+
+    assert.equal(result.ok, true, result.why);
+    assert.equal(result.skewGone, true, 'the proposed part survived a rejection');
+    assert.equal(result.survived, true, 'your work went with the part it hung on');
+    assert.ok(result.outcome, 'the finished revision left no record');
+    assert.equal(result.outcome.action, 'rejected');
+
+    if (result.worst > 1e-6) {
+      // It could not be placed exactly — so it has to say so, and the saying
+      // has to outlive the panel that Reject just closed.
+      assert.ok(result.outcome.warnings.length > 0,
+        `placement was off by ${result.worst} with nothing said about it`);
+      assert.equal(result.visible, true,
+        'the warning was recorded but the panel that would show it was hidden');
+      assert.match(result.panelText, /shear|as closely as/);
+      assert.ok(result.notice, 'no notice was raised');
+    } else {
+      assert.deepEqual(result.outcome.warnings, [],
+        'an exact placement was reported as an approximation');
+    }
+  });
+
   test('nothing logged an error to the console along the way', () => {
     assert.deepEqual(app.consoleErrors, [], `the app logged: ${app.consoleErrors.join(' | ')}`);
   });

@@ -205,7 +205,27 @@ export class SurfaceSampler {
  * Give every face of `target` that lacks coordinates the ones from the point
  * of `source` nearest each corner. Returns how many faces were filled in.
  */
-export function transferUV(source: Mesh, target: Mesh, onlyMissing = true): number {
+/**
+ * What a transfer had to do, for a caller that has to report on its quality.
+ *
+ * `reseamed` is the count of faces that could not take their corners'
+ * coordinates directly: those straddled a seam in the source and were
+ * re-sampled against a single source face instead, which is the right answer
+ * and is not the *same* answer. A caller claiming a lossless transfer needs to
+ * know it happened.
+ */
+export interface TransferStats {
+  /** Faces that were candidates for coordinates. */
+  considered: number;
+  /** Faces that got them. */
+  filled: number;
+  /** Faces re-sampled coherently because their corners straddled a seam. */
+  reseamed: number;
+}
+
+export function transferUV(
+  source: Mesh, target: Mesh, onlyMissing = true, stats?: TransferStats,
+): number {
   if (!source.hasUV) return 0;
   const sampler = new SurfaceSampler(source);
   if (sampler.empty) return 0;
@@ -220,6 +240,7 @@ export function transferUV(source: Mesh, target: Mesh, onlyMissing = true): numb
     if (onlyMissing && target.uvFor(f)) continue;
     const loop = target.faces[f];
     if (loop.length < 3) continue;
+    if (stats) stats.considered++;
     const points = loop.map((v) => target.positions[v]);
     const run: number[] = [];
     let ok = true;
@@ -248,6 +269,13 @@ export function transferUV(source: Mesh, target: Mesh, onlyMissing = true): numb
       if (coherent) {
         target.setUV(f, coherent);
         filled++;
+        // Counted only when it actually changed the answer. The test above is
+        // a wide-footprint test, not a seam test: a face legitimately covering
+        // most of the map trips it, and re-sampling such a face against the
+        // one source face it already sat on gives back what it had. Reporting
+        // that as a re-sample would make a lossless transfer look lossy, which
+        // is the same class of error as the reverse.
+        if (stats && changed(run, coherent)) stats.reseamed++;
         continue;
       }
     }
@@ -255,7 +283,15 @@ export function transferUV(source: Mesh, target: Mesh, onlyMissing = true): numb
     filled++;
   }
   if (filled) target.markDirty();
+  if (stats) stats.filled = filled;
   return filled;
+}
+
+/** Whether two coordinate runs differ by more than rounding. */
+function changed(a: number[], b: number[]): boolean {
+  if (a.length !== b.length) return true;
+  for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 1e-6) return true;
+  return false;
 }
 
 /**

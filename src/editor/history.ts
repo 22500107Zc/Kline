@@ -13,6 +13,17 @@ export interface EditorSnapshot {
   verts: number[];
   edges: number[];
   faces: number[];
+  /**
+   * Anything that will only be approximate once this state is restored.
+   *
+   * Some reconstructions cannot be exact — lifting a rotated object out from
+   * under a non-uniformly scaled parent has no exact answer in position,
+   * rotation and scale. When such a reconstruction is *stored* rather than
+   * applied, saying so at the time it was computed would warn about something
+   * that has not happened; the warning belongs to whoever restores it, so it
+   * travels here and is delivered then.
+   */
+  warnings?: string[];
 }
 
 /**
