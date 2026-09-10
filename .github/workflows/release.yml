@@ -298,6 +298,14 @@ jobs:
 
             Kline saves `.kline` files, and still opens the `.kiln` files
             written before the rename.
+
+            ### Built from
+
+            Commit `${{ github.sha }}`.
+
+            Three jobs write to this page and each one states the commit it
+            built from, so a release assembled out of two different runs says
+            so instead of looking like one thing.
           files: ${{ matrix.files }}
           # Each job asks only for its own platform's files, so an empty match
           # means that platform silently produced nothing — worth failing over.
